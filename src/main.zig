@@ -14,11 +14,12 @@ pub const Endpoint = zap.Endpoint;
 pub const Response = Endpoint.Response;
 pub const MiddlewareFn = Endpoint.MiddlewareFn;
 pub const StatusCode = zap.StatusCode;
+pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const middleware = .{
-    @import("./middleware/cors.zig").cors,
-    @import("./middleware/parse-body.zig").parseBody,
-    @import("./middleware/parse-query-params.zig").parseQueryParams,
+    .cors = @import("./middleware/cors.zig").cors,
+    .parseBody = @import("./middleware/parse-body.zig").parseBody,
+    .parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams,
 };
 
 pub const ServerOpts = struct {
@@ -29,7 +30,7 @@ pub const ServerOpts = struct {
 
 pub const EndpointDef = struct { []const u8, type };
 
-pub const PowersServer = struct {
+pub const JoltServer = struct {
     const Self = @This();
 
     alloc: Allocator,
@@ -163,7 +164,7 @@ pub fn main() !void {
     const auto = @import("./middleware/auto.zig").auto;
 
     const alloc = std.heap.raw_c_allocator;
-    var server: PowersServer = try PowersServer.init(alloc, .{
+    var server: JoltServer = try JoltServer.init(alloc, .{
         .port = 3333,
         .threads = 2,
         // This has to be 1 (workers are _additional_ processes).
@@ -175,6 +176,8 @@ pub fn main() !void {
         .{ "/example", @import("endpoints/example.zig") },
     };
     const tasks = [_]type{};
+
+    try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
     try server.run(&endpoints, &tasks, auto);
 }

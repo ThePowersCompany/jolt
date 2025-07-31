@@ -11,7 +11,6 @@ const EndpointDef = @import("main.zig").EndpointDef;
 const stringToEnum = std.meta.stringToEnum;
 const UnionRepr = @import("middleware/parse-body.zig").UnionRepr;
 
-const ts_file_name = "types.d.ts";
 const endpoint_fn_names = [_][]const u8{ "get", "post", "put", "patch", "delete" };
 
 fn strEqls(s1: []const u8, s2: []const u8) bool {
@@ -32,7 +31,11 @@ const EndpointData = struct {
     response: ?[]const u8 = null,
 };
 
-pub fn generateTypesFile(alloc: Allocator, endpoints: []const EndpointDef) !void {
+pub fn generateTypesFile(
+    alloc: Allocator,
+    ts_file_name: []const u8,
+    endpoints: []const EndpointDef,
+) !void {
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -44,7 +47,6 @@ pub fn generateTypesFile(alloc: Allocator, endpoints: []const EndpointDef) !void
         \\ // === DO NOT MODIFY ===
         \\ //
         \\ // Auto-generated type definitions
-        \\ // Regenerate the types with `zig build types`
         \\ //
         \\ // === DO NOT MODIFY ===
         \\

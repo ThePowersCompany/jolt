@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) !void {
     const types_step = b.step("types", "Builds typescript definitions");
     types_step.dependOn(&types_cmd.step);
 
-    _ = b.addModule("powers_server", .{
+    _ = b.addModule("jolt", .{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("src/main.zig"),
