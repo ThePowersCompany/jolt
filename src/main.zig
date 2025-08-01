@@ -14,10 +14,16 @@ pub const Endpoint = zap.Endpoint;
 pub const Response = Endpoint.Response;
 pub const MiddlewareFn = Endpoint.MiddlewareFn;
 pub const StatusCode = zap.StatusCode;
+pub const mustache = @import("zap/mustache.zig");
+pub const WebSockets = @import("zap/websockets.zig");
+pub const util = @import("zap/util.zig");
+pub const UnionRepr = @import("./middleware/parse-body.zig").UnionRepr;
+
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const middleware = .{
     .cors = @import("./middleware/cors.zig").cors,
+    ._cors = @import("./middleware/cors.zig")._cors,
     .parseBody = @import("./middleware/parse-body.zig").parseBody,
     .parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams,
 };
@@ -53,7 +59,7 @@ pub const JoltServer = struct {
         self.env_map.deinit();
     }
 
-    pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []type, auto: anytype) !void {
+    pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []const type, auto: anytype) !void {
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
         var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
