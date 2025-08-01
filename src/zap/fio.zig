@@ -580,3 +580,6 @@ pub const struct_tm = extern struct {
     tm_gmtoff: c_long,
     tm_zone: [*c]const u8,
 };
+
+pub extern fn fio_run_every(milliseconds: usize, repetitions: usize, task: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque, on_finish: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
+pub extern fn fio_defer(task: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, udata1: ?*anyopaque, udata2: ?*anyopaque) c_int;

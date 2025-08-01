@@ -3,9 +3,9 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const DateTime = @import("../utils/datetime.zig").DateTime;
 
-const c = @cImport({
-    @cInclude("fio.h");
-});
+const fio = @import("../zap/fio.zig");
+const fio_run_every = fio.fio_run_every;
+const fio_defer = fio.fio_defer;
 
 pub fn logFmt(alloc: Allocator, level: std.log.Level, comptime fmt: []const u8, args: anytype) !void {
     const now = try DateTime.now().toString(alloc);
@@ -100,7 +100,7 @@ pub fn scheduleTask(
 
     // Don't schedule the task loop if the user intends to run the task only once, immediately.
     if (!(run_immediately and run_count == 1)) {
-        const result = c.fio_run_every(
+        const result = fio_run_every(
             interval_millis,
             runs,
             wrap(T, task),
@@ -111,7 +111,7 @@ pub fn scheduleTask(
     }
 
     if (run_immediately) {
-        const result = c.fio_defer(wrap2(T, task), t, null);
+        const result = fio_defer(wrap2(T, task), t, null);
         if (result == -1) return error.FailedToScheduleTask;
     }
 }
@@ -155,7 +155,7 @@ pub fn scheduleSimpleTask(
 
     // Don't schedule the task loop if the user intends to run the task only once, immediately.
     if (!(run_immediately and run_count == 1)) {
-        const result = c.fio_run_every(
+        const result = fio_run_every(
             interval_millis,
             runs,
             wrapNoContext(task),
@@ -166,7 +166,7 @@ pub fn scheduleSimpleTask(
     }
 
     if (run_immediately) {
-        const result = c.fio_defer(wrap2NoContext(task), null, null);
+        const result = fio_defer(wrap2NoContext(task), null, null);
         if (result == -1) return error.FailedToScheduleTask;
     }
 }
