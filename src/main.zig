@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const dotenv = @import("dotenv");
 const zap = @import("./zap/zap.zig");
 const auth = @import("middleware/auth.zig");
 const RequestHandler = Endpoint.RequestHandler;
@@ -18,6 +17,7 @@ pub const mustache = @import("zap/mustache.zig");
 pub const WebSockets = @import("zap/websockets.zig");
 pub const util = @import("zap/util.zig");
 pub const UnionRepr = @import("./middleware/parse-body.zig").UnionRepr;
+pub const task_utils = @import("./utils/task.zig");
 
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
@@ -44,10 +44,6 @@ pub const JoltServer = struct {
     env_map: std.process.EnvMap,
 
     pub fn init(alloc: Allocator, opts: ServerOpts) !Self {
-        dotenv.loadFrom(alloc, ".env", .{}) catch {
-            // Ignore if .env file doesn't exist
-        };
-
         return .{
             .alloc = alloc,
             .opts = opts,
@@ -181,7 +177,9 @@ pub fn main() !void {
     const endpoints = [_]EndpointDef{
         .{ "/example", @import("endpoints/example.zig") },
     };
-    const tasks = [_]type{};
+    const tasks = [_]type{
+        @import("tasks/example_task.zig"),
+    };
 
     try generateTypesFile(alloc, "types.d.ts", &endpoints);
 

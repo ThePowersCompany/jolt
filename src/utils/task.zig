@@ -1,10 +1,36 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const DateTime = @import("../utils/datetime.zig").DateTime;
 
 const c = @cImport({
     @cInclude("fio.h");
 });
+
+pub fn logFmt(alloc: Allocator, level: std.log.Level, comptime fmt: []const u8, args: anytype) !void {
+    const now = try DateTime.now().toString(alloc);
+    defer alloc.free(now);
+
+    const foo = .{now} ++ args;
+    switch (level) {
+        .err => std.log.err("[{s}] " ++ fmt, foo),
+        .warn => std.log.warn("[{s}] " ++ fmt, foo),
+        .info => std.log.info("[{s}] " ++ fmt, foo),
+        .debug => std.log.debug("[{s}] " ++ fmt, foo),
+    }
+}
+
+pub fn log(alloc: Allocator, level: std.log.Level, comptime str: []const u8) !void {
+    const now = try DateTime.now().toString(alloc);
+    defer alloc.free(now);
+
+    switch (level) {
+        .err => std.log.err("[{s}] " ++ str, .{now}),
+        .warn => std.log.warn("[{s}] " ++ str, .{now}),
+        .info => std.log.info("[{s}] " ++ str, .{now}),
+        .debug => std.log.debug("[{s}] " ++ str, .{now}),
+    }
+}
 
 pub fn cast(comptime T: type, ptr: ?*anyopaque) T {
     return @ptrCast(@alignCast(ptr));

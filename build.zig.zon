@@ -8,10 +8,5 @@
     },
     .version = "0.0.0",
     .fingerprint = 0xa874d5e8f2c78cdd,
-    .dependencies = .{
-        .dotenv = .{
-            .url = "git+https://github.com/dying-will-bullet/dotenv?ref=master#091402db3829056cc5d32d7fe88c7778de09c2ae",
-            .hash = "dotenv-0.2.1-AAAAADB4AACfBkkMBV8ey_5UYYF5zeLKMa7OJhc-0mdu",
-        },
-    },
+    .dependencies = .{},
 }

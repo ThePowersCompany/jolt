@@ -1,9 +1,7 @@
 const std = @import("std");
 const build_facilio = @import("facil.io/build.zig").build_facilio;
 
-var deps = [_]std.Build.Module.Import{
-    .{ .name = "dotenv", .module = undefined },
-};
+var deps = [_]std.Build.Module.Import{};
 
 fn define_deps(
     b: *std.Build,
