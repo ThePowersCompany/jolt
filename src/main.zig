@@ -86,34 +86,41 @@ pub const JoltServer = struct {
                 }
             }
 
-            // Automatic endpoint discovery
-            var handlers: Endpoint.RequestHandlers = .{};
-            if (std.meta.hasFn(typ, "get")) {
-                handlers.getHandler = try RequestHandler.init(auto, @field(typ, "get"));
-            }
-            if (std.meta.hasFn(typ, "post")) {
-                handlers.postHandler = try RequestHandler.init(auto, @field(typ, "post"));
-            }
-            if (std.meta.hasFn(typ, "put")) {
-                handlers.putHandler = try RequestHandler.init(auto, @field(typ, "put"));
-            }
-            if (std.meta.hasFn(typ, "patch")) {
-                handlers.patchHandler = try RequestHandler.init(auto, @field(typ, "patch"));
-            }
-            if (std.meta.hasFn(typ, "delete")) {
-                handlers.deleteHandler = try RequestHandler.init(auto, @field(typ, "delete"));
-            }
-            if (std.meta.hasFn(typ, "options")) {
-                handlers.optionsHandler = try RequestHandler.init(auto, @field(typ, "options"));
-            } else if (!@hasField(typ, "options") or @field(typ, "options")) {
-                // Default `options` handler with CORS
-                handlers.optionsHandler = try RequestHandler.init(auto, Endpoint.defaultOptionsHandler);
-            }
+            if (std.meta.hasFn(typ, "init") and std.meta.hasFn(typ, "deinit")) {
+                // Legacy init/deinit
+                try typ.init(thread_safe_alloc.allocator(), &listener, path);
+                try deinitFns.append(typ.deinit);
+            } else {
 
-            const error_handler: Endpoint.ErrorHandlerFn = if (std.meta.hasFn(typ, "sendErrorResponse")) @field(typ, "sendErrorResponse") else Endpoint.defaultErrorHandler;
+                // Automatic endpoint discovery
+                var handlers: Endpoint.RequestHandlers = .{};
+                if (std.meta.hasFn(typ, "get")) {
+                    handlers.getHandler = try RequestHandler.init(auto, @field(typ, "get"));
+                }
+                if (std.meta.hasFn(typ, "post")) {
+                    handlers.postHandler = try RequestHandler.init(auto, @field(typ, "post"));
+                }
+                if (std.meta.hasFn(typ, "put")) {
+                    handlers.putHandler = try RequestHandler.init(auto, @field(typ, "put"));
+                }
+                if (std.meta.hasFn(typ, "patch")) {
+                    handlers.patchHandler = try RequestHandler.init(auto, @field(typ, "patch"));
+                }
+                if (std.meta.hasFn(typ, "delete")) {
+                    handlers.deleteHandler = try RequestHandler.init(auto, @field(typ, "delete"));
+                }
+                if (std.meta.hasFn(typ, "options")) {
+                    handlers.optionsHandler = try RequestHandler.init(auto, @field(typ, "options"));
+                } else if (!@hasField(typ, "options") or @field(typ, "options")) {
+                    // Default `options` handler with CORS
+                    handlers.optionsHandler = try RequestHandler.init(auto, Endpoint.defaultOptionsHandler);
+                }
 
-            const ep = Endpoint.Endpoint.init(path, error_handler, handlers);
-            try listener.register(&ep);
+                const error_handler: Endpoint.ErrorHandlerFn = if (std.meta.hasFn(typ, "sendErrorResponse")) @field(typ, "sendErrorResponse") else Endpoint.defaultErrorHandler;
+
+                const ep = Endpoint.Endpoint.init(path, error_handler, handlers);
+                try listener.register(&ep);
+            }
         }
 
         try listener.listen();
