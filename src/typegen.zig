@@ -746,7 +746,7 @@ pub fn main() !void {
         var arena = ArenaAllocator.init(gpa.allocator());
         defer arena.deinit();
 
-        try generateTypesFile(arena.allocator(), &(@import("main.zig").endpoints));
+        try generateTypesFile(arena.allocator(), "types.d.ts", &(@import("main.zig").endpoints));
     }
 
     const memory_leak = gpa.detectLeaks();
