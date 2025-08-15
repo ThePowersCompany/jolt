@@ -15,6 +15,7 @@ pub const database = @import("db/database.zig");
 pub const migrateDatabase = db_migrations.migrateDatabase;
 pub const newDatabaseMigration = db_migrations.newDatabaseMigration;
 pub const resetDatabase = db_migrations.resetDatabase;
+pub const DbInfo = db_migrations.DbInfo;
 pub const DbConnection = pg.Conn;
 pub const DbResult = pg.Result;
 pub const DbRow = pg.Row;

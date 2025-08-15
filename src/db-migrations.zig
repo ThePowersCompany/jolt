@@ -103,7 +103,10 @@ pub fn newDatabaseMigration(alloc: Allocator, file_name: []const u8, info: DbInf
 
 pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
     const dir = try loadMigrationDir(alloc, info.migrations_dir);
-    defer alloc.free(dir.entries);
+    defer {
+        for (dir.entries) |e| alloc.free(e.name);
+        defer alloc.free(dir.entries);
+    }
 
     try initDbConnectionPool(alloc, info);
     defer db.deinit();
@@ -136,8 +139,6 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
         .{ .allocator = alloc },
     ) catch |err| return db.logError(err, conn);
 
-    // TODO: Why did this stop working suddenly?
-
     try _migrate(alloc, conn, dir, info);
 }
 
@@ -145,8 +146,7 @@ fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
     try db.init(alloc, .{
         .host = info.host,
         .port = info.port,
-        // Connect to template db because we're potentially destroying info.database.
-        .database = "template1",
+        .database = info.database,
         .username = info.username,
         .password = info.password,
         .pool_size = 10,
