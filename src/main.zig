@@ -176,11 +176,6 @@ fn createListener(alloc: Allocator, port: u16) !Endpoint.Listener {
     return Endpoint.Listener.init(alloc, settings);
 }
 
-test {
-    // Required for `zig build test` to find all tests in src
-    std.testing.refAllDecls(@This());
-}
-
 pub fn main() !void {
     // Example auto middleware
     const auto = @import("./middleware/auto.zig").auto;
@@ -204,4 +199,9 @@ pub fn main() !void {
     try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
     try server.run(&endpoints, &tasks, auto);
+}
+
+test {
+    // Required for `zig build test` to find all tests in src
+    std.testing.refAllDecls(@This());
 }
