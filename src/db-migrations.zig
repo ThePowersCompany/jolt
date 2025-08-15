@@ -181,10 +181,10 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
     const migration_entries = try queryMigrationsTable(alloc, conn, info);
     defer alloc.free(migration_entries);
 
-    std.log.err("Found {} migrations already applied", .{migration_entries.len});
+    std.debug.print("Found {} migrations already applied\n", .{migration_entries.len});
 
     for (dir.entries) |dir_entry| {
-        std.log.err("Checking {s}...", .{dir_entry.name});
+        std.debug.print("Checking {s}...\n", .{dir_entry.name});
 
         // Construct path e.g. 20250618211026_foo_bar/migration.sql
         const file_path = try std.fmt.allocPrint(
@@ -201,18 +201,18 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
         // Insert new row in migrations table
         const checksum = hash(sql);
         if (findMigrationEntry(migration_entries, dir_entry.name)) |migration| {
-            std.log.err("Verifying checksum...", .{});
+            std.debug.print("Verifying checksum...\n", .{});
             if (!strEql(migration.checksum, &checksum)) {
-                std.log.err("Checksum mismatch for {s}!", .{migration.checksum});
+                std.debug.print("Checksum mismatch for {s}!\n", .{migration.checksum});
                 return error.ChecksumMismatch;
             }
         } else {
             // New migration to apply
-            std.log.err("New migration found, applying...", .{});
+            std.debug.print("New migration found, applying...\n", .{});
             try executeSql(alloc, conn, sql);
             try insertMigrationRow(alloc, conn, info.migrations_table, dir_entry.name, checksum);
         }
-        std.log.err("Done.", .{});
+        std.debug.print("Done.\n\n", .{});
     }
 }
 
@@ -255,7 +255,6 @@ fn executeSql(alloc: Allocator, conn: *pg.Conn, sql: []const u8) !void {
         .{},
         .{ .allocator = alloc },
     ) catch |err| return db.logError(err, conn);
-    std.debug.print("Successfully executed SQL:\n{s}\n\n", .{sql});
 }
 
 fn queryMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) ![]MigrationEntry {
