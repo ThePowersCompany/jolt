@@ -41,17 +41,17 @@ fn findMigrationDir(path: []const u8) !Dir {
         return std.fs.openDirAbsolute(path, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) {
                 try std.fs.makeDirAbsolute(path);
-                return try std.fs.openDirAbsolute(path, .{});
+                return try std.fs.openDirAbsolute(path, .{ .iterate = true });
             }
             return err;
         };
     }
 
     const cwd = std.fs.cwd();
-    return cwd.openDir(path, .{}) catch |err| {
+    return cwd.openDir(path, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
             try cwd.makeDir(path);
-            return try cwd.openDir(path, .{});
+            return try cwd.openDir(path, .{ .iterate = true });
         }
         return err;
     };
