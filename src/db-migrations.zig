@@ -9,6 +9,8 @@ const Entry = Dir.Entry;
 const pg = @import("pg");
 const db = @import("db/database.zig");
 
+const DateTime = @import("utils/time.zig").DateTime;
+
 const UUID = @import("utils/uuid.zig").UUID;
 
 // NOTE: Our largest migration file atm is 9.3k, this is fine I guess?
@@ -79,15 +81,16 @@ fn loadMigrationDir(alloc: Allocator, path: []const u8) !MigrationDir {
     };
 }
 
-fn compareEntries(context: void, a: std.fs.Dir.Entry, b: std.fs.Dir.Entry) bool {
-    _ = context;
+fn compareEntries(_: void, a: std.fs.Dir.Entry, b: std.fs.Dir.Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
 pub fn migrateDatabase(alloc: Allocator, info: DbInfo) !void {
     const dir = try loadMigrationDir(alloc, info.migrations_dir);
-    defer for (dir.entries) |entry| alloc.free(entry.name);
-    defer alloc.free(dir.entries);
+    defer {
+        for (dir.entries) |e| alloc.free(e.name);
+        defer alloc.free(dir.entries);
+    }
 
     const conn = try db.acquireConnection();
     defer conn.release();
@@ -95,10 +98,31 @@ pub fn migrateDatabase(alloc: Allocator, info: DbInfo) !void {
 }
 
 pub fn newDatabaseMigration(alloc: Allocator, file_name: []const u8, info: DbInfo) !void {
-    _ = file_name;
     const dir = try loadMigrationDir(alloc, info.migrations_dir);
-    defer for (dir.entries) |entry| alloc.free(entry.name);
-    defer alloc.free(dir.entries);
+    defer {
+        for (dir.entries) |e| alloc.free(e.name);
+        defer alloc.free(dir.entries);
+    }
+
+    // Construct path e.g. 20250618211026_foo_bar/migration.sql
+    const now_str = try DateTime.now().formatAlloc(alloc, "YYYYMMDDHHmmss");
+    defer alloc.free(now_str);
+
+    const migration_dir_name = try std.fmt.allocPrint(alloc, "{s}_{s}", .{ now_str, file_name });
+    defer alloc.free(migration_dir_name);
+
+    try dir.dir.makeDir(migration_dir_name);
+
+    const file_path = try std.fmt.allocPrint(
+        alloc,
+        "{s}{s}migration.sql",
+        .{ migration_dir_name, std.fs.path.sep_str },
+    );
+    defer alloc.free(file_path);
+
+    _ = try dir.dir.createFile(file_path, .{});
+
+    std.log.info("Created file: {s}{s}{s}", .{ info.migrations_dir, std.fs.path.sep_str, file_path });
 }
 
 pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
@@ -149,7 +173,7 @@ fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
         .database = info.database,
         .username = info.username,
         .password = info.password,
-        .pool_size = 10,
+        .pool_size = 1,
     });
 }
 
@@ -256,17 +280,4 @@ fn findMigrationEntry(entries: []MigrationEntry, file_name: []const u8) ?Migrati
         if (strEql(migration.migration_name, file_name)) return migration;
     }
     return null;
-}
-
-test {
-    const alloc = std.heap.raw_c_allocator;
-    try resetDatabase(alloc, .{
-        .database = "postgres",
-        .host = "localhost",
-        .username = "postgres",
-        .password = "password",
-        // .migrations_dir = ".migrations",
-        .migrations_dir = "/home/avahe/programming/powers/monorepo/db/prisma/migrations",
-        .port = 5432,
-    });
 }
