@@ -1,6 +1,34 @@
 const std = @import("std");
 const build_facilio = @import("facil.io/build.zig").build_facilio;
 
+const DepType = struct {
+    name: []const u8,
+    module: ?*std.Build.Module = null,
+};
+
+var deps = [_]DepType{
+    .{ .name = "pg" },
+};
+
+fn define_deps(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    for (&deps) |*dep_type| {
+        dep_type.module = b.dependency(dep_type.name, .{
+            .target = target,
+            .optimize = optimize,
+        }).module(dep_type.name);
+    }
+}
+
+fn import_deps(module: *std.Build.Module) void {
+    for (deps) |dep_type| {
+        module.addImport(dep_type.name, dep_type.module.?);
+    }
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -16,6 +44,8 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    define_deps(b, target, optimize);
+
     const facilio = try build_facilio("facil.io", b, target, optimize, true);
 
     const jolt_module = b.addModule("jolt", .{
@@ -25,12 +55,16 @@ pub fn build(b: *std.Build) !void {
     });
     jolt_module.linkLibrary(facilio);
 
+    import_deps(jolt_module);
+
     const types_exe = b.addExecutable(.{
         .name = "types",
         .root_source_file = b.path("src/typegen.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    import_deps(types_exe.root_module);
 
     const types_cmd = b.addRunArtifact(types_exe);
 
@@ -48,6 +82,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+
+    import_deps(unit_tests.root_module);
 
     unit_tests.addIncludePath(.{
         .src_path = .{

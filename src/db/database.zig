@@ -11,6 +11,8 @@ pub const Self = @This();
 
 var pool: *Pool = undefined;
 
+/// Optimize read_buffer and result_state_size for your use case,
+/// to prevent allocations during queries.
 pub const DbOptions = struct {
     host: []const u8,
     port: u16,
@@ -19,6 +21,8 @@ pub const DbOptions = struct {
     password: []const u8,
     timeout: u32 = 10_000,
     pool_size: u16 = 10,
+    read_buffer: ?u16 = null,
+    result_state_size: u16 = 32,
 };
 
 pub fn init(alloc: std.mem.Allocator, opts: DbOptions) !void {
@@ -27,9 +31,8 @@ pub fn init(alloc: std.mem.Allocator, opts: DbOptions) !void {
         .connect = .{
             .host = opts.host,
             .port = opts.port,
-            // TODO: Optimize these for our use case to prevent allocations during queries
-            // read_buffer: ?u16 = null,
-            // result_state_size: u16 = 32,
+            .read_buffer = opts.read_buffer,
+            .result_state_size = opts.result_state_size,
         },
         .auth = .{
             .username = opts.username,
