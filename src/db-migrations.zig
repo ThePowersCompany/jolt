@@ -92,6 +92,9 @@ pub fn migrateDatabase(alloc: Allocator, info: DbInfo) !void {
         defer alloc.free(dir.entries);
     }
 
+    try initDbConnectionPool(alloc, info);
+    defer db.deinit();
+
     const conn = try db.acquireConnection();
     defer conn.release();
     try _migrate(alloc, conn, dir, info);
@@ -179,7 +182,14 @@ fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
 
 fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !void {
     const migration_entries = try queryMigrationsTable(alloc, conn, info);
-    defer alloc.free(migration_entries);
+    defer {
+        for (migration_entries) |entry| {
+            alloc.free(entry.id);
+            alloc.free(entry.checksum);
+            alloc.free(entry.migration_name);
+        }
+        alloc.free(migration_entries);
+    }
 
     std.debug.print("Found {} migrations already applied\n", .{migration_entries.len});
 
@@ -201,14 +211,14 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
         // Insert new row in migrations table
         const checksum = hash(sql);
         if (findMigrationEntry(migration_entries, dir_entry.name)) |migration| {
-            std.debug.print("Verifying checksum...\n", .{});
+            std.debug.print("Verifying checksum...", .{});
             if (!strEql(migration.checksum, &checksum)) {
-                std.debug.print("Checksum mismatch for {s}!\n", .{migration.checksum});
+                std.debug.print("\nChecksum mismatch for {s}!\n", .{migration.checksum});
                 return error.ChecksumMismatch;
             }
         } else {
             // New migration to apply
-            std.debug.print("New migration found, applying...\n", .{});
+            std.debug.print("New migration found, applying...", .{});
             try executeSql(alloc, conn, sql);
             try insertMigrationRow(alloc, conn, info.migrations_table, dir_entry.name, checksum);
         }
@@ -258,7 +268,11 @@ fn executeSql(alloc: Allocator, conn: *pg.Conn, sql: []const u8) !void {
 }
 
 fn queryMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) ![]MigrationEntry {
-    const sql = try std.fmt.allocPrint(alloc, "SELECT * FROM {s};", .{info.migrations_table});
+    const sql = try std.fmt.allocPrint(
+        alloc,
+        "SELECT id, checksum, migration_name FROM {s};",
+        .{info.migrations_table},
+    );
     defer alloc.free(sql);
 
     var result = conn.queryOpts(sql, .{}, .{ .allocator = alloc }) catch |err| return db.logError(err, conn);
