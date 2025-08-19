@@ -141,12 +141,13 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
     const conn: *pg.Conn = try db.acquireConnection();
     defer conn.release();
 
-    _ = conn.execOpts(
+    const sql = try std.fmt.allocPrint(
+        alloc,
         \\ DROP SCHEMA if exists public CASCADE;
         \\ CREATE SCHEMA public;
-        \\ GRANT ALL ON SCHEMA public TO postgres;
+        \\ GRANT ALL ON SCHEMA public TO {s};
         \\ GRANT ALL ON SCHEMA public TO public;
-        \\ CREATE TABLE IF NOT EXISTS public._prisma_migrations
+        \\ CREATE TABLE IF NOT EXISTS public.{s}
         \\ (
         \\   id character varying(36) COLLATE pg_catalog."default" NOT NULL,
         \\   checksum character varying(64) COLLATE pg_catalog."default" NOT NULL,
@@ -156,15 +157,22 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
         \\   rolled_back_at timestamp with time zone,
         \\   started_at timestamp with time zone NOT NULL DEFAULT now(),
         \\   applied_steps_count integer NOT NULL DEFAULT 0,
-        \\   CONSTRAINT _prisma_migrations_pkey PRIMARY KEY (id)
+        \\   CONSTRAINT {s}_pkey PRIMARY KEY (id)
         \\ )
         \\ TABLESPACE pg_default;
-        \\ ALTER TABLE IF EXISTS public._prisma_migrations
-        \\     OWNER to postgres;
+        \\ ALTER TABLE IF EXISTS public.{s}
+        \\     OWNER to {s};
     ,
-        .{},
-        .{ .allocator = alloc },
-    ) catch |err| return db.logError(err, conn);
+        .{
+            info.username,
+            info.migrations_table,
+            info.migrations_table,
+            info.migrations_table,
+            info.username,
+        },
+    );
+
+    _ = conn.execOpts(sql, .{}, .{ .allocator = alloc }) catch |err| return db.logError(err, conn);
 
     try _migrate(alloc, conn, dir, info);
 }
