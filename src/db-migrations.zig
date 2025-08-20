@@ -13,9 +13,6 @@ const DateTime = @import("utils/time.zig").DateTime;
 
 const UUID = @import("utils/uuid.zig").UUID;
 
-// NOTE: Our largest migration file atm is 9.3k, this is fine I guess?
-const max_migration_file_size = 4096 * 4;
-
 pub const DbInfo = struct {
     host: []const u8,
     port: u16,
@@ -171,6 +168,7 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
             info.username,
         },
     );
+    defer alloc.free(sql);
 
     _ = conn.execOpts(sql, .{}, .{ .allocator = alloc }) catch |err| return db.logError(err, conn);
 
@@ -213,8 +211,12 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
         defer alloc.free(file_path);
 
         const file = try dir.dir.openFile(file_path, .{});
-        const sql = try file.readToEndAlloc(alloc, max_migration_file_size);
+        defer file.close();
+
+        const sql = try alloc.alloc(u8, (try file.stat()).size);
         defer alloc.free(sql);
+
+        _ = try std.fs.File.reader(file).readAll(sql);
 
         // Insert new row in migrations table
         const checksum = hash(sql);
