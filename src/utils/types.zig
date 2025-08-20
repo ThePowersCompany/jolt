@@ -9,6 +9,14 @@ pub fn Optional(comptime T: type) type {
 
         const Self = @This();
 
+        /// Returns the value if it is present in this Optional, otherwise returns null.
+        pub fn get(self: Self) ?T {
+            if (self == .value) {
+                return self.value;
+            }
+            return null;
+        }
+
         pub fn jsonParse(
             allocator: std.mem.Allocator,
             source: anytype,
@@ -51,6 +59,10 @@ test "Optional" {
     defer parsed.deinit();
 
     const foo = parsed.value;
+
+    if (foo.foo.get()) |v| {
+        try std.testing.expect(v == 123);
+    }
 
     try std.testing.expect(foo.foo.value == 123);
     try std.testing.expect(foo.bar.value == null);
