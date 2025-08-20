@@ -17,6 +17,10 @@ fn strEqls(s1: []const u8, s2: []const u8) bool {
     return std.mem.eql(u8, s1, s2);
 }
 
+fn startsWith(haystack: []const u8, needle: []const u8) bool {
+    return std.mem.startsWith(u8, haystack, needle);
+}
+
 const Method = enum {
     get,
     post,
@@ -520,6 +524,21 @@ const TypeGenerator = struct {
     }
 
     fn parseUnion(self: *Self, U: Type.Union, T: type) ![]const u8 {
+        var res = ArrayList(u8).init(self.arena_alloc);
+
+        // Special case for Optional(T)
+        if (startsWith(shortTypeName(@typeName(T)), "Optional(")) {
+            inline for (U.fields) |f| {
+                if (strEqls(f.name, "value")) {
+                    const parsed_res = try self.extractIdentifier(f.type);
+                    try res.appendSlice(parsed_res.parsed);
+
+                    return res.toOwnedSlice();
+                }
+            }
+            return error.InvalidOptionalDeclaration;
+        }
+
         var union_repr: ?UnionRepr = null;
         inline for (U.decls) |decl| {
             if (comptime strEqls(decl.name, "_repr")) {
@@ -527,8 +546,6 @@ const TypeGenerator = struct {
                 break;
             }
         }
-
-        var res = ArrayList(u8).init(self.arena_alloc);
 
         if (union_repr) |repr| {
             switch (repr) {
@@ -552,7 +569,11 @@ const TypeGenerator = struct {
                             try res.appendSlice(try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
-                                .{ f.name, if (parsed_res.optional or f.defaultValue() != null) "?" else "", parsed_res.parsed },
+                                .{
+                                    f.name,
+                                    if (parsed_res.optional or f.defaultValue() != null) "?" else "",
+                                    parsed_res.parsed,
+                                },
                             ));
                         }
                         try res.appendSlice(" }");
@@ -580,7 +601,11 @@ const TypeGenerator = struct {
                             try res.appendSlice(try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
-                                .{ f.name, if (parsed_res.optional or f.defaultValue() != null) "?" else "", parsed_res.parsed },
+                                .{
+                                    f.name,
+                                    if (parsed_res.optional or f.defaultValue() != null) "?" else "",
+                                    parsed_res.parsed,
+                                },
                             ));
                         }
                         try res.appendSlice(" }");

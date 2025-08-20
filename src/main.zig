@@ -33,6 +33,8 @@ pub const util = @import("zap/util.zig");
 pub const UnionRepr = @import("./middleware/parse-body.zig").UnionRepr;
 pub const task_utils = @import("./utils/task.zig");
 
+pub const types = @import("./utils/types.zig");
+
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const middleware = .{
