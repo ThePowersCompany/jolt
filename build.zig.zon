@@ -8,5 +8,10 @@
     },
     .version = "0.0.0",
     .fingerprint = 0xa874d5e8f2c78cdd,
-    .dependencies = .{},
+    .dependencies = .{
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#d47987249e2ead39571dfd1d6330ea6903a95c52",
+            .hash = "pg-0.0.0-Wp_7gfbQBQDLKhWpwYy2KTE4KabTKVobdy86TaQbDAyW",
+        },
+    },
 }

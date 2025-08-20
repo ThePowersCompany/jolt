@@ -8,6 +8,20 @@ const RequestHandler = Endpoint.RequestHandler;
 
 const getEnvOrPanic = Endpoint.EnabledContext.getEnvOrPanic;
 
+const db_migrations = @import("db-migrations.zig");
+const pg = @import("pg");
+
+pub const database = @import("db/database.zig");
+pub const migrateDatabase = db_migrations.migrateDatabase;
+pub const newDatabaseMigration = db_migrations.newDatabaseMigration;
+pub const resetDatabase = db_migrations.resetDatabase;
+pub const DbInfo = db_migrations.DbInfo;
+pub const DbConnection = pg.Conn;
+pub const DbResult = pg.Result;
+pub const DbRow = pg.Row;
+pub const DbStatement = pg.Stmt;
+pub const DbQueryRow = pg.QueryRow;
+
 pub const Request = zap.Request;
 pub const Endpoint = zap.Endpoint;
 pub const Response = Endpoint.Response;
@@ -163,11 +177,6 @@ fn createListener(alloc: Allocator, port: u16) !Endpoint.Listener {
     return Endpoint.Listener.init(alloc, settings);
 }
 
-test {
-    // Required for `zig build test` to find all tests in src
-    std.testing.refAllDecls(@This());
-}
-
 pub fn main() !void {
     // Example auto middleware
     const auto = @import("./middleware/auto.zig").auto;
@@ -191,4 +200,9 @@ pub fn main() !void {
     try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
     try server.run(&endpoints, &tasks, auto);
+}
+
+test {
+    // Required for `zig build test` to find all tests in src
+    std.testing.refAllDecls(@This());
 }
