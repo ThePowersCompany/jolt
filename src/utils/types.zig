@@ -37,8 +37,7 @@ pub fn Optional(comptime T: type) type {
             source: anytype,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(source.*))!Self {
-            const val = try json.innerParse(?T, allocator, source, options);
-            if (val) |v| return .{ .value = v } else return .{ .value = null };
+            return .{ .value = try json.innerParse(T, allocator, source, options) };
         }
 
         pub fn jsonParseFromValue(
@@ -46,10 +45,7 @@ pub fn Optional(comptime T: type) type {
             source: json.Value,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(allocator))!Self {
-            return switch (source) {
-                .null => .{ .value = null },
-                else => .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) },
-            };
+            return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
         }
     };
 }
