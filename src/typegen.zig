@@ -155,7 +155,10 @@ const TypeGenerator = struct {
     }
 
     fn shortTypeName(type_name: []const u8) []const u8 {
-        var iter = std.mem.splitBackwardsScalar(u8, type_name, '.');
+        var generic_iter = std.mem.splitScalar(u8, type_name, '(');
+        const pre_generic = generic_iter.first();
+
+        var iter = std.mem.splitBackwardsScalar(u8, pre_generic, '.');
         return iter.first();
     }
 
@@ -527,7 +530,7 @@ const TypeGenerator = struct {
         var res = ArrayList(u8).init(self.arena_alloc);
 
         // Special case for Optional(T)
-        if (startsWith(shortTypeName(@typeName(T)), "Optional(")) {
+        if (strEqls(shortTypeName(@typeName(T)), "Optional")) {
             inline for (U.fields) |f| {
                 if (strEqls(f.name, "value")) {
                     const parsed_res = try self.extractIdentifier(f.type);
@@ -761,21 +764,33 @@ const TypeGenerator = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{
-        .thread_safe = true,
-        .stack_trace_frames = 100,
-    }){};
+test "Nested Optionals" {
+    const alloc = std.testing.allocator;
 
-    {
-        var arena = ArenaAllocator.init(gpa.allocator());
-        defer arena.deinit();
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
 
-        try generateTypesFile(arena.allocator(), "types.d.ts", &(@import("main.zig").endpoints));
-    }
+    const Optional = @import("utils/types.zig").Optional;
 
-    const memory_leak = gpa.detectLeaks();
-    if (memory_leak) {
-        std.log.err("Memory leak!\n", .{});
-    }
+    const Foo = struct {
+        enabled: Optional(bool) = .not_provided,
+        email: Optional(struct {
+            enabled: Optional(bool) = .not_provided,
+            threshold: Optional(f64) = .not_provided,
+        }) = .not_provided,
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractIdentifier(Foo);
+    try std.testing.expectEqualStrings(parse_result.parsed,
+        \\{
+        \\enabled?: boolean
+        \\email?: {
+        \\enabled?: boolean
+        \\threshold?: number
+        \\}
+        \\}
+    );
 }
