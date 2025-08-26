@@ -48,7 +48,7 @@ pub fn Response(comptime ReturnType: type) type {
         body: ?ReturnType = null,
         err: ?[]const u8 = null,
         content_type: ?[]const u8 = null,
-        opts: std.json.StringifyOptions = .{},
+        opts: std.json.Stringify.Options = .{},
         status: ?StatusCode = null,
         finished: bool = false, // supports WebSockets
     };
@@ -265,7 +265,7 @@ pub const Listener = struct {
     var arena: ArenaAllocator = undefined;
 
     /// Internal static structs of member endpoints
-    var endpoints: std.ArrayList(*const Endpoint) = undefined;
+    var endpoints: std.ArrayList(*const Endpoint) = .empty;
 
     threadlocal var arenas: []ArenaAllocator = &.{};
 
@@ -275,8 +275,6 @@ pub const Listener = struct {
     pub fn init(a: Allocator, l: ListenerSettings) Self {
         arena = ArenaAllocator.init(a);
         alloc = arena.allocator();
-
-        endpoints = std.ArrayList(*const Endpoint).init(a);
 
         // take copy of listener settings so it's mutable
         var ls = l;
@@ -297,7 +295,7 @@ pub const Listener = struct {
     /// Registered endpoints will not be de-initialized automatically; just removed
     /// from the internal map.
     pub fn deinit(_: *Self) void {
-        endpoints.deinit();
+        endpoints.deinit(alloc);
         arena.deinit();
     }
 
@@ -318,7 +316,7 @@ pub const Listener = struct {
                 return EndpointListenerError.EndpointPathShadowError;
             }
         }
-        try endpoints.append(endpoint);
+        try endpoints.append(alloc, endpoint);
     }
 
     fn delegateToEndpoint(r: Request, comptime f: *const fn (*const Endpoint, *ArenaAllocator, Request) void) void {

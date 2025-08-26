@@ -95,11 +95,15 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const types_exe = b.addExecutable(.{
-        .name = "types",
+    const types_module = b.addModule("types", .{
         .root_source_file = b.path("src/typegen.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const types_exe = b.addExecutable(.{
+        .name = "types",
+        .root_module = types_module,
     });
 
     import_deps(types_exe.root_module);
@@ -113,12 +117,15 @@ pub fn build(b: *std.Build) !void {
     const types_step = b.step("types", "Builds typescript definitions");
     types_step.dependOn(&types_cmd.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const unit_tests = b.addTest(.{
+    const unit_tests_module = b.addModule("test", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const unit_tests = b.addTest(.{
+        .name = "test",
+        .root_module = unit_tests_module,
     });
 
     import_deps(unit_tests.root_module);
