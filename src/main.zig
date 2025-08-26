@@ -78,10 +78,11 @@ pub const JoltServer = struct {
         var listener = try createListener(self.alloc, self.opts.port);
         defer listener.deinit();
 
-        var deinitFns = std.ArrayList(*const fn () void).init(global_arena.allocator());
+        const alloc = global_arena.allocator();
+        var deinitFns: std.ArrayList(*const fn () void) = .empty;
         defer {
             for (deinitFns.items) |f| f();
-            deinitFns.deinit();
+            deinitFns.deinit(alloc);
         }
 
         inline for (endpoints) |def| blk: {
@@ -105,7 +106,7 @@ pub const JoltServer = struct {
             if (std.meta.hasFn(typ, "init") and std.meta.hasFn(typ, "deinit")) {
                 // Legacy init/deinit
                 try typ.init(thread_safe_alloc.allocator(), &listener, path);
-                try deinitFns.append(typ.deinit);
+                try deinitFns.append(alloc, typ.deinit);
             } else {
 
                 // Automatic endpoint discovery

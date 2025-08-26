@@ -29,7 +29,7 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
         @compileError("\"body\" property was not provided for parse body middleware.");
     }
 
-    const body_type_info = @typeInfo(std.meta.FieldType(Context, .body));
+    const body_type_info = @typeInfo(@FieldType(Context, "body"));
     switch (body_type_info) {
         .@"struct", .@"union" => {
             return struct {

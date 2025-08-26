@@ -20,10 +20,11 @@ pub fn build_facilio(
     });
 
     // Generate flags
-    var flags = std.ArrayList([]const u8).init(std.heap.page_allocator);
-    if (optimize != .Debug) try flags.append("-Os");
-    try flags.append("-Wno-return-type-c-linkage");
-    try flags.append("-fno-sanitize=undefined");
+    const alloc = std.heap.page_allocator;
+    var flags: std.ArrayList([]const u8) = .empty;
+    if (optimize != .Debug) try flags.append(alloc, "-Os");
+    try flags.append(alloc, "-Wno-return-type-c-linkage");
+    try flags.append(alloc, "-fno-sanitize=undefined");
 
     //
     // let's not override malloc from within the lib
@@ -31,11 +32,11 @@ pub fn build_facilio(
     // try flags.append("-DFIO_OVERRIDE_MALLOC");
     //
 
-    try flags.append("-DFIO_HTTP_EXACT_LOGGING");
+    try flags.append(alloc, "-DFIO_HTTP_EXACT_LOGGING");
     if (target.result.abi == .musl)
-        try flags.append("-D_LARGEFILE64_SOURCE");
+        try flags.append(alloc, "-D_LARGEFILE64_SOURCE");
     if (use_openssl)
-        try flags.append("-DHAVE_OPENSSL -DFIO_TLS_FOUND");
+        try flags.append(alloc, "-DHAVE_OPENSSL -DFIO_TLS_FOUND");
 
     // Include paths
     // mod.addIncludePath(.{ .path = subdir ++ "/." });
