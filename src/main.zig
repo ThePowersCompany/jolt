@@ -75,7 +75,7 @@ pub const JoltServer = struct {
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
         var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
-        var listener = try createListener(thread_safe_alloc.allocator(), self.opts.port);
+        var listener = try createListener(self.alloc, self.opts.port);
         defer listener.deinit();
 
         var deinitFns = std.ArrayList(*const fn () void).init(global_arena.allocator());
