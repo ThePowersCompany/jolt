@@ -1,6 +1,7 @@
 const std = @import("std");
 const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
 const Allocator = std.mem.Allocator;
 
 // zap types
@@ -261,8 +262,9 @@ pub const Listener = struct {
 
     const Self = @This();
 
-    var alloc: Allocator = undefined;
     var arena: ArenaAllocator = undefined;
+    var tsa: ThreadSafeAllocator = undefined;
+    var alloc: Allocator = undefined;
 
     /// Internal static structs of member endpoints
     var endpoints: std.ArrayList(*const Endpoint) = undefined;
@@ -274,7 +276,8 @@ pub const Listener = struct {
     /// called every time a request arrives that no endpoint matches.
     pub fn init(a: Allocator, l: ListenerSettings) Self {
         arena = ArenaAllocator.init(a);
-        alloc = arena.allocator();
+        tsa = .{ .child_allocator = arena.allocator() };
+        alloc = tsa.allocator();
 
         endpoints = std.ArrayList(*const Endpoint).init(a);
 
