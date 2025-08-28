@@ -63,7 +63,7 @@ pub fn getTableName(comptime table: Table) []const u8 {
 
 pub fn getByIds(
     comptime T: type,
-    arena_alloc: Allocator,
+    alloc: Allocator,
     comptime table: Table,
     company_id: i32,
     site_id: ?i32,
@@ -83,17 +83,17 @@ pub fn getByIds(
     }
     base_query = base_query ++ " FROM " ++ comptime getTableName(table) ++ " s WHERE s.company_id = $1";
 
-    var query = std.ArrayList(u8).init(arena_alloc);
+    var query = std.ArrayList(u8).init(alloc);
     defer query.deinit();
     try query.appendSlice(base_query);
 
     var paramIndex: i32 = 2;
     if (site_id != null) {
-        try query.appendSlice(try std.fmt.allocPrint(arena_alloc, " AND s.site = ${d}", .{paramIndex}));
+        try query.appendSlice(try std.fmt.allocPrint(alloc, " AND s.site = ${d}", .{paramIndex}));
         paramIndex += 1;
     }
     if (row_ids != null) {
-        try query.appendSlice(try std.fmt.allocPrint(arena_alloc, " AND s.id = any(${d})", .{paramIndex}));
+        try query.appendSlice(try std.fmt.allocPrint(alloc, " AND s.id = any(${d})", .{paramIndex}));
         paramIndex += 1;
     }
 
@@ -101,7 +101,7 @@ pub fn getByIds(
         const asc = if (order_by.ascending) "ASC" else "DESC";
         try query.appendSlice(
             try allocPrint(
-                arena_alloc,
+                alloc,
                 " ORDER BY s.{s} {s}",
                 .{ order_by.columnName, asc },
             ),
@@ -112,7 +112,7 @@ pub fn getByIds(
     const conn = try db.acquireConnection();
     defer conn.release();
 
-    var stmt = try pg.Stmt.init(conn, .{ .allocator = arena_alloc });
+    var stmt = try pg.Stmt.init(conn, .{ .allocator = alloc });
     errdefer stmt.deinit();
 
     stmt.prepare(query.items) catch |err| return db.logError(err, conn);
@@ -128,9 +128,9 @@ pub fn getByIds(
     var result = stmt.execute() catch |err| return db.logError(err, conn);
     defer result.deinit();
 
-    var arr = std.ArrayList(T).init(arena_alloc);
+    var arr = std.ArrayList(T).init(alloc);
     while (try result.next()) |row| {
-        try arr.append(try row.to(T, .{ .allocator = arena_alloc }));
+        try arr.append(try row.to(T, .{ .allocator = alloc }));
     }
     return try arr.toOwnedSlice();
 }

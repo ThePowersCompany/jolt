@@ -119,7 +119,7 @@ pub const HttpError = error{
 };
 
 /// Used internally: facilio Http request callback function type
-pub const FioHttpRequestFn = *const fn (r: [*c]fio.http_s) callconv(.C) void;
+pub const FioHttpRequestFn = *const fn (r: [*c]fio.http_s) callconv(.c) void;
 
 /// Zap Http request callback function type.
 pub const HttpRequestFn = *const fn (Request) void;
@@ -173,7 +173,7 @@ pub const HttpListener = struct {
 
     // we could make it dynamic by passing a HttpListener via udata
     /// Used internally: the listener's facilio request callback
-    pub fn theOneAndOnlyRequestCallBack(r: [*c]fio.http_s) callconv(.C) void {
+    pub fn theOneAndOnlyRequestCallBack(r: [*c]fio.http_s) callconv(.c) void {
         if (the_one_and_only_listener) |l| {
             var req: Request = .{
                 .path = util.fio2str(r.*.path),
@@ -199,7 +199,7 @@ pub const HttpListener = struct {
     }
 
     /// Used internally: the listener's facilio response callback
-    pub fn theOneAndOnlyResponseCallBack(r: [*c]fio.http_s) callconv(.C) void {
+    pub fn theOneAndOnlyResponseCallBack(r: [*c]fio.http_s) callconv(.c) void {
         if (the_one_and_only_listener) |l| {
             var req: Request = .{
                 .path = util.fio2str(r.*.path),
@@ -220,7 +220,7 @@ pub const HttpListener = struct {
     }
 
     /// Used internally: the listener's facilio upgrade callback
-    pub fn theOneAndOnlyUpgradeCallBack(r: [*c]fio.http_s, target: [*c]u8, target_len: usize) callconv(.C) void {
+    pub fn theOneAndOnlyUpgradeCallBack(r: [*c]fio.http_s, target: [*c]u8, target_len: usize) callconv(.c) void {
         if (the_one_and_only_listener) |l| {
             var req: Request = .{
                 .path = util.fio2str(r.*.path),
@@ -242,7 +242,7 @@ pub const HttpListener = struct {
     }
 
     /// Used internally: the listener's facilio finish callback
-    pub fn theOneAndOnlyFinishCallBack(s: [*c]fio.struct_http_settings_s) callconv(.C) void {
+    pub fn theOneAndOnlyFinishCallBack(s: [*c]fio.struct_http_settings_s) callconv(.c) void {
         if (the_one_and_only_listener) |l| {
             l.settings.on_finish.?(s);
         }
@@ -285,7 +285,7 @@ pub const HttpListener = struct {
         // in debug2 and debug3 of hello example
         // std.debug.print("X\n", .{});
         // TODO: still happening?
-        std.time.sleep(500 * std.time.ns_per_ms);
+        std.Thread.sleep(500 * std.time.ns_per_ms);
 
         var portbuf: [100]u8 = undefined;
         const printed_port = try std.fmt.bufPrintZ(&portbuf, "{d}", .{self.settings.port});

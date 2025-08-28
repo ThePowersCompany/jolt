@@ -29,19 +29,19 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
         @compileError("\"body\" property was not provided for parse body middleware.");
     }
 
-    const body_type_info = @typeInfo(std.meta.FieldType(Context, .body));
+    const body_type_info = @typeInfo(@FieldType(Context, "body"));
     switch (body_type_info) {
         .@"struct", .@"union" => {
             return struct {
                 fn parseBody(
                     context: *Context,
-                    arena_alloc: Allocator,
+                    alloc: Allocator,
                     req: Request,
                 ) !void {
                     if (req.body) |body| {
                         const parsed_body = json.parseFromSliceLeaky(
                             @TypeOf(context.body),
-                            arena_alloc,
+                            alloc,
                             body,
                             .{},
                         ) catch |err| {

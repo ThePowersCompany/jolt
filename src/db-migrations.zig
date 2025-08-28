@@ -59,14 +59,14 @@ fn findMigrationDir(path: []const u8) !Dir {
 fn loadMigrationDir(alloc: Allocator, path: []const u8) !MigrationDir {
     const dir = try findMigrationDir(path);
 
-    var entries = ArrayList(Entry).init(alloc);
-    defer entries.deinit();
+    var entries: ArrayList(Entry) = .empty;
+    defer entries.deinit(alloc);
 
     var iterator = dir.iterate();
     while (try iterator.next()) |entry| {
         if (entry.kind != .directory) continue;
 
-        try entries.append(.{
+        try entries.append(alloc, .{
             .kind = .directory,
             .name = try alloc.dupe(u8, entry.name),
         });
@@ -74,7 +74,7 @@ fn loadMigrationDir(alloc: Allocator, path: []const u8) !MigrationDir {
     std.sort.pdq(Entry, entries.items, {}, compareEntries);
     return .{
         .dir = dir,
-        .entries = try entries.toOwnedSlice(),
+        .entries = try entries.toOwnedSlice(alloc),
     };
 }
 
@@ -215,8 +215,7 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
 
         const sql = try alloc.alloc(u8, (try file.stat()).size);
         defer alloc.free(sql);
-
-        _ = try std.fs.File.reader(file).readAll(sql);
+        _ = try file.read(sql);
 
         // Insert new row in migrations table
         const checksum = hash(sql);
@@ -244,7 +243,7 @@ fn hash(sql: []const u8) [64]u8 {
     var checksum: [32]u8 = undefined;
     hasher.final(&checksum);
     var hex_string: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex_string, "{}", .{std.fmt.fmtSliceHexLower(&checksum)}) catch unreachable;
+    _ = std.fmt.bufPrint(&hex_string, "{x}", .{checksum}) catch unreachable;
     return hex_string;
 }
 
@@ -288,14 +287,14 @@ fn queryMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) ![]Migra
     var result = conn.queryOpts(sql, .{}, .{ .allocator = alloc }) catch |err| return db.logError(err, conn);
     defer result.deinit();
 
-    var migration_entries = ArrayList(MigrationEntry).init(alloc);
-    defer migration_entries.deinit();
+    var migration_entries: ArrayList(MigrationEntry) = .empty;
+    defer migration_entries.deinit(alloc);
 
     while (try result.next()) |row| {
         const entry = try row.to(MigrationEntry, .{ .allocator = alloc });
-        try migration_entries.append(entry);
+        try migration_entries.append(alloc, entry);
     }
-    return try migration_entries.toOwnedSlice();
+    return try migration_entries.toOwnedSlice(alloc);
 }
 
 fn findMigrationEntry(entries: []MigrationEntry, file_name: []const u8) ?MigrationEntry {

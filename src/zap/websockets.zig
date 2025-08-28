@@ -63,7 +63,7 @@ pub fn Handler(comptime ContextType: type) type {
             }
         }
 
-        fn internal_on_message(handle: WsHandle, msg: fio.fio_str_info_s, is_text: u8) callconv(.C) void {
+        fn internal_on_message(handle: WsHandle, msg: fio.fio_str_info_s, is_text: u8) callconv(.c) void {
             const user_provided_settings: ?*WebSocketSettings = @as(?*WebSocketSettings, @ptrCast(@alignCast(fio.websocket_udata_get(handle))));
             const message = msg.data[0..msg.len];
             if (user_provided_settings) |settings| {
@@ -73,7 +73,7 @@ pub fn Handler(comptime ContextType: type) type {
             }
         }
 
-        fn internal_on_open(handle: WsHandle) callconv(.C) void {
+        fn internal_on_open(handle: WsHandle) callconv(.c) void {
             const user_provided_settings: ?*WebSocketSettings = @as(?*WebSocketSettings, @ptrCast(@alignCast(fio.websocket_udata_get(handle))));
             if (user_provided_settings) |settings| {
                 if (settings.on_open) |on_open| {
@@ -82,7 +82,7 @@ pub fn Handler(comptime ContextType: type) type {
             }
         }
 
-        fn internal_on_ready(handle: WsHandle) callconv(.C) void {
+        fn internal_on_ready(handle: WsHandle) callconv(.c) void {
             const user_provided_settings: ?*WebSocketSettings = @as(?*WebSocketSettings, @ptrCast(@alignCast(fio.websocket_udata_get(handle))));
             if (user_provided_settings) |settings| {
                 if (settings.on_ready) |on_ready| {
@@ -91,7 +91,7 @@ pub fn Handler(comptime ContextType: type) type {
             }
         }
 
-        fn internal_on_shutdown(handle: WsHandle) callconv(.C) void {
+        fn internal_on_shutdown(handle: WsHandle) callconv(.c) void {
             const user_provided_settings: ?*WebSocketSettings = @as(?*WebSocketSettings, @ptrCast(@alignCast(fio.websocket_udata_get(handle))));
             if (user_provided_settings) |settings| {
                 if (settings.on_shutdown) |on_shutdown| {
@@ -100,7 +100,7 @@ pub fn Handler(comptime ContextType: type) type {
             }
         }
 
-        fn internal_on_close(uuid: isize, udata: ?*anyopaque) callconv(.C) void {
+        fn internal_on_close(uuid: isize, udata: ?*anyopaque) callconv(.c) void {
             const user_provided_settings: ?*WebSocketSettings = @as(?*WebSocketSettings, @ptrCast(@alignCast(udata)));
             if (user_provided_settings) |settings| {
                 if (settings.on_close) |on_close| {
@@ -209,7 +209,7 @@ pub fn Handler(comptime ContextType: type) type {
             return ret;
         }
 
-        pub fn internal_subscription_on_message(handle: WsHandle, channel: fio.fio_str_info_s, message: fio.fio_str_info_s, udata: ?*anyopaque) callconv(.C) void {
+        pub fn internal_subscription_on_message(handle: WsHandle, channel: fio.fio_str_info_s, message: fio.fio_str_info_s, udata: ?*anyopaque) callconv(.c) void {
             if (udata) |p| {
                 const args = @as(*SubscribeArgs, @ptrCast(@alignCast(p)));
                 if (args.on_message) |on_message| {
@@ -217,7 +217,7 @@ pub fn Handler(comptime ContextType: type) type {
                 }
             }
         }
-        pub fn internal_subscription_on_unsubscribe(udata: ?*anyopaque) callconv(.C) void {
+        pub fn internal_subscription_on_unsubscribe(udata: ?*anyopaque) callconv(.c) void {
             if (udata) |p| {
                 const args = @as(*SubscribeArgs, @ptrCast(@alignCast(p)));
                 if (args.on_unsubscribe) |on_unsubscribe| {

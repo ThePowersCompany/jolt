@@ -107,12 +107,12 @@ test "AutoMiddleware is false for everything with an empty context" {
     const EmptyContext = struct {};
     const auto_middleware = determine_middleware(EmptyContext);
 
-    const decls = @typeInfo(std.meta.FieldType(AutoMiddleware, .decls));
+    const decls = @typeInfo(@FieldType(AutoMiddleware, "decls"));
     inline for (decls.@"struct".fields) |field| {
         assert(@field(@field(auto_middleware, "decls"), field.name) == false);
     }
 
-    const fields = @typeInfo(std.meta.FieldType(AutoMiddleware, .fields));
+    const fields = @typeInfo(@FieldType(AutoMiddleware, "fields"));
     inline for (fields.@"struct".fields) |field| {
         assert(@field(@field(auto_middleware, "fields"), field.name) == false);
     }
@@ -135,12 +135,12 @@ test "AutoMiddleware is true for everything with a \"full\" context" {
 
     // The following checks should auto-fail if anything is added to the AutoMiddleware type.
 
-    const decls = @typeInfo(std.meta.FieldType(AutoMiddleware, .decls));
+    const decls = @typeInfo(@FieldType(AutoMiddleware, "decls"));
     inline for (decls.@"struct".fields) |field| {
         assert(@field(@field(auto_middleware, "decls"), field.name) == true);
     }
 
-    const fields = @typeInfo(std.meta.FieldType(AutoMiddleware, .fields));
+    const fields = @typeInfo(@FieldType(AutoMiddleware, "fields"));
     inline for (fields.@"struct".fields) |field| {
         assert(@field(@field(auto_middleware, "fields"), field.name) == true);
     }
