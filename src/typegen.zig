@@ -774,7 +774,7 @@ test "Nested Optionals" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit(alloc);
+    defer arena.deinit();
 
     const Optional = @import("utils/types.zig").Optional;
 
@@ -787,7 +787,7 @@ test "Nested Optionals" {
     };
 
     var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit(alloc);
+    defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
     try std.testing.expectEqualStrings(parse_result.parsed,

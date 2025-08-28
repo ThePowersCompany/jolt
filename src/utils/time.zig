@@ -324,11 +324,10 @@ pub const DateTime = struct {
     }
 
     pub fn formatAlloc(self: Self, alloc: std.mem.Allocator, comptime fmt: string) !string {
-        var list = std.ArrayList(u8).init(alloc);
-        defer list.deinit();
-
-        try self.format(fmt, .{}, list.writer());
-        return list.toOwnedSlice();
+        var writer = std.Io.Writer.Allocating.init(alloc);
+        defer writer.deinit();
+        try self.format(fmt, .{}, &writer.writer);
+        return writer.toOwnedSlice();
     }
 
     const FormatSeq = enum {

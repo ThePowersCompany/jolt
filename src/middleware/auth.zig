@@ -67,10 +67,10 @@ pub fn extractJwt(comptime Context: type) MiddlewareFn(Context) {
     return struct {
         fn extractJwt(
             context: *Context,
-            arena_alloc: Allocator,
+            alloc: Allocator,
             req: Request,
         ) anyerror!void {
-            const jwt_or_resp = try parseJWT(arena_alloc, req);
+            const jwt_or_resp = try parseJWT(alloc, req);
             if (jwt_or_resp == .response) {
                 return try req.respondWithError(
                     jwt_or_resp.response.status,
@@ -133,10 +133,10 @@ pub fn extractWsJwt(comptime Context: type) MiddlewareFn(Context) {
     return struct {
         fn extractWsJwt(
             context: *Context,
-            arena_alloc: Allocator,
+            alloc: Allocator,
             req: Request,
         ) anyerror!void {
-            const jwt_or_resp = try parseWsJWT(arena_alloc, req);
+            const jwt_or_resp = try parseWsJWT(alloc, req);
             if (jwt_or_resp == .response) {
                 return try req.respondWithError(
                     jwt_or_resp.response.status,

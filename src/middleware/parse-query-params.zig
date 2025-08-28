@@ -29,7 +29,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
 
     return struct {
         fn sendInvalidParamTypeResponse(
-            arena_alloc: Allocator,
+            alloc: Allocator,
             req: Request,
             ExpectedType: type,
             field_name: []const u8,
@@ -37,7 +37,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             return try req.respondWithError(
                 StatusCode.bad_request,
                 try allocPrint(
-                    arena_alloc,
+                    alloc,
                     "Incorrect query parameter type for {s} - Expected {any}",
                     .{ field_name, ExpectedType },
                 ),
@@ -48,7 +48,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         /// Returns true if the middleware should exit early.
         fn _handleQueryParam(
             ctx: *Context,
-            arena_alloc: Allocator,
+            alloc: Allocator,
             req: Request,
             comptime FieldType: type,
             comptime field_name: []const u8,
@@ -62,20 +62,20 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     } else if (std.mem.eql(u8, param, "false")) {
                         @field(@field(ctx, query_params), field_name) = false;
                     } else {
-                        try sendInvalidParamTypeResponse(arena_alloc, req, FieldType, field_name);
+                        try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     }
                 },
                 .int => {
                     const val = parseInt(FieldType, param, 10) catch {
-                        try sendInvalidParamTypeResponse(arena_alloc, req, FieldType, field_name);
+                        try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
                     @field(@field(ctx, query_params), field_name) = val;
                 },
                 .float => {
                     const val = parseFloat(FieldType, param) catch {
-                        try sendInvalidParamTypeResponse(arena_alloc, req, FieldType, field_name);
+                        try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
                     @field(@field(ctx, query_params), field_name) = val;
@@ -86,27 +86,27 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         // Strings arrive here
                         @field(@field(ctx, query_params), field_name) = param;
                     } else {
-                        const value = parseArrayFromString(arena_alloc, ChildT, param) catch {
-                            try sendInvalidParamTypeResponse(arena_alloc, req, FieldType, field_name);
+                        const value = parseArrayFromString(alloc, ChildT, param) catch {
+                            try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                             return true;
                         };
                         @field(@field(ctx, query_params), field_name) = value;
                     }
                 },
                 else => {
-                    try sendInvalidParamTypeResponse(arena_alloc, req, FieldType, field_name);
+                    try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                     return true;
                 },
             }
             return false;
         }
 
-        fn parseArrayFromString(arena_alloc: Allocator, comptime T: type, str: []const u8) ![]T {
+        fn parseArrayFromString(alloc: Allocator, comptime T: type, str: []const u8) ![]T {
             if (str.len < 1) {
                 return error.InvalidArray;
             }
 
-            var list = std.ArrayList(T).init(arena_alloc);
+            var list: std.ArrayList(T) = .empty;
             var it = std.mem.splitSequence(u8, str, ",");
             while (it.next()) |val_str| {
                 var val: T = undefined;
@@ -132,18 +132,20 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     },
                     else => @compileError(std.fmt.comptimePrint("Unsupported query param array child type: {s}", .{@typeName(T)})),
                 }
-                try list.append(val);
+                try list.append(alloc, val);
             }
-            return try list.toOwnedSlice();
+            return try list.toOwnedSlice(
+                alloc,
+            );
         }
 
         /// Returns true if the middleware should exit early.
-        fn handleQueryParam(ctx: *Context, arena_alloc: Allocator, req: Request, comptime field: Type.StructField) !bool {
+        fn handleQueryParam(ctx: *Context, alloc: Allocator, req: Request, comptime field: Type.StructField) !bool {
             const FieldType = @typeInfo(field.type);
-            const param_opt = try req.getParamStr(arena_alloc, field.name, true);
+            const param_opt = try req.getParamStr(alloc, field.name, true);
             if (param_opt) |param| {
                 const T = if (FieldType == .optional) FieldType.optional.child else field.type;
-                return try _handleQueryParam(ctx, arena_alloc, req, T, field.name, param.str);
+                return try _handleQueryParam(ctx, alloc, req, T, field.name, param.str);
             } else if (field.defaultValue()) |default_value| {
                 // Param is missing, but has a default value. Set to the default value.
                 @field(@field(ctx, query_params), field.name) = default_value;
@@ -154,7 +156,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 try req.respondWithError(
                     StatusCode.bad_request,
                     try allocPrint(
-                        arena_alloc,
+                        alloc,
                         "Missing query parameter: {s}",
                         .{field.name},
                     ),
@@ -166,7 +168,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
 
         fn parseQueryParams(
             ctx: *Context,
-            arena_alloc: Allocator,
+            alloc: Allocator,
             req: Request,
         ) anyerror!void {
             req.parseQuery();
@@ -193,7 +195,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
                 if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
                     inline for (@typeInfo(ctx_field.type).@"struct".fields) |field| {
-                        if (try handleQueryParam(ctx, arena_alloc, req, field)) {
+                        if (try handleQueryParam(ctx, alloc, req, field)) {
                             break :outer;
                         }
                     }

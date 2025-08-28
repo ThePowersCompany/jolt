@@ -80,23 +80,3 @@ pub fn str2fio(s: []const u8) fio.fio_str_info_s {
 pub fn toCharPtr(s: []const u8) [*c]u8 {
     return @as([*c]u8, @ptrFromInt(@intFromPtr(s.ptr)));
 }
-
-//
-// JSON helpers
-//
-
-/// Concenience: format an arbitrary value into a JSON string buffer.
-/// Provide your own buf; this function is NOT mutex-protected!
-pub fn stringifyBuf(
-    buffer: []u8,
-    value: anytype,
-    options: std.json.StringifyOptions,
-) ?[]const u8 {
-    var fba = std.heap.FixedBufferAllocator.init(buffer);
-    var string = std.ArrayList(u8).init(fba.allocator());
-    if (std.json.stringify(value, options, string.writer())) {
-        return string.items;
-    } else |_| { // error
-        return null;
-    }
-}
