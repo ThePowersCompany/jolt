@@ -479,11 +479,13 @@ fn writeDate(into: []u8, date: Date) u8 {
     // the padding (we need to do it ourselfs)
     const year = date.year;
     if (year < 0) {
-        _ = std.fmt.formatIntBuf(into[1..], @as(u16, @intCast(year * -1)), 10, .lower, .{ .width = 4, .fill = '0' });
         into[0] = '-';
+        var writer = std.Io.Writer.fixed(into[1..]);
+        writer.printInt(@as(u16, @intCast(year * -1)), 10, .lower, .{ .width = 4, .fill = '0' }) catch unreachable;
         buf = into[5..];
     } else {
-        _ = std.fmt.formatIntBuf(into, @as(u16, @intCast(year)), 10, .lower, .{ .width = 4, .fill = '0' });
+        var writer = std.Io.Writer.fixed(into);
+        writer.printInt(@as(u16, @intCast(year)), 10, .lower, .{ .width = 4, .fill = '0' }) catch unreachable;
         buf = into[4..];
     }
 
@@ -510,12 +512,14 @@ fn writeTime(into: []u8, time: Time) u8 {
 
     if (@rem(micros, 1000) == 0) {
         into[8] = '.';
-        _ = std.fmt.formatIntBuf(into[9..12], micros / 1000, 10, .lower, .{ .width = 3, .fill = '0' });
+        var writer = std.Io.Writer.fixed(into[9..12]);
+        writer.printInt(micros / 1000, 10, .lower, .{ .width = 3, .fill = '0' }) catch unreachable;
         return 12;
     }
 
     into[8] = '.';
-    _ = std.fmt.formatIntBuf(into[9..15], micros, 10, .lower, .{ .width = 6, .fill = '0' });
+    var writer = std.Io.Writer.fixed(into[9..15]);
+    writer.printInt(micros, 10, .lower, .{ .width = 6, .fill = '0' }) catch unreachable;
     return 15;
 }
 

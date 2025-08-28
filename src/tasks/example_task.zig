@@ -12,8 +12,8 @@ pub fn submit(alloc: Allocator) !void {
 
 const try_count = 3;
 
-pub fn task(arena_alloc: *Allocator) void {
-    const alloc = arena_alloc.*;
+pub fn task(a: *Allocator) void {
+    const alloc = a.*;
     for (0..try_count) |i| {
         _task() catch |err| {
             if (i == try_count - 1) {

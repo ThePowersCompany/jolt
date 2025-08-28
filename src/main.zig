@@ -35,6 +35,8 @@ pub const task_utils = @import("./utils/task.zig");
 
 pub const types = @import("./utils/types.zig");
 
+pub const json = @import("utils/json.zig");
+
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const middleware = .{

@@ -18,8 +18,8 @@ const PostContext = struct {
     body: CreateUserRequest,
 };
 
-pub fn post(ctx: *PostContext, arena_alloc: Allocator) !Response(void) {
+pub fn post(ctx: *PostContext, alloc: Allocator) !Response(void) {
     _ = ctx;
-    _ = arena_alloc;
+    _ = alloc;
     return .{};
 }

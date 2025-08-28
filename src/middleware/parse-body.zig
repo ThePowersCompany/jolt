@@ -35,13 +35,13 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
             return struct {
                 fn parseBody(
                     context: *Context,
-                    arena_alloc: Allocator,
+                    alloc: Allocator,
                     req: Request,
                 ) !void {
                     if (req.body) |body| {
                         const parsed_body = json.parseFromSliceLeaky(
                             @TypeOf(context.body),
-                            arena_alloc,
+                            alloc,
                             body,
                             .{},
                         ) catch |err| {

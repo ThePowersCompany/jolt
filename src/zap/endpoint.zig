@@ -11,8 +11,10 @@ const ListenerSettings = zap.HttpListenerSettings;
 const HttpListener = zap.HttpListener;
 const StatusCode = zap.StatusCode;
 
+const stringify = @import("../utils/json.zig").stringify;
+
 pub fn MiddlewareFn(comptime Context: type) type {
-    return fn (context: *Context, arena_alloc: Allocator, req: Request) anyerror!void;
+    return fn (context: *Context, alloc: Allocator, req: Request) anyerror!void;
 }
 
 pub const EnabledContext = struct {
@@ -91,10 +93,10 @@ pub const RequestHandler = struct {
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(arena_alloc: Allocator, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+            pub fn handle(alloc: Allocator, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
                 var context: Context = undefined;
 
-                auto(Context)(&context, arena_alloc, req) catch |err| {
+                auto(Context)(&context, alloc, req) catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -105,7 +107,7 @@ pub const RequestHandler = struct {
                     return;
                 }
 
-                const response: Response(ReturnType) = last_fn(&context, arena_alloc) catch |err| {
+                const response: Response(ReturnType) = last_fn(&context, alloc) catch |err| {
                     std.log.err("Endpoint fn error - {}\n", .{err});
                     return sendErrorResponse(req, err) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -136,7 +138,7 @@ pub const RequestHandler = struct {
                             if (response.content_type == null) {
                                 try req.setHeader("content-type", "application/json");
                             }
-                            break :blk try std.json.stringifyAlloc(arena_alloc, body, response.opts);
+                            break :blk try stringify(alloc, body, response.opts);
                         },
                     };
                     try req.sendBody(data);
