@@ -13,7 +13,7 @@ pub fn stringify(alloc: Allocator, value: anytype, options: std.json.Stringify.O
 pub fn stringifyBuf(buffer: []u8, value: anytype, options: std.json.Stringify.Options) ![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     try std.json.Stringify.value(value, options, &writer);
-    return buffer[0..writer.buffered().len];
+    return writer.buffered();
 }
 
 test "stringify" {
