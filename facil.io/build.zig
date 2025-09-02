@@ -7,17 +7,24 @@ pub fn build_facilio(
     optimize: std.builtin.OptimizeMode,
     use_openssl: bool,
 ) !*std.Build.Step.Compile {
-    const lib = b.addStaticLibrary(.{
-        .name = "facil.io",
+    const mod = b.addModule("facil.io", .{
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const lib = b.addLibrary(.{
+        .name = "facil.io",
+        .root_module = mod,
+        .linkage = .static,
     });
 
     // Generate flags
-    var flags = std.ArrayList([]const u8).init(std.heap.page_allocator);
-    if (optimize != .Debug) try flags.append("-Os");
-    try flags.append("-Wno-return-type-c-linkage");
-    try flags.append("-fno-sanitize=undefined");
+    const alloc = std.heap.page_allocator;
+    var flags: std.ArrayList([]const u8) = .empty;
+    if (optimize != .Debug) try flags.append(alloc, "-Os");
+    try flags.append(alloc, "-Wno-return-type-c-linkage");
+    try flags.append(alloc, "-fno-sanitize=undefined");
 
     //
     // let's not override malloc from within the lib
@@ -25,25 +32,25 @@ pub fn build_facilio(
     // try flags.append("-DFIO_OVERRIDE_MALLOC");
     //
 
-    try flags.append("-DFIO_HTTP_EXACT_LOGGING");
+    try flags.append(alloc, "-DFIO_HTTP_EXACT_LOGGING");
     if (target.result.abi == .musl)
-        try flags.append("-D_LARGEFILE64_SOURCE");
+        try flags.append(alloc, "-D_LARGEFILE64_SOURCE");
     if (use_openssl)
-        try flags.append("-DHAVE_OPENSSL -DFIO_TLS_FOUND");
+        try flags.append(alloc, "-DHAVE_OPENSSL -DFIO_TLS_FOUND");
 
     // Include paths
-    // lib.addIncludePath(.{ .path = subdir ++ "/." });
-    lib.addIncludePath(b.path(subdir ++ "/."));
-    lib.addIncludePath(b.path(subdir ++ "/lib/facil"));
-    lib.addIncludePath(b.path(subdir ++ "/lib/facil/fiobj"));
-    lib.addIncludePath(b.path(subdir ++ "/lib/facil/cli"));
-    lib.addIncludePath(b.path(subdir ++ "/lib/facil/http"));
-    lib.addIncludePath(b.path(subdir ++ "/lib/facil/http/parsers"));
+    // mod.addIncludePath(.{ .path = subdir ++ "/." });
+    mod.addIncludePath(b.path(subdir ++ "/."));
+    mod.addIncludePath(b.path(subdir ++ "/lib/facil"));
+    mod.addIncludePath(b.path(subdir ++ "/lib/facil/fiobj"));
+    mod.addIncludePath(b.path(subdir ++ "/lib/facil/cli"));
+    mod.addIncludePath(b.path(subdir ++ "/lib/facil/http"));
+    mod.addIncludePath(b.path(subdir ++ "/lib/facil/http/parsers"));
     if (use_openssl)
-        lib.addIncludePath(b.path(subdir ++ "/lib/facil/tls"));
+        mod.addIncludePath(b.path(subdir ++ "/lib/facil/tls"));
 
     // C source files
-    lib.addCSourceFiles(.{
+    mod.addCSourceFiles(.{
         .files = &.{
             subdir ++ "/lib/facil/fio.c",
             subdir ++ "/lib/facil/fio_zig.c",
@@ -66,7 +73,7 @@ pub fn build_facilio(
     });
 
     if (use_openssl) {
-        lib.addCSourceFiles(.{
+        mod.addCSourceFiles(.{
             .files = &.{
                 subdir ++ "/lib/facil/tls/fio_tls_openssl.c",
                 subdir ++ "/lib/facil/tls/fio_tls_missing.c",
@@ -75,20 +82,14 @@ pub fn build_facilio(
         });
     }
 
-    // link against libc
-    lib.linkLibC();
-
     // link in libopenssl and libcrypto on demand
     if (use_openssl) {
         switch (@import("builtin").os.tag) {
             .linux => {
-                lib.linkSystemLibrary("ssl");
-                lib.linkSystemLibrary("crypto");
+                mod.linkSystemLibrary("ssl", .{});
+                mod.linkSystemLibrary("crypto", .{});
             },
-            else => {
-                lib.linkSystemLibrary2("libssl", .{ .use_pkg_config = .force });
-                lib.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .force });
-            },
+            else => return error.InstallLinuxNoob,
         }
     }
 

@@ -36,9 +36,9 @@ pub fn cast(comptime T: type, ptr: ?*anyopaque) T {
     return @ptrCast(@alignCast(ptr));
 }
 
-fn wrap(T: type, comptime task: *const fn (t: *T) void) *const fn (?*anyopaque) callconv(.C) void {
+fn wrap(T: type, comptime task: *const fn (t: *T) void) *const fn (?*anyopaque) callconv(.c) void {
     return struct {
-        fn wrapped(arg: ?*anyopaque) callconv(.C) void {
+        fn wrapped(arg: ?*anyopaque) callconv(.c) void {
             task(cast(*T, arg));
         }
     }.wrapped;
@@ -56,25 +56,25 @@ fn wrapArena(comptime task: *const fn (arena: *Allocator) void) *const fn (*Allo
     }.wrapped;
 }
 
-fn wrapNoContext(comptime task: *const fn () void) *const fn (?*anyopaque) callconv(.C) void {
+fn wrapNoContext(comptime task: *const fn () void) *const fn (?*anyopaque) callconv(.c) void {
     return struct {
-        fn wrapped(_: ?*anyopaque) callconv(.C) void {
+        fn wrapped(_: ?*anyopaque) callconv(.c) void {
             task();
         }
     }.wrapped;
 }
 
-fn wrap2(T: type, comptime task: *const fn (t: *T) void) *const fn (?*anyopaque, ?*anyopaque) callconv(.C) void {
+fn wrap2(T: type, comptime task: *const fn (t: *T) void) *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void {
     return struct {
-        fn wrapped(arg: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
+        fn wrapped(arg: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
             task(cast(*T, arg));
         }
     }.wrapped;
 }
 
-fn wrap2NoContext(comptime task: *const fn () void) *const fn (?*anyopaque, ?*anyopaque) callconv(.C) void {
+fn wrap2NoContext(comptime task: *const fn () void) *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void {
     return struct {
-        fn wrapped(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
+        fn wrapped(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
             task();
         }
     }.wrapped;

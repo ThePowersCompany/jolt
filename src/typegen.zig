@@ -44,10 +44,10 @@ pub fn generateTypesFile(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var ts = ArrayList(u8).init(arena_alloc);
-    defer ts.deinit();
+    var ts: ArrayList(u8) = .empty;
+    defer ts.deinit(alloc);
 
-    try ts.appendSlice(
+    try ts.appendSlice(alloc,
         \\ // === DO NOT MODIFY ===
         \\ //
         \\ // Auto-generated type definitions
@@ -60,7 +60,7 @@ pub fn generateTypesFile(
     var type_generator = try TypeGenerator.init(arena_alloc);
     defer type_generator.deinit();
 
-    try ts.appendSlice(try type_generator.generateTypes(endpoints));
+    try ts.appendSlice(alloc, try type_generator.generateTypes(endpoints));
 
     const file = try std.fs.cwd().createFile(ts_file_name, .{ .read = true });
     defer file.close();
@@ -206,7 +206,7 @@ const TypeGenerator = struct {
         // Third pass: Generate endpoint types
         inline for (endpoints) |endpoint| try self.genTypescript(endpoint);
 
-        var res = ArrayList(u8).init(self.arena_alloc);
+        var res: ArrayList(u8) = .empty;
 
         {
             // Print top-level types
@@ -220,12 +220,12 @@ const TypeGenerator = struct {
                     return std.ascii.lessThanIgnoreCase(lhs.type_name, rhs.type_name);
                 }
             };
-            var entries = ArrayList(Entry).init(self.arena_alloc);
-            defer entries.deinit();
+            var entries: ArrayList(Entry) = .empty;
+            defer entries.deinit(self.arena_alloc);
 
             var iter = self.top_level_types.iterator();
             while (iter.next()) |top| {
-                try entries.append(.{
+                try entries.append(self.arena_alloc, .{
                     .type_name = top.key_ptr.*,
                     .ts = try allocPrint(
                         self.arena_alloc,
@@ -238,7 +238,7 @@ const TypeGenerator = struct {
             // Sort alphabetically
             std.mem.sort(Entry, entries.items, {}, Entry.sort);
             for (entries.items) |entry| {
-                try res.appendSlice(entry.ts);
+                try res.appendSlice(self.arena_alloc, entry.ts);
             }
         }
 
@@ -248,6 +248,7 @@ const TypeGenerator = struct {
             var endpoints_data = self.endpointsData(method);
 
             try res.appendSlice(
+                self.arena_alloc,
                 try allocPrint(
                     self.arena_alloc,
                     "export interface {c}{s}Endpoints {{",
@@ -257,30 +258,34 @@ const TypeGenerator = struct {
 
             var iter = endpoints_data.iterator();
             while (iter.next()) |endpoint| {
-                try res.appendSlice(try allocPrint(self.arena_alloc, "\"{s}\": {{\n", .{endpoint.key_ptr.*}));
+                try res.appendSlice(
+                    self.arena_alloc,
+                    try allocPrint(self.arena_alloc, "\"{s}\": {{\n", .{endpoint.key_ptr.*}),
+                );
 
                 if (endpoint.value_ptr.query_params) |query_params| {
-                    try res.appendSlice(query_params);
+                    try res.appendSlice(self.arena_alloc, query_params);
                 }
 
                 if (endpoint.value_ptr.body) |body| {
-                    try res.appendSlice(body);
+                    try res.appendSlice(self.arena_alloc, body);
                 } else if (method != .get) {
-                    try res.appendSlice("  body?: never,\n");
+                    try res.appendSlice(self.arena_alloc, "  body?: never,\n");
                 }
 
                 if (endpoint.value_ptr.response) |response| {
                     try res.appendSlice(
+                        self.arena_alloc,
                         try allocPrint(self.arena_alloc, "response: {s},\n", .{response}),
                     );
                 }
 
-                try res.appendSlice("}\n");
+                try res.appendSlice(self.arena_alloc, "}\n");
             }
-            try res.appendSlice("}\n\n");
+            try res.appendSlice(self.arena_alloc, "}\n\n");
         }
 
-        return res.toOwnedSlice();
+        return res.toOwnedSlice(self.arena_alloc);
     }
 
     fn genTypescript(self: *Self, endpoint: EndpointDef) !void {
@@ -406,10 +411,10 @@ const TypeGenerator = struct {
 
     fn _parseStruct(self: *Self, S: Type.Struct) !ParseResult {
         var all_optional = true;
-        var res = ArrayList(u8).init(self.arena_alloc);
-        try res.appendSlice("{\n");
+        var res: ArrayList(u8) = .empty;
+        try res.appendSlice(self.arena_alloc, "{\n");
         inline for (S.fields) |field| {
-            try res.appendSlice(field.name);
+            try res.appendSlice(self.arena_alloc, field.name);
 
             const parse_result = try self.extractIdentifier(field.type);
 
@@ -420,57 +425,57 @@ const TypeGenerator = struct {
 
             all_optional = all_optional and optional;
             if (optional) {
-                try res.appendSlice("?: ");
+                try res.appendSlice(self.arena_alloc, "?: ");
             } else {
-                try res.appendSlice(": ");
+                try res.appendSlice(self.arena_alloc, ": ");
             }
 
-            try res.appendSlice(parse_result.parsed);
-            try res.appendSlice("\n");
+            try res.appendSlice(self.arena_alloc, parse_result.parsed);
+            try res.appendSlice(self.arena_alloc, "\n");
         }
 
-        try res.appendSlice("}");
+        try res.appendSlice(self.arena_alloc, "}");
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(),
+            .parsed = try res.toOwnedSlice(self.arena_alloc),
         };
     }
 
     /// Helper function for adjacent unions
     fn _parseUnionAsStruct(self: *Self, U: Type.Union) !ParseResult {
         var all_optional = true;
-        var res = ArrayList(u8).init(self.arena_alloc);
-        try res.appendSlice("{\n");
+        var res: ArrayList(u8) = .empty;
+        try res.appendSlice(self.arena_alloc, "{\n");
         inline for (U.fields) |field| {
-            try res.appendSlice(field.name);
+            try res.appendSlice(self.arena_alloc, field.name);
 
             const parse_result = try self.extractIdentifier(field.type);
             all_optional = all_optional and parse_result.optional;
             if (parse_result.optional) {
-                try res.appendSlice("?: ");
+                try res.appendSlice(self.arena_alloc, "?: ");
             } else {
-                try res.appendSlice(": ");
+                try res.appendSlice(self.arena_alloc, ": ");
             }
 
-            try res.appendSlice(parse_result.parsed);
-            try res.appendSlice("\n");
+            try res.appendSlice(self.arena_alloc, parse_result.parsed);
+            try res.appendSlice(self.arena_alloc, "\n");
         }
 
-        try res.appendSlice("}");
+        try res.appendSlice(self.arena_alloc, "}");
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(),
+            .parsed = try res.toOwnedSlice(self.arena_alloc),
         };
     }
 
     fn parseStructWithAdjacentUnion(self: *Self, S: Type.Struct, adjacent_union: AdjacentUnion) !ParseResult {
         const union_short_name = shortTypeName(adjacent_union.name);
 
-        var res = ArrayList(u8).init(self.arena_alloc);
-        try res.appendSlice("{\n");
-        try res.appendSlice(try allocPrint(
+        var res: ArrayList(u8) = .empty;
+        try res.appendSlice(self.arena_alloc, "{\n");
+        try res.appendSlice(self.arena_alloc, try allocPrint(
             self.arena_alloc,
             "[K in keyof {s}]: {{\n",
             .{union_short_name},
@@ -478,8 +483,8 @@ const TypeGenerator = struct {
 
         inline for (S.fields) |f| {
             if (strEqls(f.name, adjacent_union.discriminator)) {
-                try res.appendSlice(f.name);
-                try res.appendSlice(": K\n");
+                try res.appendSlice(self.arena_alloc, f.name);
+                try res.appendSlice(self.arena_alloc, ": K\n");
             } else if (strEqls(@typeName(f.type), adjacent_union.name)) {
                 const field_info = @typeInfo(f.type);
                 if (field_info != .@"union") {
@@ -488,55 +493,56 @@ const TypeGenerator = struct {
 
                 try self.setTopLevelType(union_short_name, try self._parseUnionAsStruct(field_info.@"union"));
                 try res.appendSlice(
+                    self.arena_alloc,
                     try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_short_name }),
                 );
             } else {
-                try res.appendSlice(f.name);
+                try res.appendSlice(self.arena_alloc, f.name);
                 const parse_result = try self.extractIdentifier(f.type);
                 if (parse_result.optional) {
-                    try res.appendSlice("?: ");
+                    try res.appendSlice(self.arena_alloc, "?: ");
                 } else {
-                    try res.appendSlice(": ");
+                    try res.appendSlice(self.arena_alloc, ": ");
                 }
-                try res.appendSlice(parse_result.parsed);
-                try res.appendSlice("\n");
+                try res.appendSlice(self.arena_alloc, parse_result.parsed);
+                try res.appendSlice(self.arena_alloc, "\n");
             }
         }
 
-        try res.appendSlice(try allocPrint(
+        try res.appendSlice(self.arena_alloc, try allocPrint(
             self.arena_alloc,
             "}};\n}}[keyof {s}];\n",
             .{union_short_name},
         ));
 
-        return .{ .parsed = try res.toOwnedSlice(), .optional = false };
+        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
     }
 
     fn parseEnum(self: *Self, E: Type.Enum) ![]const u8 {
-        var res = ArrayList(u8).init(self.arena_alloc);
-        try res.appendSlice(" | (\n");
+        var res: ArrayList(u8) = .empty;
+        try res.appendSlice(self.arena_alloc, " | (\n");
         inline for (E.fields) |field| {
-            try res.appendSlice(" | ");
+            try res.appendSlice(self.arena_alloc, " | ");
 
-            try res.appendSlice("\"");
-            try res.appendSlice(field.name);
-            try res.appendSlice("\"");
+            try res.appendSlice(self.arena_alloc, "\"");
+            try res.appendSlice(self.arena_alloc, field.name);
+            try res.appendSlice(self.arena_alloc, "\"");
         }
-        try res.appendSlice("\n)");
-        return res.toOwnedSlice();
+        try res.appendSlice(self.arena_alloc, "\n)");
+        return res.toOwnedSlice(self.arena_alloc);
     }
 
     fn parseUnion(self: *Self, U: Type.Union, T: type) ![]const u8 {
-        var res = ArrayList(u8).init(self.arena_alloc);
+        var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
         if (strEqls(shortTypeName(@typeName(T)), "Optional")) {
             inline for (U.fields) |f| {
                 if (strEqls(f.name, "value")) {
                     const parsed_res = try self.extractIdentifier(f.type);
-                    try res.appendSlice(parsed_res.parsed);
+                    try res.appendSlice(self.arena_alloc, parsed_res.parsed);
 
-                    return res.toOwnedSlice();
+                    return res.toOwnedSlice(self.arena_alloc);
                 }
             }
             return error.InvalidOptionalDeclaration;
@@ -558,7 +564,7 @@ const TypeGenerator = struct {
                 .internal => {
                     const disc: []const u8 = repr.internal.discriminator;
                     inline for (U.fields) |field| {
-                        try res.appendSlice(try allocPrint(
+                        try res.appendSlice(self.arena_alloc, try allocPrint(
                             self.arena_alloc,
                             "\n | {{{s}: \"{s}\"; ",
                             .{ disc, field.name },
@@ -569,7 +575,7 @@ const TypeGenerator = struct {
 
                         inline for (field_info.@"struct".fields) |f| {
                             const parsed_res = try self.extractIdentifier(f.type);
-                            try res.appendSlice(try allocPrint(
+                            try res.appendSlice(self.arena_alloc, try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
                                 .{
@@ -579,18 +585,18 @@ const TypeGenerator = struct {
                                 },
                             ));
                         }
-                        try res.appendSlice(" }");
+                        try res.appendSlice(self.arena_alloc, " }");
                     }
                 },
                 .adjacently => {
-                    try res.appendSlice(try allocPrint(
+                    try res.appendSlice(self.arena_alloc, try allocPrint(
                         self.arena_alloc,
                         "{{\n [K in keyof {s}]: {{\n",
                         .{shortTypeName(@typeName(T))},
                     ));
                     const disc: []const u8 = repr.adjacently.discriminator;
                     inline for (U.fields) |field| {
-                        try res.appendSlice(try allocPrint(
+                        try res.appendSlice(self.arena_alloc, try allocPrint(
                             self.arena_alloc,
                             "\n | {{{s}: \"{s}\"; ",
                             .{ disc, field.name },
@@ -601,7 +607,7 @@ const TypeGenerator = struct {
 
                         inline for (field_info.@"struct".fields) |f| {
                             const parsed_res = try self.extractIdentifier(f.type);
-                            try res.appendSlice(try allocPrint(
+                            try res.appendSlice(self.arena_alloc, try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
                                 .{
@@ -611,7 +617,7 @@ const TypeGenerator = struct {
                                 },
                             ));
                         }
-                        try res.appendSlice(" }");
+                        try res.appendSlice(self.arena_alloc, " }");
                     }
                 },
                 .untagged => {
@@ -621,10 +627,10 @@ const TypeGenerator = struct {
                         if (first) {
                             first = false;
                         } else {
-                            try res.appendSlice(" | ");
+                            try res.appendSlice(self.arena_alloc, " | ");
                         }
                         const ident = (try self.extractIdentifier(field.type)).parsed;
-                        try res.appendSlice(ident);
+                        try res.appendSlice(self.arena_alloc, ident);
                     }
                 },
             }
@@ -633,7 +639,7 @@ const TypeGenerator = struct {
             return error.MissingTaggedUnionRepr;
         }
 
-        return res.toOwnedSlice();
+        return res.toOwnedSlice(self.arena_alloc);
     }
 
     fn populateFnTypescript(
