@@ -89,7 +89,11 @@ pub fn build_facilio(
                 mod.linkSystemLibrary("ssl", .{});
                 mod.linkSystemLibrary("crypto", .{});
             },
-            else => return error.InstallLinuxNoob,
+            .macos => {
+                lib.linkSystemLibrary2("libssl", .{ .use_pkg_config = .force });
+                lib.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .force });
+            },
+            else => return error.LIGMA,
         }
     }
 
