@@ -242,7 +242,10 @@ const TypeGenerator = struct {
             }
         }
 
-        // Print http method endpoint interface typings
+        // Print http method endpoint typings
+
+        try res.appendSlice(self.arena_alloc, "export type Spec = {");
+
         inline for (@typeInfo(Method).@"enum".fields) |m| {
             const method: Method = @enumFromInt(m.value);
             var endpoints_data = self.endpointsData(method);
@@ -251,8 +254,8 @@ const TypeGenerator = struct {
                 self.arena_alloc,
                 try allocPrint(
                     self.arena_alloc,
-                    "export interface {c}{s}Endpoints {{",
-                    .{ std.ascii.toUpper(m.name[0]), m.name[1..] },
+                    "{s}: {{",
+                    .{try std.ascii.allocUpperString(self.arena_alloc, m.name)},
                 ),
             );
 
@@ -282,8 +285,10 @@ const TypeGenerator = struct {
 
                 try res.appendSlice(self.arena_alloc, "}\n");
             }
-            try res.appendSlice(self.arena_alloc, "}\n\n");
+            try res.appendSlice(self.arena_alloc, "},\n");
         }
+
+        try res.appendSlice(self.arena_alloc, "};");
 
         return res.toOwnedSlice(self.arena_alloc);
     }
