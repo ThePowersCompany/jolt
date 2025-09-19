@@ -422,7 +422,7 @@ const TypeGenerator = struct {
             try res.appendSlice(self.arena_alloc, field.name);
 
             comptime var T: type = field.type;
-            if (comptime std.mem.containsAtLeast(u8, @typeName(field.type), 1, "array_list.Aligned(")) {
+            if (comptime startsWith(@typeName(field.type), "array_list.Aligned(")) {
                 T = @FieldType(field.type, "items");
             }
 
