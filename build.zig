@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) !void {
 
     define_deps(b, target, optimize);
 
-    const facilio = try build_facilio("facil.io", b, target, optimize, true);
+    const facilio = try build_facilio("facil.io", b, target, optimize, false);
 
     const jolt_module = b.addModule("jolt", .{
         .root_source_file = b.path("src/main.zig"),

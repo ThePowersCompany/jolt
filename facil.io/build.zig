@@ -39,7 +39,6 @@ pub fn build_facilio(
         try flags.append(alloc, "-DHAVE_OPENSSL -DFIO_TLS_FOUND");
 
     // Include paths
-    // mod.addIncludePath(.{ .path = subdir ++ "/." });
     mod.addIncludePath(b.path(subdir ++ "/."));
     mod.addIncludePath(b.path(subdir ++ "/lib/facil"));
     mod.addIncludePath(b.path(subdir ++ "/lib/facil/fiobj"));
