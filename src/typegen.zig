@@ -10,6 +10,7 @@ const Type = std.builtin.Type;
 const EndpointDef = @import("main.zig").EndpointDef;
 const stringToEnum = std.meta.stringToEnum;
 const UnionRepr = @import("middleware/parse-body.zig").UnionRepr;
+const JsonArray = @import("utils/types.zig").JsonArray;
 
 const endpoint_fn_names = [_][]const u8{ "get", "post", "put", "patch", "delete" };
 
@@ -422,8 +423,8 @@ const TypeGenerator = struct {
             try res.appendSlice(self.arena_alloc, field.name);
 
             comptime var T: type = field.type;
-            if (comptime startsWith(@typeName(field.type), "array_list.Aligned(")) {
-                T = @FieldType(field.type, "items");
+            if (comptime startsWith(@typeName(T), "utils.types.JsonArray(")) {
+                T = @FieldType(@FieldType(T, "list"), "items");
             }
 
             const parse_result = try self.extractIdentifier(T);
@@ -811,14 +812,14 @@ test "Nested Optionals" {
     );
 }
 
-test "ArrayList(T)" {
+test "JsonArray(T)" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
 
     const Foo = struct {
-        list: ArrayList(struct { abc: i32 }),
+        list: JsonArray(struct { abc: i32 }),
     };
 
     var type_generator = try TypeGenerator.init(arena.allocator());
