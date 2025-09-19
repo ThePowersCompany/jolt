@@ -421,7 +421,12 @@ const TypeGenerator = struct {
         inline for (S.fields) |field| {
             try res.appendSlice(self.arena_alloc, field.name);
 
-            const parse_result = try self.extractIdentifier(field.type);
+            comptime var T: type = field.type;
+            if (comptime std.mem.containsAtLeast(u8, @typeName(field.type), 1, "array_list.Aligned(")) {
+                T = @FieldType(field.type, "items");
+            }
+
+            const parse_result = try self.extractIdentifier(T);
 
             // TODO: This is a weird bug in defaultValue I had to work around...
             if (comptime strEqls(field.name, "_is_finished")) continue;
@@ -802,6 +807,29 @@ test "Nested Optionals" {
         \\enabled?: boolean
         \\threshold?: number
         \\}
+        \\}
+    );
+}
+
+test "ArrayList(T)" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Foo = struct {
+        list: ArrayList(struct { abc: i32 }),
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractIdentifier(Foo);
+    try std.testing.expectEqualStrings(parse_result.parsed,
+        \\{
+        \\list: {
+        \\abc: number
+        \\}[]
         \\}
     );
 }
