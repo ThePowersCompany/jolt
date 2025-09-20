@@ -38,6 +38,7 @@ pub const UnionRepr = @import("./middleware/parse-body.zig").UnionRepr;
 pub const array = @import("./utils/array_utils.zig");
 pub const datetime = @import("./utils/datetime.zig");
 pub const email = @import("./utils/email.zig");
+pub const err = @import("./utils/error.zig");
 pub const json = @import("./utils/json.zig");
 pub const jwt = @import("./utils/jwt.zig");
 pub const mime = @import("./utils/mime.zig");
