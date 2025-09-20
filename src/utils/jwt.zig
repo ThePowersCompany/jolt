@@ -1,7 +1,9 @@
 const std = @import("std");
-const testing = std.testing;
+const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 const base64url = std.base64.url_safe_no_pad;
+
+const stringify = @import("json.zig").stringify;
 
 const Algorithm = enum {
     const Self = @This();
@@ -10,7 +12,11 @@ const Algorithm = enum {
     HS384,
     HS512,
 
-    pub fn jsonStringify(value: Self, options: std.json.StringifyOptions, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn jsonStringify(
+        value: Self,
+        options: std.json.Stringify.Options,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
         try std.json.stringify(@tagName(value), options, writer);
     }
 
@@ -34,17 +40,14 @@ pub const SignatureOptions = struct {
 };
 
 pub fn encode(
-    allocator: std.mem.Allocator,
+    alloc: Allocator,
     comptime alg: Algorithm,
     payload: anytype,
     signature_options: SignatureOptions,
 ) ![]const u8 {
-    var payload_json = std.ArrayList(u8).init(allocator);
-    defer payload_json.deinit();
-
-    try std.json.stringify(payload, .{}, payload_json.writer());
-
-    return try encodeMessage(allocator, alg, payload_json.items, signature_options);
+    const json = try stringify(alloc, payload, .{});
+    defer alloc.free(json);
+    return try encodeMessage(alloc, alg, json, signature_options);
 }
 
 pub fn encodeMessage(
@@ -57,52 +60,74 @@ pub fn encodeMessage(
     defer protected_header.deinit();
     try protected_header.put("alg", .{ .string = @tagName(alg) });
     try protected_header.put("typ", .{ .string = "JWT" });
-    if (signature_options.kid) |kid| {
+    if (signature_options
+        .kid) |kid|
+    {
         try protected_header.put("kid", .{ .string = kid });
     }
 
-    var protected_header_json = std.ArrayList(u8).init(allocator);
+    var protected_header_json = std.Io.Writer.Allocating.init(allocator);
     defer protected_header_json.deinit();
 
-    try std.json.stringify(Value{ .object = protected_header }, .{}, protected_header_json.writer());
+    var s = std.json.Stringify{
+        .writer = &protected_header_json.writer,
+        .options = .{},
+    };
+    try s.write(Value{ .object = protected_header });
 
     const message_base64_len = base64url.Encoder.calcSize(message.len);
-    const protected_header_base64_len = base64url.Encoder.calcSize(protected_header_json.items.len);
+    const protected_header_base64_len = base64url.Encoder.calcSize(protected_header_json.written().len);
 
-    var jwt_text = std.ArrayList(u8).init(allocator);
+    var jwt_text = std.Io.Writer.Allocating.init(allocator);
     defer jwt_text.deinit();
-    try jwt_text.resize(message_base64_len + 1 + protected_header_base64_len);
+    try jwt_text.ensureTotalCapacity(message_base64_len + 1 + protected_header_base64_len);
 
-    const protected_header_base64 = jwt_text.items[0..protected_header_base64_len];
-    const message_base64 = jwt_text.items[protected_header_base64_len + 1 ..][0..message_base64_len];
+    const signature = blk: {
+        const protected_header_base64 = jwt_text.writer.buffer[0..protected_header_base64_len];
+        const message_base64 = jwt_text.writer.buffer[protected_header_base64_len + 1 ..][0..message_base64_len];
 
-    _ = base64url.Encoder.encode(protected_header_base64, protected_header_json.items);
-    jwt_text.items[protected_header_base64_len] = '.';
-    _ = base64url.Encoder.encode(message_base64, message);
+        _ = base64url.Encoder.encode(protected_header_base64, protected_header_json.written());
+        jwt_text.writer.buffer[protected_header_base64_len] = '.';
+        _ = base64url.Encoder.encode(message_base64, message);
+        jwt_text.writer.end = protected_header_base64_len + 1 + message_base64_len;
 
-    const signature = &generate_signature(alg, signature_options.key, protected_header_base64, message_base64);
+        break :blk generate_signature(alg, signature_options
+            .key, protected_header_base64, message_base64);
+    };
     const signature_base64_len = base64url.Encoder.calcSize(signature.len);
 
-    try jwt_text.resize(message_base64_len + 1 + protected_header_base64_len + 1 + signature_base64_len);
-    const signature_base64 = jwt_text.items[message_base64_len + 1 + protected_header_base64_len + 1 ..][0..signature_base64_len];
+    try jwt_text.ensureTotalCapacity(message_base64_len + 1 + protected_header_base64_len + 1 + signature_base64_len);
+    const signature_base64 = jwt_text.writer.buffer[message_base64_len + 1 + protected_header_base64_len + 1 ..][0..signature_base64_len];
 
-    jwt_text.items[message_base64_len + 1 + protected_header_base64_len] = '.';
-    _ = base64url.Encoder.encode(signature_base64, signature);
+    jwt_text.writer.buffer[message_base64_len + 1 + protected_header_base64_len] = '.';
+    _ = base64url.Encoder.encode(signature_base64, &signature);
+    jwt_text.writer.end += 1 + signature_base64_len;
 
     return jwt_text.toOwnedSlice();
 }
 
-pub fn validate(comptime P: type, allocator: std.mem.Allocator, comptime alg: Algorithm, token_text: []const u8, signature_options: SignatureOptions) !std.json.Parsed(P) {
-    const message = try validateMessage(allocator, alg, token_text, signature_options);
-    defer allocator.free(message);
+pub fn validate(
+    comptime P: type,
+    alloc: Allocator,
+    comptime alg: Algorithm,
+    token_text: []const u8,
+    signature_options: SignatureOptions,
+) !std.json.Parsed(P) {
+    const message = try validateMessage(alloc, alg, token_text, signature_options);
+    defer alloc.free(message);
 
     // 10.  Verify that the resulting octet sequence is a UTF-8-encoded
     //      representation of a completely valid JSON object conforming to
     //      RFC 7159 [RFC7159]; let the JWT Claims Set be this JSON object.
-    return std.json.parseFromSlice(P, allocator, message, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
+    return std.json.parseFromSlice(P, alloc, message, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
 }
 
-pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algorithm, token_text: []const u8, signature_options: SignatureOptions) ![]const u8 {
+pub fn validateMessage(
+    alloc: Allocator,
+    comptime expected_alg: Algorithm,
+    token_text: []const u8,
+    signature_options: SignatureOptions,
+) ![]const u8 {
     // 1.   Verify that the JWT contains at least one period ('.')
     //      character.
     // 2.   Let the Encoded JOSE Header be the portion of the JWT before the
@@ -113,8 +138,8 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
     // 3.   Base64url decode the Encoded JOSE Header following the
     //      restriction that no line breaks, whitespace, or other additional
     //      characters have been used.
-    const jose_json = try allocator.alloc(u8, try base64url.Decoder.calcSizeForSlice(jose_base64));
-    defer allocator.free(jose_json);
+    const jose_json = try alloc.alloc(u8, try base64url.Decoder.calcSizeForSlice(jose_base64));
+    defer alloc.free(jose_json);
     try base64url.Decoder.decode(jose_json, jose_base64);
 
     // 4.   Verify that the resulting octet sequence is a UTF-8-encoded
@@ -124,9 +149,9 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
     // TODO: Make sure the JSON parser confirms everything above
 
     const cty_opt = @as(?[]const u8, null);
-    defer if (cty_opt) |cty| allocator.free(cty);
+    defer if (cty_opt) |cty| alloc.free(cty);
 
-    var jwt_tree = try std.json.parseFromSlice(std.json.Value, allocator, jose_json, .{});
+    var jwt_tree = try std.json.parseFromSlice(std.json.Value, alloc, jose_json, .{});
     defer jwt_tree.deinit();
 
     // 5.   Verify that the resulting JOSE Header includes only parameters
@@ -187,8 +212,8 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
                 const payload_base64 = section_iter.next().?;
                 const signature_base64 = section_iter.rest();
 
-                const signature = try allocator.alloc(u8, try base64url.Decoder.calcSizeForSlice(signature_base64));
-                defer allocator.free(signature);
+                const signature = try alloc.alloc(u8, try base64url.Decoder.calcSizeForSlice(signature_base64));
+                defer alloc.free(signature);
                 try base64url.Decoder.decode(signature, signature_base64);
 
                 const gen_sig = &generate_signature(expected_alg, signature_options.key, jose_base64, payload_base64);
@@ -196,7 +221,7 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
                     return error.InvalidSignature;
                 }
 
-                break :get_message try allocator.dupe(u8, payload_base64);
+                break :get_message try alloc.dupe(u8, payload_base64);
             },
             .JWE => {
                 // Else, if the JWT is a JWE, follow the steps specified in
@@ -206,7 +231,7 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
             },
         }
     };
-    defer allocator.free(message_base64);
+    defer alloc.free(message_base64);
 
     // 8.   If the JOSE Header contains a "cty" (content type) value of
     //      "JWT", then the Message is a JWT that was the subject of nested
@@ -220,14 +245,19 @@ pub fn validateMessage(allocator: std.mem.Allocator, comptime expected_alg: Algo
     // 9.   Otherwise, base64url decode the Message following the
     //      restriction that no line breaks, whitespace, or other additional
     //      characters have been used.
-    const message = try allocator.alloc(u8, try base64url.Decoder.calcSizeForSlice(message_base64));
-    errdefer allocator.free(message);
+    const message = try alloc.alloc(u8, try base64url.Decoder.calcSizeForSlice(message_base64));
+    errdefer alloc.free(message);
     try base64url.Decoder.decode(message, message_base64);
 
     return message;
 }
 
-pub fn generate_signature(comptime algo: Algorithm, key: []const u8, protected_header_base64: []const u8, payload_base64: []const u8) [algo.CryptoFn().mac_length]u8 {
+pub fn generate_signature(
+    comptime algo: Algorithm,
+    key: []const u8,
+    protected_header_base64: []const u8,
+    payload_base64: []const u8,
+) [algo.CryptoFn().mac_length]u8 {
     const T = algo.CryptoFn();
     var h = T.init(key);
     h.update(protected_header_base64);
@@ -311,12 +341,13 @@ fn test_generate(
     expected: []const u8,
     key_base64: []const u8,
 ) !void {
-    const key = try std.testing.allocator.alloc(u8, try base64url.Decoder.calcSizeForSlice(key_base64));
-    defer std.testing.allocator.free(key);
+    const alloc = std.testing.allocator;
+    const key = try alloc.alloc(u8, try base64url.Decoder.calcSizeForSlice(key_base64));
+    defer alloc.free(key);
     try base64url.Decoder.decode(key, key_base64);
 
-    const token = try encode(std.testing.allocator, algorithm, payload, .{ .key = key });
-    defer std.testing.allocator.free(token);
+    const token = try encode(alloc, algorithm, payload, .{ .key = key });
+    defer alloc.free(token);
 
     try std.testing.expectEqualSlices(u8, expected, token);
 }
@@ -327,12 +358,18 @@ const TestValidatePayload = struct {
     @"http://example.com/is_root": bool,
 };
 
-fn test_validate(comptime algorithm: Algorithm, expected: TestValidatePayload, token: []const u8, key_base64: []const u8) !void {
-    const key = try std.testing.allocator.alloc(u8, try base64url.Decoder.calcSizeForSlice(key_base64));
-    defer std.testing.allocator.free(key);
+fn test_validate(
+    comptime algorithm: Algorithm,
+    expected: TestValidatePayload,
+    token: []const u8,
+    key_base64: []const u8,
+) !void {
+    const alloc = std.testing.allocator;
+    const key = try alloc.alloc(u8, try base64url.Decoder.calcSizeForSlice(key_base64));
+    defer alloc.free(key);
     try base64url.Decoder.decode(key, key_base64);
 
-    var claims_p = try validate(TestValidatePayload, std.testing.allocator, algorithm, token, .{ .key = key });
+    var claims_p = try validate(TestValidatePayload, alloc, algorithm, token, .{ .key = key });
     defer claims_p.deinit();
     const claims = claims_p.value;
 
@@ -353,10 +390,11 @@ fn test_generate_then_validate(comptime alg: Algorithm, signature_options: Signa
         .iat = 1516239022,
     };
 
-    const token = try encode(std.testing.allocator, alg, payload, signature_options);
-    defer std.testing.allocator.free(token);
+    const alloc = std.testing.allocator;
+    const token = try encode(alloc, alg, payload, signature_options);
+    defer alloc.free(token);
 
-    var decoded_p = try validate(Payload, std.testing.allocator, alg, token, signature_options);
+    var decoded_p = try validate(Payload, alloc, alg, token, signature_options);
     defer decoded_p.deinit();
     const decoded = decoded_p.value;
 

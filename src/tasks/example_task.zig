@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const task_utils = @import("../main.zig").task_utils;
+const task_utils = @import("../main.zig").task;
 const scheduleArenaTask = task_utils.scheduleArenaTask;
 const logFmt = task_utils.logFmt;
 const log = task_utils.log;

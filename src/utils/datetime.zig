@@ -1,4 +1,4 @@
-// NOTE: From https://github.com/karlseguin/zul/blob/master/src/datetime.zig ae0c273
+// NOTE: Originally from https://github.com/karlseguin/zul/blob/master/src/datetime.zig ae0c273
 
 const std = @import("std");
 
@@ -7,16 +7,18 @@ const Allocator = std.mem.Allocator;
 // Simple (no leap seconds, UTC-only), DateTime, Date and Time types.
 
 pub const Date = struct {
-    year: i16,
+    year: u16,
     month: u8,
     day: u8,
+
+    const BUF_SIZE: usize = 10; // YYYY-MM-DD
 
     pub const Format = enum {
         iso8601,
         rfc3339,
     };
 
-    pub fn init(year: i16, month: u8, day: u8) !Date {
+    pub fn init(year: u16, month: u8, day: u8) !Date {
         if (!Date.valid(year, month, day)) {
             return error.InvalidDate;
         }
@@ -28,7 +30,7 @@ pub const Date = struct {
         };
     }
 
-    pub fn valid(year: i16, month: u8, day: u8) bool {
+    pub fn valid(year: u16, month: u8, day: u8) bool {
         if (month == 0 or month > 12) {
             return false;
         }
@@ -76,10 +78,22 @@ pub const Date = struct {
         return std.math.order(a.day, b.day);
     }
 
+    pub fn since(self: Date, other: Date) i64 {
+        const sdt = DateTime.fromUTC(self, Time.ZERO);
+        const odt = DateTime.fromUTC(other, Time.ZERO);
+        return sdt.unix(.seconds) - odt.unix(.seconds);
+    }
+
     pub fn format(self: Date, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
-        var buf: [11]u8 = undefined;
+        var buf: [BUF_SIZE]u8 = undefined;
         const n = writeDate(&buf, self);
         try out.writeAll(buf[0..n]);
+    }
+
+    pub fn toString(self: Date, alloc: Allocator) ![]const u8 {
+        var buf: [BUF_SIZE]u8 = undefined;
+        const n = writeDate(&buf, self);
+        return alloc.dupe(u8, buf[0..n]);
     }
 
     pub fn jsonStringify(self: Date, out: anytype) !void {
@@ -91,8 +105,8 @@ pub const Date = struct {
         // doesn't work and it'll always put a + sign given a signed integer with padding
         // So, for year, we always feed it an unsigned number (which avoids both issues)
         // and prepend the - if we need it.s
-        var buf: [13]u8 = undefined;
-        const n = writeDate(buf[1..12], self);
+        var buf: [BUF_SIZE + 2]u8 = undefined;
+        const n = writeDate(buf[1 .. BUF_SIZE - 1], self);
         buf[0] = '"';
         buf[n + 1] = '"';
         try out.print("{s}", .{buf[0 .. n + 2]});
@@ -112,42 +126,46 @@ pub const Time = struct {
     hour: u8,
     min: u8,
     sec: u8,
-    micros: u32,
+    nanos: u32,
+
+    pub const ZERO: Time = .{
+        .hour = 0,
+        .min = 0,
+        .sec = 0,
+        .nanos = 0,
+    };
+
+    const BUF_SIZE: usize = 18; // HH:mm:ss.sssssssss
 
     pub const Format = enum {
         rfc3339,
     };
 
-    pub fn init(hour: u8, min: u8, sec: u8, micros: u32) !Time {
-        if (!Time.valid(hour, min, sec, micros)) {
+    pub fn init(hour: u8, min: u8, sec: u8, nanos: u32) !Time {
+        if (!Time.valid(hour, min, sec, nanos)) {
             return error.InvalidTime;
         }
-
         return .{
             .hour = hour,
             .min = min,
             .sec = sec,
-            .micros = micros,
+            .nanos = nanos,
         };
     }
 
-    pub fn valid(hour: u8, min: u8, sec: u8, micros: u32) bool {
+    pub fn valid(hour: u8, min: u8, sec: u8, nanos: u32) bool {
         if (hour > 23) {
             return false;
         }
-
         if (min > 59) {
             return false;
         }
-
         if (sec > 59) {
             return false;
         }
-
-        if (micros > 999999) {
+        if (nanos > 999_999_999) {
             return false;
         }
-
         return true;
     }
 
@@ -156,7 +174,6 @@ pub const Time = struct {
         const time = switch (fmt) {
             .rfc3339 => try parser.time(),
         };
-
         if (parser.unconsumed() != 0) {
             return error.InvalidTime;
         }
@@ -173,11 +190,17 @@ pub const Time = struct {
         const sec_order = std.math.order(a.sec, b.sec);
         if (sec_order != .eq) return sec_order;
 
-        return std.math.order(a.micros, b.micros);
+        return std.math.order(a.nanos, b.nanos);
+    }
+
+    pub fn since(self: Time, other: Time) i64 {
+        return (@as(i64, @intCast(self.hour)) - @as(i64, @intCast(other.hour))) * 3600 +
+            (@as(i64, @intCast(self.min)) - @as(i64, @intCast(other.min))) * 60 +
+            (@as(i64, @intCast(self.sec)) - @as(i64, @intCast(other.sec)));
     }
 
     pub fn format(self: Time, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
-        var buf: [15]u8 = undefined;
+        var buf: [BUF_SIZE]u8 = undefined;
         const n = writeTime(&buf, self);
         try out.writeAll(buf[0..n]);
     }
@@ -186,8 +209,8 @@ pub const Time = struct {
         // Our goal here isn't to validate the time. It's to write what we have
         // in a hh:mm:ss.sss format. If the data in Time isn't valid, that's not
         // our problem and we don't guarantee any reasonable output in such cases.
-        var buf: [17]u8 = undefined;
-        const n = writeTime(buf[1..16], self);
+        var buf: [BUF_SIZE + 2]u8 = undefined;
+        const n = writeTime(buf[1 .. BUF_SIZE - 1], self);
         buf[0] = '"';
         buf[n + 1] = '"';
         try out.print("{s}", .{buf[0 .. n + 2]});
@@ -230,48 +253,38 @@ pub const DateTime = struct {
         microseconds,
     };
 
+    pub fn initUTC(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8, nanos: u32) !DateTime {
+        const d: Date = try Date.init(year, month, day);
+        const t: Time = try Time.init(hour, min, sec, nanos);
+        return fromUTC(d, t);
+    }
+
     // https://blog.reverberate.org/2020/05/12/optimizing-date-algorithms.html
-    pub fn initUTC(year: i16, month: u8, day: u8, hour: u8, min: u8, sec: u8, micros: u32) !DateTime {
-        if (Date.valid(year, month, day) == false) {
-            return error.InvalidDate;
-        }
-
-        if (Time.valid(hour, min, sec, micros) == false) {
-            return error.InvalidTime;
-        }
-
+    pub fn fromUTC(d: Date, t: Time) DateTime {
         const year_base = 4800;
-        const month_adj = @as(i32, @intCast(month)) - 3; // March-based month
+        const month_adj = @as(i32, @intCast(d.month)) - 3; // March-based month
         const carry: u8 = if (month_adj < 0) 1 else 0;
         const adjust: u8 = if (carry == 1) 12 else 0;
-        const year_adj: i64 = year + year_base - carry;
+        const year_adj: i64 = d.year + year_base - carry;
         const month_days = @divTrunc(((month_adj + adjust) * 62719 + 769), 2048);
         const leap_days = @divTrunc(year_adj, 4) - @divTrunc(year_adj, 100) + @divTrunc(year_adj, 400);
 
-        const date_micros: i64 = (year_adj * 365 + leap_days + month_days + (day - 1) - 2472632) * MICROSECONDS_IN_A_DAY;
-        const time_micros = (@as(i64, @intCast(hour)) * MICROSECONDS_IN_AN_HOUR) + (@as(i64, @intCast(min)) * MICROSECONDS_IN_A_MIN) + (@as(i64, @intCast(sec)) * MICROSECONDS_IN_A_SEC) + micros;
+        const micros: u32 = @intCast(t.nanos / 1000);
+        const date_micros: i64 = (year_adj * 365 + leap_days + month_days + (d.day - 1) - 2472632) * MICROSECONDS_IN_A_DAY;
+        const time_micros = (@as(i64, @intCast(t.hour)) * MICROSECONDS_IN_AN_HOUR) + (@as(i64, @intCast(t.min)) * MICROSECONDS_IN_A_MIN) + (@as(i64, @intCast(t.sec)) * MICROSECONDS_IN_A_SEC) + micros;
 
         return fromUnix(date_micros + time_micros, .microseconds);
     }
 
-    pub fn fromUnix(value: i64, precision: TimestampPrecision) !DateTime {
+    pub fn fromUnix(value: i64, precision: TimestampPrecision) DateTime {
         switch (precision) {
             .seconds => {
-                if (value < -210863520000 or value > 253402300799) {
-                    return error.OutsideJulianPeriod;
-                }
                 return .{ .micros = value * 1_000_000 };
             },
             .milliseconds => {
-                if (value < -210863520000000 or value > 253402300799999) {
-                    return error.OutsideJulianPeriod;
-                }
                 return .{ .micros = value * 1_000 };
             },
             .microseconds => {
-                if (value < -210863520000000000 or value > 253402300799999999) {
-                    return error.OutsideJulianPeriod;
-                }
                 return .{ .micros = value };
             },
         }
@@ -324,10 +337,10 @@ pub const DateTime = struct {
             else => return error.InvalidDateTime,
         }
 
-        return initUTC(dt.year, dt.month, dt.day, tm.hour, tm.min, tm.sec, tm.micros);
+        return initUTC(dt.year, dt.month, dt.day, tm.hour, tm.min, tm.sec, tm.nanos);
     }
 
-    pub fn add(dt: DateTime, value: i64, unit: TimeUnit) !DateTime {
+    pub fn add(dt: DateTime, value: i64, unit: TimeUnit) DateTime {
         const micros = dt.micros;
         switch (unit) {
             .days => return fromUnix(micros + value * MICROSECONDS_IN_A_DAY, .microseconds),
@@ -409,7 +422,7 @@ pub const DateTime = struct {
             .hour = @intCast(@divTrunc(micros, MICROSECONDS_IN_AN_HOUR)),
             .min = @intCast(@divTrunc(@rem(micros, MICROSECONDS_IN_AN_HOUR), MICROSECONDS_IN_A_MIN)),
             .sec = @intCast(@divTrunc(@rem(micros, MICROSECONDS_IN_A_MIN), MICROSECONDS_IN_A_SEC)),
-            .micros = @intCast(@rem(micros, MICROSECONDS_IN_A_SEC)),
+            .nanos = @intCast(@rem(micros, MICROSECONDS_IN_A_SEC) * 1000),
         };
     }
 
@@ -471,6 +484,76 @@ pub const DateTime = struct {
     }
 };
 
+/// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/PlainDateTime
+pub const PlainDateTime = struct {
+    date: Date,
+    time: Time,
+
+    const Self = @This();
+
+    pub fn parse(input: []const u8) !Self {
+        var parser = Parser.init(input);
+
+        const dt = try parser.rfc3339Date();
+
+        if (!parser.consumeIf('T') and !parser.consumeIf('t') and !parser.consumeIf(' ')) {
+            return error.InvalidDateTime;
+        }
+
+        const tm = try parser.time();
+
+        // NOTE: Ignore any time zone offsets or calendar designations
+
+        return .{
+            .date = dt,
+            .time = tm,
+        };
+    }
+
+    pub fn order(a: Self, b: Self) std.math.Order {
+        const date_order = Date.order(a.date, b.date);
+        if (date_order != .eq) return date_order;
+        return Time.order(a.time, b.time);
+    }
+
+    /// Number of seconds since the `other` date time.
+    /// The `other` date time should be BEFORE this date time for a positive result.
+    pub fn since(self: Self, other: Self) i64 {
+        return self.date.since(other.date) + self.time.since(other.time);
+    }
+
+    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+        var buf: [32]u8 = undefined;
+        const n = self.bufWrite(&buf);
+        try out.writeAll(buf[0..n]);
+    }
+
+    pub fn jsonStringify(self: Self, out: anytype) !void {
+        var buf: [32]u8 = undefined;
+        buf[0] = '"';
+        const n = self.bufWrite(buf[1..]);
+        buf[n + 1] = '"';
+        try out.print("{s}", .{buf[0 .. n + 2]});
+    }
+
+    pub fn jsonParse(allocator: Allocator, source: anytype, options: anytype) !Self {
+        _ = options;
+
+        switch (try source.nextAlloc(allocator, .alloc_if_needed)) {
+            inline .string, .allocated_string => |str| return parse(str) catch return error.InvalidCharacter,
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    fn bufWrite(self: Self, buf: []u8) usize {
+        var offset: u8 = writeDate(buf, self.date);
+        buf[offset] = 'T';
+        offset += 1;
+        offset += writeTime(buf[offset..], self.time);
+        return offset;
+    }
+};
+
 fn writeDate(into: []u8, date: Date) u8 {
     var buf: []u8 = undefined;
     // cast year to a u16 so it doesn't insert a sign
@@ -505,22 +588,31 @@ fn writeTime(into: []u8, time: Time) u8 {
     into[5] = ':';
     into[6..8].* = paddingTwoDigits(time.sec);
 
-    const micros = time.micros;
-    if (micros == 0) {
+    const nanos = time.nanos;
+    if (nanos == 0) {
         return 8;
     }
 
-    if (@rem(micros, 1000) == 0) {
-        into[8] = '.';
+    into[8] = '.';
+
+    if (@rem(nanos, 1_000_000) == 0) {
+        // Milliseconds (3 digits)
         var writer = std.Io.Writer.fixed(into[9..12]);
-        writer.printInt(micros / 1000, 10, .lower, .{ .width = 3, .fill = '0' }) catch unreachable;
+        writer.printInt(nanos / 1_000_000, 10, .lower, .{ .width = 3, .fill = '0' }) catch unreachable;
         return 12;
     }
 
-    into[8] = '.';
-    var writer = std.Io.Writer.fixed(into[9..15]);
-    writer.printInt(micros, 10, .lower, .{ .width = 6, .fill = '0' }) catch unreachable;
-    return 15;
+    if (@rem(nanos, 1_000) == 0) {
+        // Microseconds (6 digits)
+        var writer = std.Io.Writer.fixed(into[9..15]);
+        writer.printInt(nanos / 1_000, 10, .lower, .{ .width = 6, .fill = '0' }) catch unreachable;
+        return 15;
+    }
+
+    // Nanoseconds (9 digits)
+    var writer = std.Io.Writer.fixed(into[9..18]);
+    writer.printInt(nanos, 10, .lower, .{ .width = 9, .fill = '0' }) catch unreachable;
+    return 18;
 }
 
 fn paddingTwoDigits(value: usize) [2]u8 {
@@ -566,7 +658,7 @@ const Parser = struct {
         return true;
     }
 
-    fn nanoseconds(self: *Parser) ?usize {
+    fn nanoseconds(self: *Parser) ?u32 {
         const start = self.pos;
         const input = self.input[start..];
 
@@ -575,7 +667,7 @@ const Parser = struct {
             return null;
         }
 
-        var value: usize = 0;
+        var value: u32 = 0;
         for (input, 0..) |b, i| {
             const n = b -% '0'; // wrapping subtraction
             if (n > 9) {
@@ -590,7 +682,7 @@ const Parser = struct {
         }
 
         self.pos = start + len;
-        return value * std.math.pow(usize, 10, 9 - len);
+        return value * std.math.pow(u32, 10, 9 - @as(u32, @intCast(len)));
     }
 
     fn paddedInt(self: *Parser, comptime T: type, size: u8) ?T {
@@ -634,7 +726,7 @@ const Parser = struct {
         }
 
         const nanos = self.nanoseconds() orelse return error.InvalidTime;
-        return Time.init(hour, min, sec, @intCast(nanos / 1000));
+        return Time.init(hour, min, sec, nanos);
     }
 
     fn iso8601Date(self: *Parser) !Date {
@@ -643,8 +735,7 @@ const Parser = struct {
             return error.InvalidDate;
         }
 
-        const negative = self.consumeIf('-');
-        const year = self.paddedInt(i16, 4) orelse return error.InvalidDate;
+        const year = self.paddedInt(u16, 4) orelse return error.InvalidDate;
 
         var with_dashes = false;
         if (self.consumeIf('-')) {
@@ -660,30 +751,30 @@ const Parser = struct {
         }
 
         const day = self.paddedInt(u8, 2) orelse return error.InvalidDate;
-        return Date.init(if (negative) -year else year, month, day);
+        return Date.init(year, month, day);
     }
 
+    /// YYYY-MM-DD
     fn rfc3339Date(self: *Parser) !Date {
         const len = self.unconsumed();
         if (len < 10) {
             return error.InvalidDate;
         }
 
-        const negative = self.consumeIf('-');
-        const year = self.paddedInt(i16, 4) orelse return error.InvalidDate;
+        const year = self.paddedInt(u16, 4) orelse return error.InvalidDate;
 
-        if (self.consumeIf('-') == false) {
+        if (!self.consumeIf('-')) {
             return error.InvalidDate;
         }
 
         const month = self.paddedInt(u8, 2) orelse return error.InvalidDate;
 
-        if (self.consumeIf('-') == false) {
+        if (!self.consumeIf('-')) {
             return error.InvalidDate;
         }
 
         const day = self.paddedInt(u8, 2) orelse return error.InvalidDate;
-        return Date.init(if (negative) -year else year, month, day);
+        return Date.init(year, month, day);
     }
 };
 

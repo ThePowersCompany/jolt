@@ -11,6 +11,7 @@ const getEnvOrPanic = Endpoint.EnabledContext.getEnvOrPanic;
 const db_migrations = @import("db-migrations.zig");
 const pg = @import("pg");
 
+// Database
 pub const database = @import("db/database.zig");
 pub const migrateDatabase = db_migrations.migrateDatabase;
 pub const newDatabaseMigration = db_migrations.newDatabaseMigration;
@@ -22,6 +23,7 @@ pub const DbRow = pg.Row;
 pub const DbStatement = pg.Stmt;
 pub const DbQueryRow = pg.QueryRow;
 
+// Zap
 pub const Request = zap.Request;
 pub const Endpoint = zap.Endpoint;
 pub const Response = Endpoint.Response;
@@ -31,11 +33,20 @@ pub const mustache = @import("zap/mustache.zig");
 pub const WebSockets = @import("zap/websockets.zig");
 pub const util = @import("zap/util.zig");
 pub const UnionRepr = @import("./middleware/parse-body.zig").UnionRepr;
-pub const task_utils = @import("./utils/task.zig");
 
+// Utilities
+pub const array = @import("./utils/array_utils.zig");
+pub const datetime = @import("./utils/datetime.zig");
+pub const email = @import("./utils/email.zig");
+pub const err = @import("./utils/error.zig");
+pub const json = @import("./utils/json.zig");
+pub const jwt = @import("./utils/jwt.zig");
+pub const mime = @import("./utils/mime.zig");
+pub const password = @import("./utils/password.zig");
+pub const task = @import("./utils/task.zig");
+pub const time = @import("./utils/time.zig");
 pub const types = @import("./utils/types.zig");
-
-pub const json = @import("utils/json.zig");
+pub const uuid = @import("./utils/uuid.zig");
 
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
@@ -149,22 +160,22 @@ pub const JoltServer = struct {
 
         // Created from a thread-safe allocator.
         const task_alloc = thread_safe_alloc.allocator();
-        inline for (tasks) |task| blk: {
-            if (std.meta.hasFn(task, "enabled")) {
+        inline for (tasks) |t| blk: {
+            if (std.meta.hasFn(t, "enabled")) {
                 // Runtime enabled check
-                const enabled_func: Endpoint.EnabledFn = task.enabled;
+                const enabled_func: Endpoint.EnabledFn = t.enabled;
                 if (!try enabled_func(.{ .env = &self.env_map, .alloc = global_arena.allocator() })) {
                     // Not enabled, skip
                     break :blk;
                 }
-            } else if (@hasField(task, "enabled")) {
+            } else if (@hasField(t, "enabled")) {
                 // Compile-time enabled check
-                if (!@field(task, "enabled")) {
+                if (!@field(t, "enabled")) {
                     // Not enabled, skip
                     continue;
                 }
             }
-            try task.submit(task_alloc);
+            try t.submit(task_alloc);
         }
 
         zap.start(.{ .threads = self.opts.threads, .workers = self.opts.workers });
