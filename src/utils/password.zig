@@ -31,7 +31,7 @@ pub fn hash(alloc: std.mem.Allocator, password: []const u8, salt: []const u8, ro
 
 test "correctly hashes a password" {
     const alloc = std.testing.allocator;
-    const hashed = try hash(alloc, "password", "j42(6;Kw");
+    const hashed = try hash(alloc, "password", "j42(6;Kw", 5555);
     defer alloc.free(hashed);
 
     const encoder = std.base64.url_safe.Encoder;
