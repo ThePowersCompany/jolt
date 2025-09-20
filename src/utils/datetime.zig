@@ -597,18 +597,21 @@ fn writeTime(into: []u8, time: Time) u8 {
 
     if (@rem(nanos, 1_000_000) == 0) {
         // Milliseconds (3 digits)
-        _ = std.fmt.formatIntBuf(into[9..12], nanos / 1_000_000, 10, .lower, .{ .width = 3, .fill = '0' });
+        var writer = std.Io.Writer.fixed(into[9..12]);
+        writer.printInt(nanos / 1_000_000, 10, .lower, .{ .width = 3, .fill = '0' }) catch unreachable;
         return 12;
     }
 
     if (@rem(nanos, 1_000) == 0) {
         // Microseconds (6 digits)
-        _ = std.fmt.formatIntBuf(into[9..15], nanos / 1_000, 10, .lower, .{ .width = 6, .fill = '0' });
+        var writer = std.Io.Writer.fixed(into[9..15]);
+        writer.printInt(nanos / 1_000, 10, .lower, .{ .width = 6, .fill = '0' }) catch unreachable;
         return 15;
     }
 
     // Nanoseconds (9 digits)
-    _ = std.fmt.formatIntBuf(into[9..18], nanos, 10, .lower, .{ .width = 9, .fill = '0' });
+    var writer = std.Io.Writer.fixed(into[9..18]);
+    writer.printInt(nanos, 10, .lower, .{ .width = 9, .fill = '0' }) catch unreachable;
     return 18;
 }
 
