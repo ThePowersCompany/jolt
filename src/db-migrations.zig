@@ -82,10 +82,6 @@ fn compareEntries(_: void, a: std.fs.Dir.Entry, b: std.fs.Dir.Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
-fn dropMigrationsTable(alloc: Allocator, conn: *pg.Conn) !void {
-    try executeSql(alloc, conn, "DROP SCHEMA IF EXISTS public CASCADE;");
-}
-
 fn ensureMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) !void {
     const sql = try std.fmt.allocPrint(
         alloc,
@@ -172,7 +168,7 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
     const conn: *pg.Conn = try db.acquireConnection();
     defer conn.release();
 
-    try dropMigrationsTable(alloc, conn, info);
+    try executeSql(alloc, conn, "DROP SCHEMA IF EXISTS public CASCADE;");
     try _migrate(alloc, conn, dir, info);
 }
 
