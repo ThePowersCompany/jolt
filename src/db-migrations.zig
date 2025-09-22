@@ -20,7 +20,7 @@ pub const DbInfo = struct {
     username: []const u8,
     password: []const u8,
     migrations_dir: []const u8,
-    migrations_table: []const u8 = "_prisma_migrations",
+    migrations_table: []const u8 = "_migrations",
 };
 
 const MigrationEntry = struct {
@@ -82,6 +82,40 @@ fn compareEntries(_: void, a: std.fs.Dir.Entry, b: std.fs.Dir.Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
+fn dropMigrationsTable(alloc: Allocator, conn: *pg.Conn) !void {
+    try executeSql(alloc, conn, "DROP SCHEMA IF EXISTS public CASCADE;");
+}
+
+fn ensureMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) !void {
+    const sql = try std.fmt.allocPrint(
+        alloc,
+        \\ CREATE SCHEMA IF NOT EXISTS public;
+        \\ GRANT ALL ON SCHEMA public TO {s};
+        \\ CREATE TABLE IF NOT EXISTS public.{s} (
+        \\   id character varying(36) NOT NULL PRIMARY KEY,
+        \\   checksum character varying(64) NOT NULL,
+        \\   finished_at timestamp with time zone,
+        \\   migration_name character varying(255) NOT NULL,
+        \\   logs text,
+        \\   rolled_back_at timestamp with time zone,
+        \\   started_at timestamp with time zone NOT NULL DEFAULT NOW(),
+        \\   applied_steps_count integer NOT NULL DEFAULT 0
+        \\ )
+        \\ TABLESPACE pg_default;
+        \\ ALTER TABLE IF EXISTS public.{s} OWNER TO {s};
+    ,
+        .{
+            info.username,
+            info.migrations_table,
+            info.migrations_table,
+            info.username,
+        },
+    );
+    defer alloc.free(sql);
+
+    try executeSql(alloc, conn, sql);
+}
+
 pub fn migrateDatabase(alloc: Allocator, info: DbInfo) !void {
     const dir = try loadMigrationDir(alloc, info.migrations_dir);
     defer {
@@ -138,40 +172,7 @@ pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
     const conn: *pg.Conn = try db.acquireConnection();
     defer conn.release();
 
-    const sql = try std.fmt.allocPrint(
-        alloc,
-        \\ DROP SCHEMA if exists public CASCADE;
-        \\ CREATE SCHEMA public;
-        \\ GRANT ALL ON SCHEMA public TO {s};
-        \\ GRANT ALL ON SCHEMA public TO public;
-        \\ CREATE TABLE IF NOT EXISTS public.{s}
-        \\ (
-        \\   id character varying(36) COLLATE pg_catalog."default" NOT NULL,
-        \\   checksum character varying(64) COLLATE pg_catalog."default" NOT NULL,
-        \\   finished_at timestamp with time zone,
-        \\   migration_name character varying(255) COLLATE pg_catalog."default" NOT NULL,
-        \\   logs text COLLATE pg_catalog."default",
-        \\   rolled_back_at timestamp with time zone,
-        \\   started_at timestamp with time zone NOT NULL DEFAULT now(),
-        \\   applied_steps_count integer NOT NULL DEFAULT 0,
-        \\   CONSTRAINT {s}_pkey PRIMARY KEY (id)
-        \\ )
-        \\ TABLESPACE pg_default;
-        \\ ALTER TABLE IF EXISTS public.{s}
-        \\     OWNER to {s};
-    ,
-        .{
-            info.username,
-            info.migrations_table,
-            info.migrations_table,
-            info.migrations_table,
-            info.username,
-        },
-    );
-    defer alloc.free(sql);
-
-    _ = conn.execOpts(sql, .{}, .{ .allocator = alloc }) catch |err| return db.logError(err, conn);
-
+    try dropMigrationsTable(alloc, conn, info);
     try _migrate(alloc, conn, dir, info);
 }
 
@@ -187,6 +188,8 @@ fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
 }
 
 fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !void {
+    try ensureMigrationsTable(alloc, conn, info);
+
     const migration_entries = try queryMigrationsTable(alloc, conn, info);
     defer {
         for (migration_entries) |entry| {
