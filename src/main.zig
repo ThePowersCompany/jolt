@@ -6,8 +6,6 @@ const zap = @import("./zap/zap.zig");
 const auth = @import("middleware/auth.zig");
 const RequestHandler = Endpoint.RequestHandler;
 
-const getEnvOrPanic = Endpoint.EnabledContext.getEnvOrPanic;
-
 const db_migrations = @import("db-migrations.zig");
 const pg = @import("pg");
 
@@ -50,11 +48,10 @@ pub const uuid = @import("./utils/uuid.zig");
 
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
-pub const middleware = .{
-    .cors = @import("./middleware/cors.zig").cors,
-    ._cors = @import("./middleware/cors.zig")._cors,
-    .parseBody = @import("./middleware/parse-body.zig").parseBody,
-    .parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams,
+pub const middleware = struct {
+    pub const cors = @import("./middleware/cors.zig").cors;
+    pub const parseBody = @import("./middleware/parse-body.zig").parseBody;
+    pub const parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams;
 };
 
 pub const ServerOpts = struct {
@@ -72,6 +69,10 @@ pub const JoltServer = struct {
     opts: ServerOpts,
     env_map: std.process.EnvMap,
 
+    /// Enable Cross-Origin Requests
+    /// By default, only requests from the same host/port are allowed.
+    cors: bool = false,
+
     pub fn init(alloc: Allocator, opts: ServerOpts) !Self {
         return .{
             .alloc = alloc,
@@ -84,11 +85,26 @@ pub const JoltServer = struct {
         self.env_map.deinit();
     }
 
+    pub fn getEnv(self: *Self, comptime key: []const u8, comptime default: []const u8) []const u8 {
+        return self.env_map.get(key) orelse default;
+    }
+
+    pub fn getEnvOrPanic(self: *Self, comptime key: []const u8) []const u8 {
+        return Endpoint.EnabledContext.getEnvOrPanic(&self.env_map, key);
+    }
+
     pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []const type, auto: anytype) !void {
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
         var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
-        var listener = try createListener(self.alloc, self.opts.port);
+
+        var listener = Endpoint.Listener.init(self.alloc, .{
+            .port = self.opts.port,
+            .on_request = null,
+            .log = true,
+            .max_clients = 100000,
+            .max_body_size = 100 * 1024 * 1024,
+        });
         defer listener.deinit();
 
         const alloc = global_arena.allocator();
@@ -118,7 +134,7 @@ pub const JoltServer = struct {
 
             if (std.meta.hasFn(typ, "init") and std.meta.hasFn(typ, "deinit")) {
                 // Legacy init/deinit
-                try typ.init(thread_safe_alloc.allocator(), &listener, path);
+                try typ.init(thread_safe_alloc.allocator(), self, &listener, path);
                 try deinitFns.append(alloc, typ.deinit);
             } else {
 
@@ -148,7 +164,7 @@ pub const JoltServer = struct {
 
                 const error_handler: Endpoint.ErrorHandlerFn = if (std.meta.hasFn(typ, "sendErrorResponse")) @field(typ, "sendErrorResponse") else Endpoint.defaultErrorHandler;
 
-                const ep = Endpoint.Endpoint.init(path, error_handler, handlers);
+                const ep = Endpoint.Endpoint.init(self, path, error_handler, handlers);
                 try listener.register(&ep);
             }
         }
@@ -181,17 +197,6 @@ pub const JoltServer = struct {
         zap.start(.{ .threads = self.opts.threads, .workers = self.opts.workers });
     }
 };
-
-fn createListener(alloc: Allocator, port: u16) !Endpoint.Listener {
-    const settings = zap.HttpListenerSettings{
-        .port = port,
-        .on_request = null,
-        .log = true,
-        .max_clients = 100000,
-        .max_body_size = 100 * 1024 * 1024,
-    };
-    return Endpoint.Listener.init(alloc, settings);
-}
 
 pub fn main() !void {
     // Example auto middleware

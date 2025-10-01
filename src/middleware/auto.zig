@@ -1,12 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+const eql = std.mem.eql;
+
+const builtin = @import("builtin");
+
 const zap = @import("../zap/zap.zig");
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 const Request = zap.Request;
 const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
-const assert = std.debug.assert;
-const eql = std.mem.eql;
 
 // Auto middleware
 const parseQueryParams = @import("parse-query-params.zig").parseQueryParams;
@@ -19,7 +22,7 @@ const cors = @import("cors.zig").cors;
 const AutoMiddleware = struct {
     // pub const _
     decls: struct {
-        cors: bool = false,
+        cors: bool = builtin.mode == .Debug,
         middleware: bool = false,
     } = .{},
     // Normal fields within a Context object

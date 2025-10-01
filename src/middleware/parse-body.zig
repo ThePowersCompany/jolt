@@ -1,7 +1,9 @@
 const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
+
 const zap = @import("../zap/zap.zig");
+const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 const Request = zap.Request;
 const HttpError = zap.HttpError;
@@ -33,27 +35,23 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
     switch (body_type_info) {
         .@"struct", .@"union" => {
             return struct {
-                fn parseBody(
-                    context: *Context,
-                    alloc: Allocator,
-                    req: Request,
-                ) !void {
-                    if (req.body) |body| {
+                fn parseBody(ctx: *MiddlewareContext(Context)) !void {
+                    if (ctx.req.body) |body| {
                         const parsed_body = json.parseFromSliceLeaky(
-                            @TypeOf(context.body),
-                            alloc,
+                            @TypeOf(ctx.ctx.body),
+                            ctx.alloc,
                             body,
                             .{},
                         ) catch |err| {
                             std.log.info("Invalid body sent: {}\n", .{err});
-                            return try req.respondWithError(
+                            return try ctx.req.respondWithError(
                                 StatusCode.bad_request,
                                 "Unexpected body structure",
                             );
                         };
-                        context.body = parsed_body;
+                        ctx.ctx.body = parsed_body;
                     } else {
-                        try req.respondWithError(
+                        try ctx.req.respondWithError(
                             StatusCode.bad_request,
                             "Body was not provided",
                         );
@@ -66,15 +64,11 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
                 @compileError("Body was a pointer but not a string");
             }
             return struct {
-                fn parseBody(
-                    context: *Context,
-                    _: Allocator,
-                    req: Request,
-                ) !void {
-                    if (req.body) |body| {
-                        context.body = body;
+                fn parseBody(ctx: *MiddlewareContext(Context)) !void {
+                    if (ctx.req.body) |body| {
+                        ctx.ctx.body = body;
                     } else {
-                        try req.respondWithError(
+                        try ctx.req.respondWithError(
                             StatusCode.bad_request,
                             "Body was not provided",
                         );

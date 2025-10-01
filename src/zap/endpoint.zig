@@ -1,8 +1,9 @@
 const std = @import("std");
-const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
 const Allocator = std.mem.Allocator;
+
+const builtin = @import("builtin");
 
 // zap types
 const zap = @import("zap.zig");
@@ -11,10 +12,22 @@ const ListenerSettings = zap.HttpListenerSettings;
 const HttpListener = zap.HttpListener;
 const StatusCode = zap.StatusCode;
 
+const JoltServer = @import("../main.zig").JoltServer;
+
+const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const stringify = @import("../utils/json.zig").stringify;
 
+pub fn MiddlewareContext(comptime Context: type) type {
+    return struct {
+        ctx: *Context,
+        alloc: Allocator,
+        server: *JoltServer,
+        req: Request,
+    };
+}
+
 pub fn MiddlewareFn(comptime Context: type) type {
-    return fn (context: *Context, alloc: Allocator, req: Request) anyerror!void;
+    return fn (ctx: *MiddlewareContext(Context)) anyerror!void;
 }
 
 pub const EnabledContext = struct {
@@ -32,7 +45,7 @@ pub const EnabledContext = struct {
 pub const EnabledFn = *const fn (EnabledContext) anyerror!bool;
 
 const DefaultOptionsContext = struct {
-    pub const cors = true;
+    pub const cors = builtin.mode == .Debug;
 };
 
 pub fn defaultOptionsHandler(_: *DefaultOptionsContext, _: Allocator) !Response(void) {
@@ -58,7 +71,7 @@ pub fn Response(comptime ReturnType: type) type {
 }
 
 pub const RequestHandler = struct {
-    handle_fn: *const fn (Allocator, Request, ErrorHandlerFn) anyerror!void,
+    handle_fn: *const fn (Allocator, *JoltServer, Request, ErrorHandlerFn) anyerror!void,
 
     pub fn init(comptime auto: anytype, comptime last_fn: anytype) !RequestHandler {
         const info: std.builtin.Type = @typeInfo(@TypeOf(last_fn));
@@ -93,10 +106,16 @@ pub const RequestHandler = struct {
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(alloc: Allocator, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+            pub fn handle(alloc: Allocator, server: *JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
                 var context: Context = undefined;
+                var middleware_context: MiddlewareContext(Context) = .{
+                    .ctx = &context,
+                    .alloc = alloc,
+                    .server = server,
+                    .req = req,
+                };
 
-                auto(Context)(&context, alloc, req) catch |err| {
+                auto(Context)(&middleware_context) catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -172,10 +191,11 @@ pub const RequestHandler = struct {
     pub fn handle(
         self: RequestHandler,
         allocator: Allocator,
+        server: *JoltServer,
         req: Request,
         sendErrorResponse: ErrorHandlerFn,
     ) void {
-        self.handle_fn(allocator, req, sendErrorResponse) catch |err| {
+        self.handle_fn(allocator, server, req, sendErrorResponse) catch |err| {
             std.log.err("Failed to generate response: {}", .{err});
             req.respondWithStatus(StatusCode.internal_server_error) catch |e| {
                 std.log.err("Failed to fail: {}", .{e});
@@ -195,12 +215,14 @@ pub const RequestHandlers = struct {
 };
 
 pub const Endpoint = struct {
+    server: *JoltServer,
     path: []const u8,
     handlers: RequestHandlers,
     sendErrorResponse: ErrorHandlerFn,
 
-    pub fn init(path: []const u8, sendErrorResponse: ErrorHandlerFn, handlers: RequestHandlers) Endpoint {
+    pub fn init(server: *JoltServer, path: []const u8, sendErrorResponse: ErrorHandlerFn, handlers: RequestHandlers) Endpoint {
         return .{
+            .server = server,
             .path = path,
             .sendErrorResponse = sendErrorResponse,
             .handlers = handlers,
@@ -211,22 +233,22 @@ pub const Endpoint = struct {
         defer _ = arena.reset(.retain_capacity);
         switch (req.methodAsEnum()) {
             .GET => if (self.handlers.getHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .POST => if (self.handlers.postHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .PUT => if (self.handlers.putHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .PATCH => if (self.handlers.patchHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .DELETE => if (self.handlers.deleteHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .OPTIONS => if (self.handlers.optionsHandler) |handler| {
-                return handler.handle(arena.allocator(), req, self.sendErrorResponse);
+                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
             },
             .UNKNOWN => {
                 return;
@@ -243,7 +265,7 @@ pub const Endpoint = struct {
         // It's the handler's responsibility to finish the upgrade of the request
         // because the receiver defines the connection state/context to be used.
         if (self.handlers.wsHandler) |handler| {
-            handler.handle(arena.allocator(), req, self.sendErrorResponse);
+            handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
         }
     }
 };
