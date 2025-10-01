@@ -44,9 +44,7 @@ pub const EnabledContext = struct {
 
 pub const EnabledFn = *const fn (EnabledContext) anyerror!bool;
 
-const DefaultOptionsContext = struct {
-    pub const cors = builtin.mode == .Debug;
-};
+const DefaultOptionsContext = struct {};
 
 pub fn defaultOptionsHandler(_: *DefaultOptionsContext, _: Allocator) !Response(void) {
     return .{};
