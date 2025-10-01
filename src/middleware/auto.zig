@@ -79,7 +79,7 @@ pub fn auto(comptime Context: type) MiddlewareFn(Context) {
     return struct {
         fn auto(ctx: *MiddlewareContext(Context)) anyerror!void {
             if (comptime auto_middleware.fields.req) {
-                @field(ctx, "req") = ctx.req;
+                @field(ctx.ctx, "req") = ctx.req;
             }
 
             if (comptime auto_middleware.decls.cors) {
