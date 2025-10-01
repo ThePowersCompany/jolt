@@ -93,6 +93,16 @@ pub const JoltServer = struct {
         return Endpoint.EnabledContext.getEnvOrPanic(&self.env_map, key);
     }
 
+    pub fn getEnvBool(self: *Self, comptime key: []const u8, comptime default: bool) bool {
+        const val = self.env_map.get(key) orelse default;
+        return std.ascii.eqlIgnoreCase(val, "true") or std.ascii.eqlIgnoreCase(val, "yes") or std.ascii.eqlIgnoreCase(val, "1");
+    }
+
+    pub fn getEnvInt(self: *Self, comptime T: type, comptime key: []const u8, comptime default: T) !T {
+        const val = self.env_map.get(key) orelse default;
+        return std.fmt.parseInt(T, val, 10);
+    }
+
     pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []const type, auto: anytype) !void {
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();

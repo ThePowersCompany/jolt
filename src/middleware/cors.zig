@@ -9,7 +9,6 @@ const Request = zap.Request;
 pub fn cors(comptime Context: type) MiddlewareFn(Context) {
     return struct {
         fn cors(ctx: *MiddlewareContext(Context)) anyerror!void {
-            if (!ctx.server.cors) return;
             _setHeaders(ctx.req) catch |err| {
                 std.log.err("CORS error: {}\n", .{err});
                 return try ctx.req.respondWithError(
