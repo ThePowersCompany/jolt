@@ -2,7 +2,9 @@ const std = @import("std");
 const comptimePrint = std.fmt.comptimePrint;
 const json = std.json;
 const Allocator = std.mem.Allocator;
+
 const zap = @import("../zap/zap.zig");
+const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 const Request = zap.Request;
 const HttpError = zap.HttpError;
@@ -166,12 +168,8 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             return false;
         }
 
-        fn parseQueryParams(
-            ctx: *Context,
-            alloc: Allocator,
-            req: Request,
-        ) anyerror!void {
-            req.parseQuery();
+        fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
+            ctx.req.parseQuery();
 
             var all_fields_are_optional = true;
             outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
@@ -185,8 +183,8 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 }
             }
 
-            if (!all_fields_are_optional and req.getParamCount() == 0) {
-                return try req.respondWithError(
+            if (!all_fields_are_optional and ctx.req.getParamCount() == 0) {
+                return try ctx.req.respondWithError(
                     StatusCode.bad_request,
                     "No query params were provided",
                 );
@@ -195,7 +193,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
                 if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
                     inline for (@typeInfo(ctx_field.type).@"struct".fields) |field| {
-                        if (try handleQueryParam(ctx, alloc, req, field)) {
+                        if (try handleQueryParam(ctx.ctx, ctx.alloc, ctx.req, field)) {
                             break :outer;
                         }
                     }

@@ -1,12 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+const eql = std.mem.eql;
+
 const zap = @import("../zap/zap.zig");
+const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 const Request = zap.Request;
 const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
-const assert = std.debug.assert;
-const eql = std.mem.eql;
 
 // Auto middleware
 const parseQueryParams = @import("parse-query-params.zig").parseQueryParams;
@@ -73,30 +75,30 @@ pub fn auto(comptime Context: type) MiddlewareFn(Context) {
     const auto_middleware: AutoMiddleware = comptime determine_middleware(Context);
 
     return struct {
-        fn auto(ctx: *Context, alloc: Allocator, req: Request) anyerror!void {
+        fn auto(ctx: *MiddlewareContext(Context)) anyerror!void {
             if (comptime auto_middleware.fields.req) {
-                @field(ctx, "req") = req;
+                @field(ctx.ctx, "req") = ctx.req;
             }
 
             if (comptime auto_middleware.decls.cors) {
-                try cors(Context)(ctx, alloc, req);
-                if (req.isFinished()) return;
+                try cors(Context)(ctx);
+                if (ctx.req.isFinished()) return;
             }
 
             if (comptime auto_middleware.fields.query_params) {
-                try parseQueryParams(Context)(ctx, alloc, req);
-                if (req.isFinished()) return;
+                try parseQueryParams(Context)(ctx);
+                if (ctx.req.isFinished()) return;
             }
 
             if (comptime auto_middleware.fields.body) {
-                try parseBody(Context)(ctx, alloc, req);
-                if (req.isFinished()) return;
+                try parseBody(Context)(ctx);
+                if (ctx.req.isFinished()) return;
             }
 
             if (comptime auto_middleware.decls.middleware) {
                 inline for (@field(Context, "middleware")) |middleware| {
-                    try middleware(ctx, alloc, req);
-                    if (req.isFinished()) return;
+                    try middleware(ctx);
+                    if (ctx.req.isFinished()) return;
                 }
             }
         }
