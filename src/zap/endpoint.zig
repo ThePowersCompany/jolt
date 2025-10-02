@@ -3,8 +3,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
 const Allocator = std.mem.Allocator;
 
-const builtin = @import("builtin");
-
 // zap types
 const zap = @import("zap.zig");
 const Request = zap.Request;

@@ -3,8 +3,6 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const eql = std.mem.eql;
 
-const builtin = @import("builtin");
-
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
