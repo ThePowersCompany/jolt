@@ -104,6 +104,7 @@ pub const JoltServer = struct {
     }
 
     pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []const type, auto: anytype) !void {
+        @setEvalBranchQuota((endpoints.len + tasks.len) * 1000);
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
         var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
@@ -186,6 +187,7 @@ pub const JoltServer = struct {
 
         // Created from a thread-safe allocator.
         const task_alloc = thread_safe_alloc.allocator();
+
         inline for (tasks) |t| blk: {
             if (std.meta.hasFn(t, "enabled")) {
                 // Runtime enabled check
@@ -209,6 +211,7 @@ pub const JoltServer = struct {
 };
 
 pub fn main() !void {
+
     // Example auto middleware
     const auto = @import("./middleware/auto.zig").auto;
 
