@@ -20,6 +20,7 @@ pub const DbResult = pg.Result;
 pub const DbRow = pg.Row;
 pub const DbStatement = pg.Stmt;
 pub const DbQueryRow = pg.QueryRow;
+pub const DbListener = pg.Listener;
 
 // Zap
 pub const Request = zap.Request;

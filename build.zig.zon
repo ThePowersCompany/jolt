@@ -10,8 +10,8 @@
     .fingerprint = 0xa874d5e8f2c78cdd,
     .dependencies = .{
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#eb00ff6289d3ac6a56352564277a3bbb07b76344",
-            .hash = "pg-0.0.0-Wp_7gU8rBgDW-zwZNzcnxp8z8NuifJaiUzwoJIQbw7IR",
+            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#d3cbd367c4b1153282d99dc9ca897bff888f893c",
+            .hash = "pg-0.0.0-Wp_7gScuBgDfoaAHe6cpumnia4YVQcYvGym0-uiB6SIR",
         },
     },
 }
