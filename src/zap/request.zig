@@ -537,6 +537,12 @@ pub fn getCookiesCount(self: *const Self) isize {
     return fio.fiobj_obj2num(self.h.*.cookies);
 }
 
+/// Returns whether the query string of the URL is empty.
+/// Does not require parseQuery().
+pub fn isQueryEmpty(self: *const Self) bool {
+    return (self.query orelse "").len == 0;
+}
+
 /// Returns the number of parameters after parsing.
 ///
 /// Parse with parseBody() and / or parseQuery()
