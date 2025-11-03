@@ -144,10 +144,10 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         /// Returns true if the middleware should exit early.
         fn handleQueryParam(ctx: *Context, alloc: Allocator, req: Request, comptime field: Type.StructField) !bool {
             const FieldType = @typeInfo(field.type);
-            const param_opt = try req.getParamStr(alloc, field.name, true);
+            const param_opt = try req.getParamDecoded(alloc, field.name);
             if (param_opt) |param| {
                 const T = if (FieldType == .optional) FieldType.optional.child else field.type;
-                return try _handleQueryParam(ctx, alloc, req, T, field.name, param.str);
+                return try _handleQueryParam(ctx, alloc, req, T, field.name, param.items);
             } else if (field.defaultValue()) |default_value| {
                 // Param is missing, but has a default value. Set to the default value.
                 @field(@field(ctx, query_params), field.name) = default_value;
@@ -169,8 +169,6 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         }
 
         fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
-            ctx.req.parseQuery();
-
             var all_fields_are_optional = true;
             outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
                 if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {

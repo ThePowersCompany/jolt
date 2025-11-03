@@ -728,10 +728,26 @@ pub fn getParamStr(
     return try util.fio2strAllocOrNot(a, value, always_alloc);
 }
 
+/// Returns a URL decoded query param as a string.
+/// Does not require parseQuery() or anything to be called in advance.
+pub fn getParamDecoded(
+    self: *const Self,
+    alloc: std.mem.Allocator,
+    name: []const u8,
+) !?std.ArrayList(u8) {
+    const s = self.getParamSlice(name) orelse return null;
+    var dest: std.ArrayList(u8) = try .initCapacity(alloc, s.len);
+    errdefer dest.deinit(alloc);
+    dest.expandToCapacity();
+    const decoded_length: usize = @intCast(fio.http_decode_url(dest.items.ptr, s.ptr, s.len));
+    dest.shrinkRetainingCapacity(decoded_length);
+    return dest;
+}
+
 /// similar to getParamStr, except it will return the part of the querystring
 /// after the equals sign, non-decoded, and always as character slice.
 /// - no allocation!
-/// - does not requre parseQuery() or anything to be called in advance
+/// - does not require parseQuery() or anything to be called in advance
 pub fn getParamSlice(self: *const Self, name: []const u8) ?[]const u8 {
     if (self.query) |query| {
         var amp_it = std.mem.tokenizeScalar(u8, query, '&');
