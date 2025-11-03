@@ -181,7 +181,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 }
             }
 
-            if (!all_fields_are_optional and ctx.req.getParamCount() == 0) {
+            if (!all_fields_are_optional and ctx.req.isQueryEmpty()) {
                 return try ctx.req.respondWithError(
                     StatusCode.bad_request,
                     "No query params were provided",
