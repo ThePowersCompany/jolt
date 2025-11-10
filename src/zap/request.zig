@@ -742,10 +742,13 @@ pub fn getParamDecoded(
     name: []const u8,
 ) !?std.ArrayList(u8) {
     const s = self.getParamSlice(name) orelse return null;
-    if (s.len == 0) return null;
 
     var dest: std.ArrayList(u8) = try .initCapacity(alloc, s.len);
     errdefer dest.deinit(alloc);
+
+    // Return an empty string
+    if (s.len == 0) return dest;
+
     dest.expandToCapacity();
     const decoded_length: usize = @intCast(fio.http_decode_url(dest.items.ptr, s.ptr, s.len));
     dest.shrinkRetainingCapacity(decoded_length);
