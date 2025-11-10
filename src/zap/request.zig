@@ -742,6 +742,8 @@ pub fn getParamDecoded(
     name: []const u8,
 ) !?std.ArrayList(u8) {
     const s = self.getParamSlice(name) orelse return null;
+    if (s.len == 0) return null;
+
     var dest: std.ArrayList(u8) = try .initCapacity(alloc, s.len);
     errdefer dest.deinit(alloc);
     dest.expandToCapacity();

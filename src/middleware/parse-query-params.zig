@@ -142,7 +142,12 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         }
 
         /// Returns true if the middleware should exit early.
-        fn handleQueryParam(ctx: *Context, alloc: Allocator, req: Request, comptime field: Type.StructField) !bool {
+        fn handleQueryParam(
+            ctx: *Context,
+            alloc: Allocator,
+            req: Request,
+            comptime field: Type.StructField,
+        ) !bool {
             const FieldType = @typeInfo(field.type);
             const param_opt = try req.getParamDecoded(alloc, field.name);
             if (param_opt) |param| {
