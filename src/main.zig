@@ -57,8 +57,9 @@ pub const middleware = struct {
 
 pub const ServerOpts = struct {
     port: u16,
-    threads: i16,
-    workers: i16,
+    threads: u16,
+    /// Global arena allocation limit
+    retained_alloc_limit: ?usize = null,
 };
 
 pub const EndpointDef = struct { []const u8, type };
@@ -104,7 +105,12 @@ pub const JoltServer = struct {
         return std.fmt.parseInt(T, val, 10);
     }
 
-    pub fn run(self: *Self, endpoints: []const EndpointDef, tasks: []const type, auto: anytype) !void {
+    pub fn run(
+        self: *Self,
+        endpoints: []const EndpointDef,
+        tasks: []const type,
+        auto: anytype,
+    ) !void {
         @setEvalBranchQuota((endpoints.len + tasks.len) * 1000);
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
@@ -207,7 +213,9 @@ pub const JoltServer = struct {
             try t.submit(task_alloc);
         }
 
-        zap.start(.{ .threads = self.opts.threads, .workers = self.opts.workers });
+        // This has to be 1 (workers are _additional_ processes).
+        // Multiple processes don't play well with a global database connection pool (see database.zig).
+        zap.start(.{ .threads = @intCast(self.opts.threads), .workers = 1 });
     }
 };
 
@@ -220,9 +228,6 @@ pub fn main() !void {
     var server: JoltServer = try JoltServer.init(alloc, .{
         .port = 3333,
         .threads = 2,
-        // This has to be 1 (workers are _additional_ processes).
-        // Multiple processes don't play well with a global database connection pool (see database.zig).
-        .workers = 1,
     });
 
     const endpoints = [_]EndpointDef{
