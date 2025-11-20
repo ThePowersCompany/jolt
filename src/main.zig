@@ -58,8 +58,6 @@ pub const middleware = struct {
 pub const ServerOpts = struct {
     port: u16,
     threads: u16,
-    /// Global arena allocation limit
-    retained_alloc_limit: ?usize = null,
 };
 
 pub const EndpointDef = struct { []const u8, type };
