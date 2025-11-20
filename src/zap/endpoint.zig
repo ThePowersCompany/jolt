@@ -295,22 +295,19 @@ pub const Listener = struct {
 
     const Self = @This();
 
-    var arena: ArenaAllocator = undefined;
-    var tsa: ThreadSafeAllocator = undefined;
-    var alloc: Allocator = undefined;
+    var tsa: Allocator = undefined;
 
     /// Internal static structs of member endpoints
     var endpoints: std.ArrayList(*const Endpoint) = .empty;
 
+    // TODO: Threadsafe pool of arenas, the size of N threads?
     threadlocal var thread_arena: ?ArenaAllocator = null;
 
     /// Initialize a new endpoint listener. Note, if you pass an `on_request`
     /// callback in the provided ListenerSettings, this request callback will be
     /// called every time a request arrives that no endpoint matches.
-    pub fn init(a: Allocator, l: ListenerSettings) Self {
-        arena = ArenaAllocator.init(a);
-        tsa = .{ .child_allocator = arena.allocator() };
-        alloc = tsa.allocator();
+    pub fn init(thread_safe_alloc: Allocator, l: ListenerSettings) Self {
+        tsa = thread_safe_alloc;
 
         // take copy of listener settings so it's mutable
         var ls = l;
@@ -331,8 +328,7 @@ pub const Listener = struct {
     /// Registered endpoints will not be de-initialized automatically; just removed
     /// from the internal map.
     pub fn deinit(_: *Self) void {
-        endpoints.deinit(alloc);
-        arena.deinit();
+        endpoints.deinit(tsa);
     }
 
     /// Call this to start listening. After this, no more endpoints can be
@@ -352,7 +348,7 @@ pub const Listener = struct {
                 return EndpointListenerError.EndpointPathShadowError;
             }
         }
-        try endpoints.append(alloc, endpoint);
+        try endpoints.append(tsa, endpoint);
     }
 
     fn delegateToEndpoint(
@@ -364,7 +360,7 @@ pub const Listener = struct {
                 // Lookup thread-local arena allocator
                 // Note: This allocation must happen on each thread
                 // (can't be done during `register` or `listen`)
-                if (thread_arena == null) thread_arena = ArenaAllocator.init(alloc);
+                if (thread_arena == null) thread_arena = ArenaAllocator.init(tsa);
 
                 f(e, &(thread_arena.?), r);
                 return;
