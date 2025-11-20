@@ -116,7 +116,7 @@ pub const JoltServer = struct {
         defer global_arena.deinit();
         var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
 
-        var listener = Endpoint.Listener.init(self.alloc, .{
+        var listener = Endpoint.Listener.init(thread_safe_alloc.allocator(), .{
             .port = self.opts.port,
             .on_request = null,
             .log = true,
