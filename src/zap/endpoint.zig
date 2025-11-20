@@ -302,7 +302,7 @@ pub const Listener = struct {
     /// Internal static structs of member endpoints
     var endpoints: std.ArrayList(*const Endpoint) = .empty;
 
-    threadlocal var worker_arena: ?ArenaAllocator = null;
+    threadlocal var thread_arena: ?ArenaAllocator = null;
 
     /// Initialize a new endpoint listener. Note, if you pass an `on_request`
     /// callback in the provided ListenerSettings, this request callback will be
@@ -364,9 +364,9 @@ pub const Listener = struct {
                 // Lookup thread-local arena allocator
                 // Note: This allocation must happen on each thread
                 // (can't be done during `register` or `listen`)
-                if (worker_arena == null) worker_arena = ArenaAllocator.init(alloc);
+                if (thread_arena == null) thread_arena = ArenaAllocator.init(alloc);
 
-                f(e, &(worker_arena.?), r);
+                f(e, &(thread_arena.?), r);
                 return;
             };
         }

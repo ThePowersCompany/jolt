@@ -228,9 +228,6 @@ pub fn main() !void {
     var server: JoltServer = try JoltServer.init(alloc, .{
         .port = 3333,
         .threads = 2,
-        // This has to be 1 (workers are _additional_ processes).
-        // Multiple processes don't play well with a global database connection pool (see database.zig).
-        .workers = 1,
     });
 
     const endpoints = [_]EndpointDef{
