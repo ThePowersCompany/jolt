@@ -216,7 +216,12 @@ pub const Endpoint = struct {
     handlers: RequestHandlers,
     sendErrorResponse: ErrorHandlerFn,
 
-    pub fn init(server: *JoltServer, path: []const u8, sendErrorResponse: ErrorHandlerFn, handlers: RequestHandlers) Endpoint {
+    pub fn init(
+        server: *JoltServer,
+        path: []const u8,
+        sendErrorResponse: ErrorHandlerFn,
+        handlers: RequestHandlers,
+    ) Endpoint {
         return .{
             .server = server,
             .path = path,
@@ -226,7 +231,15 @@ pub const Endpoint = struct {
     }
 
     pub fn onRequest(self: *const Endpoint, arena: *ArenaAllocator, req: Request) void {
-        defer _ = arena.reset(.retain_capacity);
+        defer {
+            if (self.server.opts.retained_alloc_limit) |limit| {
+                const limit_per_thread = limit / @as(usize, @intCast(self.server.opts.threads));
+                _ = arena.reset(.{ .retain_with_limit = limit_per_thread });
+            } else {
+                _ = arena.reset(.retain_capacity);
+            }
+        }
+
         switch (req.methodAsEnum()) {
             .GET => if (self.handlers.getHandler) |handler| {
                 return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
@@ -289,7 +302,7 @@ pub const Listener = struct {
     /// Internal static structs of member endpoints
     var endpoints: std.ArrayList(*const Endpoint) = .empty;
 
-    threadlocal var arenas: []ArenaAllocator = &.{};
+    threadlocal var worker_arena: ?ArenaAllocator = null;
 
     /// Initialize a new endpoint listener. Note, if you pass an `on_request`
     /// callback in the provided ListenerSettings, this request callback will be
@@ -342,27 +355,20 @@ pub const Listener = struct {
         try endpoints.append(alloc, endpoint);
     }
 
-    fn delegateToEndpoint(r: Request, comptime f: *const fn (*const Endpoint, *ArenaAllocator, Request) void) void {
+    fn delegateToEndpoint(
+        r: Request,
+        comptime f: *const fn (*const Endpoint, *ArenaAllocator, Request) void,
+    ) void {
         if (r.path) |p| {
-            for (endpoints.items, 0..) |e, i| {
-                if (std.mem.startsWith(u8, p, e.path)) {
-                    // Lookup thread-local arena allocator
-                    // Note: This allocation must happen on each thread (can't be done during `register` or `listen`)
-                    if (arenas.len == 0) {
-                        const cap = endpoints.items.len;
-                        arenas = alloc.alloc(ArenaAllocator, cap) catch {
-                            r.setStatus(StatusCode.internal_server_error);
-                            std.log.err("Failed to allocate arena for endpoint: {s}", .{p});
-                            return;
-                        };
-                        for (0..cap) |a| {
-                            arenas[a] = ArenaAllocator.init(alloc);
-                        }
-                    }
-                    f(e, &arenas[i], r);
-                    return;
-                }
-            }
+            for (endpoints.items) |e| if (std.mem.startsWith(u8, p, e.path)) {
+                // Lookup thread-local arena allocator
+                // Note: This allocation must happen on each thread
+                // (can't be done during `register` or `listen`)
+                if (worker_arena == null) worker_arena = ArenaAllocator.init(alloc);
+
+                f(e, &(worker_arena.?), r);
+                return;
+            };
         }
         r.setStatus(StatusCode.not_found);
     }
