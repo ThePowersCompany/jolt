@@ -230,34 +230,25 @@ pub const Endpoint = struct {
         };
     }
 
-    pub fn onRequest(self: *const Endpoint, arena: *ArenaAllocator, req: Request) void {
-        defer {
-            if (self.server.opts.retained_alloc_limit) |limit| {
-                const limit_per_thread = limit / @as(usize, @intCast(self.server.opts.threads));
-                _ = arena.reset(.{ .retain_with_limit = limit_per_thread });
-            } else {
-                _ = arena.reset(.retain_capacity);
-            }
-        }
-
+    pub fn onRequest(self: *const Endpoint, alloc: Allocator, req: Request) void {
         switch (req.methodAsEnum()) {
             .GET => if (self.handlers.getHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .POST => if (self.handlers.postHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .PUT => if (self.handlers.putHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .PATCH => if (self.handlers.patchHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .DELETE => if (self.handlers.deleteHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .OPTIONS => if (self.handlers.optionsHandler) |handler| {
-                return handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+                return handler.handle(alloc, self.server, req, self.sendErrorResponse);
             },
             .UNKNOWN => {
                 return;
@@ -268,13 +259,12 @@ pub const Endpoint = struct {
         };
     }
 
-    pub fn onWebSocket(self: *const Endpoint, arena: *ArenaAllocator, req: Request) void {
-        defer _ = arena.reset(.retain_capacity);
+    pub fn onWebSocket(self: *const Endpoint, alloc: Allocator, req: Request) void {
         // Pass WebSocket connection to handler:
         // It's the handler's responsibility to finish the upgrade of the request
         // because the receiver defines the connection state/context to be used.
         if (self.handlers.wsHandler) |handler| {
-            handler.handle(arena.allocator(), self.server, req, self.sendErrorResponse);
+            handler.handle(alloc, self.server, req, self.sendErrorResponse);
         }
     }
 };
@@ -299,9 +289,6 @@ pub const Listener = struct {
 
     /// Internal static structs of member endpoints
     var endpoints: std.ArrayList(*const Endpoint) = .empty;
-
-    // TODO: Threadsafe pool of arenas, the size of N threads?
-    threadlocal var thread_arena: ?ArenaAllocator = null;
 
     /// Initialize a new endpoint listener. Note, if you pass an `on_request`
     /// callback in the provided ListenerSettings, this request callback will be
@@ -353,16 +340,13 @@ pub const Listener = struct {
 
     fn delegateToEndpoint(
         r: Request,
-        comptime f: *const fn (*const Endpoint, *ArenaAllocator, Request) void,
+        comptime f: *const fn (*const Endpoint, Allocator, Request) void,
     ) void {
         if (r.path) |p| {
             for (endpoints.items) |e| if (std.mem.startsWith(u8, p, e.path)) {
-                // Lookup thread-local arena allocator
-                // Note: This allocation must happen on each thread
-                // (can't be done during `register` or `listen`)
-                if (thread_arena == null) thread_arena = ArenaAllocator.init(tsa);
-
-                f(e, &(thread_arena.?), r);
+                var arena = ArenaAllocator.init(tsa);
+                defer arena.deinit();
+                f(e, arena.allocator(), r);
                 return;
             };
         }
