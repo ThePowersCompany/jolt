@@ -411,6 +411,7 @@ pub const DateTime = struct {
 pub const Format = struct {
     pub const LT = "h:mm A";
     pub const LTS = "h:mm:ss A";
+    pub const LLT = ISO_DATE ++ " " ++ "hh:mm A";
     pub const L = "MM/DD/YYYY";
     pub const l = "M/D/YYY";
     pub const LL = "MMMM D, YYYY";
