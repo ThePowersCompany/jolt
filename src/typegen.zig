@@ -164,7 +164,7 @@ const TypeGenerator = struct {
     }
 
     pub fn generateTypes(self: *Self, comptime endpoints: []const EndpointDef) ![]const u8 {
-        @setEvalBranchQuota(endpoints.len * 1000);
+        @setEvalBranchQuota(endpoints.len * 2000);
 
         // First pass: Find all pub top-level types across all endpoint files
         inline for (endpoints) |endpoint| {

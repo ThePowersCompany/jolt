@@ -45,6 +45,7 @@ pub const StatusCode = enum(u16) {
     /// teapot is an extension status code and not required for clients to support
     teapot = 418,
     upgrade_required = 426,
+    too_many_requests = 429,
     /// extra status code according to `https://tools.ietf.org/html/rfc6585#section-5`
     request_header_fields_too_large = 431,
     // server errors 5xx
@@ -95,6 +96,7 @@ pub const StatusCode = enum(u16) {
             .requested_range_not_satisfiable => "Requested Range Not Satisfiable",
             .teapot => "I'm a Teapot",
             .upgrade_required => "Upgrade Required",
+            .too_many_requests => "Too Many Requests",
             .request_header_fields_too_large => "Request Header Fields Too Large",
             .expectation_failed => "Expectation Failed",
             .internal_server_error => "Internal Server Error",
