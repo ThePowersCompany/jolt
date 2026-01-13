@@ -2,10 +2,18 @@ const std = @import("std");
 const pbkdf2 = std.crypto.pwhash.pbkdf2;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
-pub fn generateSalt(comptime salt_length: usize) [salt_length]u8 {
+pub fn generateToken(comptime salt_length: usize) [salt_length]u8 {
     var buffer: [salt_length]u8 = undefined;
     std.crypto.random.bytes(&buffer);
     return buffer;
+}
+
+pub fn hashToken(token: []const u8) ![64]u8 {
+    var out: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(token, &out, .{});
+    var hex: [64]u8 = undefined;
+    _ = try std.fmt.bufPrint(&hex, "{x}", .{&out});
+    return hex;
 }
 
 /// Hashes a password with a given salt.
