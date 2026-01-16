@@ -95,6 +95,13 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         @field(@field(ctx, query_params), field_name) = value;
                     }
                 },
+                .@"enum" => {
+                    if (std.meta.stringToEnum(FieldType, param)) |v| {
+                        @field(@field(ctx, query_params), field_name) = v;
+                    } else {
+                        return error.InvalidEnumVariant;
+                    }
+                },
                 else => {
                     try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                     return true;
