@@ -14,7 +14,7 @@ pub fn execPatch(
     comptime table: []const u8,
     fields: anytype,
     where_clauses: anytype,
-) !?usize {
+) !?i64 {
     var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(alloc);
 
@@ -78,20 +78,25 @@ fn execWithParams(
     where_clauses: anytype,
     comptime field_idx: usize,
     params: anytype,
-) !?usize {
+) !?i64 {
     if (field_idx >= fields.len) return addWhereParams(conn, alloc, sql, where_clauses, 0, params);
 
     const value = fields[field_idx][1];
-    const new_params = switch (@typeInfo(@TypeOf(value))) {
-        .@"union" => switch (value) {
-            .not_provided => params,
-            .value => |v| params ++ .{v},
-        },
-        .optional => if (value) |v| params ++ .{v} else params,
-        else => params ++ .{value},
-    };
+    const info = @typeInfo(@TypeOf(value));
 
-    return execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, new_params);
+    if (info == .@"union") {
+        return switch (value) {
+            .not_provided => execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, params),
+            .value => |v| execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, params ++ .{v}),
+        };
+    } else if (info == .optional) {
+        return if (value) |v|
+            execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, params ++ .{v})
+        else
+            execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, params);
+    } else {
+        return execWithParams(conn, alloc, sql, fields, where_clauses, field_idx + 1, params ++ .{value});
+    }
 }
 
 /// Adds WHERE clause params and executes
@@ -102,7 +107,7 @@ fn addWhereParams(
     clauses: anytype,
     comptime idx: usize,
     params: anytype,
-) !?usize {
+) !?i64 {
     if (idx >= clauses.len) return conn.execOpts(sql, params, .{ .allocator = alloc });
     return addWhereParams(conn, alloc, sql, clauses, idx + 1, params ++ .{clauses[idx][1]});
 }
@@ -132,7 +137,7 @@ const MockConnection = struct {
         if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
     }
 
-    fn execOpts(self: *MockConnection, sql: []const u8, _: anytype, _: anytype) !?usize {
+    fn execOpts(self: *MockConnection, sql: []const u8, _: anytype, _: anytype) !?i64 {
         if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
         self.captured_sql = try self.alloc.dupe(u8, sql);
         return 1;
@@ -181,7 +186,10 @@ test "execPatch - first field not provided" {
         },
     );
 
-    try std.testing.expectEqualStrings("UPDATE listing SET description = $1 WHERE id = $2", mock.captured_sql);
+    try std.testing.expectEqualStrings(
+        "UPDATE listing SET description = $1 WHERE id = $2",
+        mock.captured_sql,
+    );
     try std.testing.expectEqual(1, result);
 }
 
