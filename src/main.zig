@@ -46,6 +46,7 @@ pub const task = @import("./utils/task.zig");
 pub const time = @import("./utils/time.zig");
 pub const types = @import("./utils/types.zig");
 pub const uuid = @import("./utils/uuid.zig");
+pub const patch = @import("./utils/patch.zig");
 
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
