@@ -1,9 +1,166 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const allocPrint = std.fmt.allocPrint;
 
 const pg = @import("pg");
+const db = @import("../db/database.zig");
 
 const Optional = @import("types.zig").Optional;
+
+pub const PatchQueryOpts = struct {
+    conn: ?*anyopaque = null,
+};
+
+pub fn patchQuery(
+    alloc: Allocator,
+    table: []const u8,
+    keys: anytype,
+    exprs: anytype,
+    params: anytype,
+    param_offset: usize,
+    opts: PatchQueryOpts,
+) !PatchQuery(@TypeOf(params)) {
+    var parameter_count: usize = 0;
+    inline for (params) |p| {
+        if (p != .not_provided) parameter_count += 1;
+    }
+    if (parameter_count == 0) return error.NoParams;
+
+    var sql: std.ArrayList(u8) = .empty;
+    errdefer sql.deinit(alloc);
+
+    try sql.appendSlice(alloc, try allocPrint(alloc, "UPDATE {s} SET ", .{table}));
+
+    var param_num: usize = 1; // 1-based
+    inline for (keys, exprs, params) |k, e, v| {
+        if (v != .not_provided) {
+            try sql.appendSlice(
+                alloc,
+                try std.fmt.allocPrint(alloc, k ++ " = " ++ e, .{param_offset + param_num}),
+            );
+            if (param_num < parameter_count) {
+                try sql.appendSlice(alloc, ", ");
+            }
+            param_num += 1;
+        }
+    }
+
+    return .{
+        ._alloc = alloc,
+        ._conn = if (opts.conn) |_| null else try db.acquireConnection(),
+        ._opts = opts,
+        .sql = sql,
+        .params = params,
+    };
+}
+
+pub fn PatchQuery(P: type) type {
+    // inline for (params) |p| {
+    //     const T = @TypeOf(p);
+    //     // TODO: Figure out this validation
+    //     if (T != Optional) {
+    //         //
+    //     }
+    // }
+
+    return struct {
+        pub const Self = @This();
+
+        _alloc: Allocator,
+        _conn: ?*anyopaque = null,
+        _opts: PatchQueryOpts,
+        sql: std.ArrayList(u8),
+        params: P,
+
+        pub fn deinit(self: *Self) void {
+            if (self._conn) |c| c.release();
+            self.sql.deinit(self._alloc);
+        }
+
+        /// fixed_params are TODO: document
+        pub fn bindAndExecute(self: *Self, fixed_params: anytype) !*pg.Result {
+            // This connection should always exist, MissingConnection should _never_ be thrown.
+            const conn = self._opts.conn orelse if (self._conn) |c| c else return error.MissingConnection;
+
+            var stmt = try pg.Stmt.init(conn, .{ .allocator = self._alloc });
+            errdefer stmt.deinit();
+
+            try stmt.prepare(self.sql.items, null);
+            inline for (fixed_params) |p| try stmt.bind(p);
+
+            inline for (self.params) |p| {
+                if (p != .not_provided) try stmt.bind(p.value);
+            }
+
+            return try stmt.execute();
+        }
+    };
+}
+
+const MockConnection = struct {
+    pub const Self = @This();
+
+    captured_sql: []u8 = &[_]u8{},
+    alloc: Allocator,
+
+    fn init(alloc: Allocator) Self {
+        return .{ .alloc = alloc };
+    }
+
+    fn deinit(self: *Self) void {
+        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
+    }
+
+    fn execOpts(self: *Self, sql: []const u8, _: anytype, _: anytype) !?i64 {
+        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
+        self.captured_sql = try self.alloc.dupe(u8, sql);
+        return 1;
+    }
+
+    fn begin(_: *Self) !void {}
+    fn rollback(_: *Self) !void {}
+    fn release(_: *Self) void {}
+};
+
+test {
+    const alloc = std.testing.allocator;
+
+    const keys = .{
+        "name",
+        "is_universal",
+    };
+    const exprs = .{
+        "trim(${d})",
+        "${d}",
+    };
+
+    const parameters = .{
+        Optional([]u8){ .value = try alloc.alloc(u8, 4) },
+        Optional([]bool){ .value = try alloc.alloc(bool, 1) },
+    };
+
+    defer inline for (parameters) |p| alloc.free(p);
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    // Use transaction because multiple queries are potentially executed
+    try mock.begin();
+    defer mock.rollback() catch {};
+
+    var query = try patchQuery(alloc, "skill", keys, exprs, parameters, 2, .{ .conn = &mock });
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, " WHERE site = $1 AND id = $2 RETURNING id;");
+
+    var result = query.bindAndExecute(.{ 1, 2 }) catch |err| {
+        if (db.refineError(err, mock) == db.PGError.Unique) {
+            return .{ .status = .conflict, .err = "A skill with that name already exists" };
+        }
+        return db.logError(err, mock);
+    };
+    defer result.deinit();
+}
 
 /// Builds and executes a dynamic UPDATE query at runtime.
 /// Fields are passed as tuples of {name, value} where value is Optional(T).
@@ -124,25 +281,6 @@ fn fieldIsPresent(value: anytype) bool {
     if (info == .optional) return value != null;
     return true;
 }
-
-const MockConnection = struct {
-    captured_sql: []u8 = &[_]u8{},
-    alloc: Allocator,
-
-    fn init(alloc: Allocator) MockConnection {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *MockConnection) void {
-        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
-    }
-
-    fn execOpts(self: *MockConnection, sql: []const u8, _: anytype, _: anytype) !?i64 {
-        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
-        self.captured_sql = try self.alloc.dupe(u8, sql);
-        return 1;
-    }
-};
 
 test "execPatch - all fields provided" {
     var mock = MockConnection.init(std.testing.allocator);
