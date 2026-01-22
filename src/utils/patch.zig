@@ -69,7 +69,11 @@ pub fn PatchQuery(P: type, ConnType: type) type {
             self.sql.deinit(self._alloc);
         }
 
-        /// fixed_params are TODO: document
+        /// Binds parameters and executes the prepared UPDATE statement.
+        ///
+        /// fixed_params:
+        ///   A tuple of values to bind first (e.g., WHERE clause values).
+        ///   These are bound in order before the Optional params.
         pub fn bindAndExecute(self: *Self, fixed_params: anytype) !*pg.Result {
             switch (ConnType) {
                 *pg.Conn => {
