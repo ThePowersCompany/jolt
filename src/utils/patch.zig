@@ -9,6 +9,20 @@ const Optional = @import("types.zig").Optional;
 
 pub const PatchQueryOpts = struct {};
 
+/// Generates a dynamic UPDATE query for fields marked as .value in the params tuple.
+/// Only fields where the Optional parameter is not .not_provided are included in the SET clause.
+/// The query must be completed by the caller with a WHERE clause and executed via bindAndExecute.
+///
+/// @param alloc - Allocator for SQL string construction
+/// @param table - The table name to update
+/// @param keys - Field names (e.g. .{"name", "is_universal"})
+/// @param exprs - SQL expressions for values (e.g. .{"trim(${d})", "${d}"})
+/// @param params - Optional values for each field
+/// @param param_offset - Starting parameter number for WHERE clauses (e.g. 1 or 2)
+/// @param conn - The database connection
+/// @param opts - Query options
+///
+/// @returns A PatchQuery that can be extended with WHERE clauses and executed
 pub fn patchQuery(
     alloc: Allocator,
     table: []const u8,
@@ -54,6 +68,93 @@ pub fn patchQuery(
     };
 }
 
+/// Generates an INSERT ... ON CONFLICT DO UPDATE SET (upsert) query for dynamic fields.
+/// Only fields marked as .value (not .not_provided) are included in both the INSERT and UPDATE parts.
+///
+/// @param alloc - Allocator for SQL string construction
+/// @param table - The table name to upsert into
+/// @param keys - Field names (e.g. .{"job_title", "phone_number"})
+/// @param exprs - SQL expressions for values (e.g. .${"${d}"})
+/// @param params - Optional values for each field
+/// @param param_offset - Starting parameter number (typically 0 for upsert)
+/// @param conflict_column - The column used for the conflict check (e.g. "user_id")
+/// @param conn - The database connection
+/// @param opts - Query options
+///
+/// @returns A PatchQuery that generates the full INSERT ... ON CONFLICT DO UPDATE statement
+pub fn upsertQuery(
+    alloc: Allocator,
+    table: []const u8,
+    keys: anytype,
+    exprs: anytype,
+    params: anytype,
+    param_offset: usize,
+    conflict_column: []const u8,
+    conn: anytype,
+    opts: PatchQueryOpts,
+) !PatchQuery(@TypeOf(params), @TypeOf(conn)) {
+    var parameter_count: usize = 0;
+    inline for (params) |p| {
+        if (p != .not_provided) parameter_count += 1;
+    }
+    if (parameter_count == 0) return error.NoParams;
+
+    var sql: std.ArrayList(u8) = .empty;
+    errdefer sql.deinit(alloc);
+
+    const insert_prefix = try allocPrint(alloc, "INSERT INTO {s} ({s}", .{ table, conflict_column });
+    defer alloc.free(insert_prefix);
+    try sql.appendSlice(alloc, insert_prefix);
+
+    inline for (keys, params) |k, v| {
+        if (v != .not_provided) {
+            try sql.appendSlice(alloc, ", ");
+            try sql.appendSlice(alloc, k);
+        }
+    }
+
+    try sql.appendSlice(alloc, ") VALUES ($");
+    try appendInt(alloc, &sql, param_offset + 1);
+
+    // Build VALUES ($1, $2, $3, ...)
+    var param_num: usize = param_offset + 1;
+    inline for (exprs, params) |e, v| {
+        if (v != .not_provided) {
+            param_num += 1;
+            const value_expr = try std.fmt.allocPrint(alloc, ", " ++ e, .{param_num});
+            defer alloc.free(value_expr);
+            try sql.appendSlice(alloc, value_expr);
+        }
+    }
+
+    const conflict_clause = try allocPrint(
+        alloc,
+        ") ON CONFLICT ({s}) DO UPDATE SET {s} = ${d}",
+        .{ conflict_column, conflict_column, param_offset + 1 },
+    );
+    defer alloc.free(conflict_clause);
+    try sql.appendSlice(alloc, conflict_clause);
+
+    // Build SET field1 = $2, field2 = $3, ...
+    param_num = param_offset + 1; // Reset for the update clause
+    inline for (keys, exprs, params) |k, e, v| {
+        if (v != .not_provided) {
+            param_num += 1;
+            const set_clause = try std.fmt.allocPrint(alloc, ", " ++ k ++ " = " ++ e, .{param_num});
+            defer alloc.free(set_clause);
+            try sql.appendSlice(alloc, set_clause);
+        }
+    }
+
+    return .{
+        ._alloc = alloc,
+        ._conn = conn,
+        ._opts = opts,
+        .sql = sql,
+        .params = params,
+    };
+}
+
 pub fn PatchQuery(P: type, ConnType: type) type {
     return struct {
         pub const Self = @This();
@@ -70,9 +171,12 @@ pub fn PatchQuery(P: type, ConnType: type) type {
 
         /// Binds parameters and executes the prepared UPDATE statement.
         ///
-        /// fixed_params:
-        ///   A tuple of values to bind first (e.g., WHERE clause values).
-        ///   These are bound in order before the Optional params.
+        /// @param self - The PatchQuery instance containing the SQL and parameters
+        /// @param fixed_params - A tuple of values to bind first (e.g. WHERE clause values).
+        ///                       These are bound in order before the Optional params.
+        ///
+        /// @returns A pointer to pg.Result on success (or mock result for tests).
+        ///          Errors if statement preparation or binding fails (production only).
         pub fn bindAndExecute(self: *Self, fixed_params: anytype) !*pg.Result {
             switch (ConnType) {
                 *pg.Conn => {
@@ -156,6 +260,75 @@ test "patchQuery - basic test" {
     try query.sql.appendSlice(alloc, " WHERE site = $1 AND id = $2 RETURNING id;");
 
     _ = try query.bindAndExecute(.{ 1, 2 });
+}
+
+test "upsertQuery - basic upsert" {
+    const alloc = std.testing.allocator;
+
+    const keys = .{
+        "job_title",
+        "phone_number",
+        "about_me",
+    };
+    const exprs = .{
+        "${d}",
+        "${d}",
+        "${d}",
+    };
+
+    const parameters = .{
+        Optional([]const u8){ .value = "Engineer" },
+        Optional([]const u8){ .value = "555-1234" },
+        Optional([]const u8){ .value = "Hello" },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try upsertQuery(alloc, "user_profile", keys, exprs, parameters, 0, "user_id", &mock, .{});
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, ";");
+
+    _ = try query.bindAndExecute(.{123});
+
+    const expected = "INSERT INTO user_profile (user_id, job_title, phone_number, about_me) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET user_id = $1, job_title = $2, phone_number = $3, about_me = $4;";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
+}
+
+test "upsertQuery - partial fields provided" {
+    const alloc = std.testing.allocator;
+
+    const keys = .{
+        "job_title",
+        "phone_number",
+        "about_me",
+    };
+    const exprs = .{
+        "${d}",
+        "${d}",
+        "${d}",
+    };
+
+    const not_provided: Optional([]const u8) = .not_provided;
+    const parameters = .{
+        Optional([]const u8){ .value = "Engineer" },
+        not_provided,
+        Optional([]const u8){ .value = "Hello" },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try upsertQuery(alloc, "user_profile", keys, exprs, parameters, 0, "user_id", &mock, .{});
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, ";");
+
+    _ = try query.bindAndExecute(.{123});
+
+    const expected = "INSERT INTO user_profile (user_id, job_title, about_me) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET user_id = $1, job_title = $2, about_me = $3;";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
 }
 
 /// Builds and executes a dynamic UPDATE query at runtime.
