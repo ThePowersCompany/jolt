@@ -65,7 +65,6 @@ pub fn PatchQuery(P: type, ConnType: type) type {
         params: P,
 
         pub fn deinit(self: *Self) void {
-            self._conn.release();
             self.sql.deinit(self._alloc);
         }
 
