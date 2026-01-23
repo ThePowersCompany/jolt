@@ -100,7 +100,7 @@ pub fn refineError(err: anyerror, conn: *Conn) PGError {
 
 pub fn logError(err: anyerror, conn: *Conn) PGError {
     const refined = refineError(err, conn);
-    std.log.err("{any}:", .{refined});
+    std.log.err("{} - {any}:", .{ err, refined });
     if (conn.err) |e| printPgError(e);
     return refined;
 }
