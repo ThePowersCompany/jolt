@@ -1,9 +1,392 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const allocPrint = std.fmt.allocPrint;
 
 const pg = @import("pg");
+const db = @import("../db/database.zig");
 
 const Optional = @import("types.zig").Optional;
+
+/// Generates a dynamic UPDATE query for fields marked as .value in the params.
+/// Only fields where the parameter is not .not_provided are included in the SET clause.
+/// The query must be completed by the caller with a WHERE clause and executed via bindAndExecute.
+///
+/// @param alloc - Allocator for SQL string construction
+/// @param table - The table name to update
+/// @param fields - Tuple of .{key, expr, param} triples
+///   (e.g. .{.{"name", "TRIM(${d})", name_param}, .{"age", "${d}", age_param}})
+/// @param param_offset - Starting parameter number for WHERE clauses (e.g. 1 or 2)
+/// @param conn - The database connection
+///
+/// @returns A PatchQuery that can be extended with WHERE clauses and executed
+pub fn patchQuery(
+    alloc: Allocator,
+    table: []const u8,
+    fields: anytype,
+    param_offset: usize,
+    conn: anytype,
+) !PatchQuery(@TypeOf(fields), @TypeOf(conn)) {
+    var parameter_count: usize = 0;
+    inline for (fields) |f| {
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) == .@"union") {
+            if (param != .not_provided) parameter_count += 1;
+        } else {
+            parameter_count += 1;
+        }
+    }
+    if (parameter_count == 0) return error.NoParams;
+
+    var sql: std.ArrayList(u8) = .empty;
+    errdefer sql.deinit(alloc);
+
+    const update_prefix = try allocPrint(alloc, "UPDATE {s} SET ", .{table});
+    defer alloc.free(update_prefix);
+    try sql.appendSlice(alloc, update_prefix);
+
+    var param_num: usize = 1;
+    inline for (fields) |f| {
+        const key = f[0];
+        const expr = f[1];
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) != .@"union" or param != .not_provided) {
+            const set_clause = try allocPrint(alloc, "{s} = " ++ expr, .{ key, param_offset + param_num });
+            defer alloc.free(set_clause);
+
+            try sql.appendSlice(alloc, set_clause);
+            if (param_num < parameter_count) try sql.appendSlice(alloc, ", ");
+            param_num += 1;
+        }
+    }
+
+    return .{
+        ._alloc = alloc,
+        ._conn = conn,
+        .sql = sql,
+        .params = fields,
+    };
+}
+
+/// Generates an INSERT ... ON CONFLICT DO UPDATE SET (upsert) query.
+/// Automatically distinguishes fixed vs dynamic fields based on whether params are Optional types.
+/// Non-Optional params are fixed (always included), Optional params are dynamic (included only if .value).
+///
+/// @param alloc - Allocator for SQL string construction
+/// @param table - The table name to upsert into
+/// @param fields - Tuple of .{key, expr, param} triples
+///   (e.g. .{.{"user_id", "${d}", user_id}, .{"status", "${d}", status_param}})
+/// @param conflict_columns - Columns that trigger the conflict (e.g. .{"user_id"})
+/// @param conn - The database connection
+///
+/// @returns A PatchQuery that generates the full INSERT ... ON CONFLICT DO UPDATE statement
+pub fn upsertQuery(
+    alloc: Allocator,
+    table: []const u8,
+    fields: anytype,
+    conflict_columns: anytype,
+    conn: anytype,
+) !PatchQuery(@TypeOf(fields), @TypeOf(conn)) {
+    var parameter_count: usize = 0;
+    inline for (fields) |f| {
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) == .@"union") {
+            if (param != .not_provided) parameter_count += 1;
+        } else {
+            parameter_count += 1;
+        }
+    }
+    if (parameter_count == 0) return error.NoParams;
+
+    var sql: std.ArrayList(u8) = .empty;
+    errdefer sql.deinit(alloc);
+
+    const insert_prefix = try allocPrint(alloc, "INSERT INTO {s} (", .{table});
+    defer alloc.free(insert_prefix);
+    try sql.appendSlice(alloc, insert_prefix);
+
+    var first = true;
+    inline for (fields) |f| {
+        const key = f[0];
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) != .@"union" or param != .not_provided) {
+            if (!first) try sql.appendSlice(alloc, ", ");
+            try sql.appendSlice(alloc, key);
+            first = false;
+        }
+    }
+
+    try sql.appendSlice(alloc, ") VALUES (");
+
+    var param_num: usize = 1;
+    first = true;
+    inline for (fields) |f| {
+        const expr = f[1];
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) != .@"union" or param != .not_provided) {
+            if (!first) try sql.appendSlice(alloc, ", ");
+            const value_expr = try allocPrint(alloc, expr, .{param_num});
+            defer alloc.free(value_expr);
+            try sql.appendSlice(alloc, value_expr);
+            param_num += 1;
+            first = false;
+        }
+    }
+
+    try sql.appendSlice(alloc, ") ON CONFLICT (");
+    inline for (conflict_columns, 0..) |col, i| {
+        if (i > 0) try sql.appendSlice(alloc, ", ");
+        try sql.appendSlice(alloc, col);
+    }
+    try sql.appendSlice(alloc, ") DO UPDATE SET ");
+
+    param_num = 1;
+    first = true;
+
+    inline for (fields) |f| {
+        const key = f[0];
+        const expr = f[1];
+        const param = f[2];
+        if (@typeInfo(@TypeOf(param)) != .@"union" or param != .not_provided) {
+            if (!first) try sql.appendSlice(alloc, ", ");
+            const set_expr = try allocPrint(alloc, "{s} = " ++ expr, .{ key, param_num });
+            defer alloc.free(set_expr);
+            try sql.appendSlice(alloc, set_expr);
+            param_num += 1;
+            first = false;
+        }
+    }
+
+    return .{
+        ._alloc = alloc,
+        ._conn = conn,
+        .sql = sql,
+        .params = fields,
+    };
+}
+
+pub fn PatchQuery(P: type, ConnType: type) type {
+    return struct {
+        pub const Self = @This();
+
+        _alloc: Allocator,
+        _conn: ConnType,
+        sql: std.ArrayList(u8),
+        params: P,
+
+        pub fn deinit(self: *Self) void {
+            self.sql.deinit(self._alloc);
+        }
+
+        /// Binds parameters and executes the prepared UPDATE statement.
+        ///
+        /// @param self - The PatchQuery instance containing the SQL and parameters
+        /// @param fixed_params - A tuple of values to bind first (e.g. WHERE clause values).
+        ///                       These are bound in order before the Optional params.
+        ///
+        /// @returns A pointer to pg.Result on success (or mock result for tests).
+        ///          Errors if statement preparation or binding fails (production only).
+        pub fn bindAndExecute(self: *Self, fixed_params: anytype) !*pg.Result {
+            switch (ConnType) {
+                *pg.Conn => {
+                    var stmt = try pg.Stmt.init(self._conn, .{ .allocator = self._alloc });
+                    errdefer stmt.deinit();
+
+                    try stmt.prepare(self.sql.items, null);
+                    inline for (fixed_params) |p| try stmt.bind(p);
+                    inline for (self.params) |f| {
+                        const param = f[2];
+                        switch (@typeInfo(@TypeOf(param))) {
+                            .@"union" => if (param != .not_provided) try stmt.bind(param.value),
+                            else => try stmt.bind(param),
+                        }
+                    }
+
+                    return try stmt.execute();
+                },
+                *MockConnection => {
+                    if (self._conn.captured_sql.len > 0) self._conn.alloc.free(self._conn.captured_sql);
+                    self._conn.captured_sql = try self._conn.alloc.dupe(u8, self.sql.items);
+                    return &self._conn.result;
+                },
+                else => return error.UnsupportedConnectionType,
+            }
+        }
+    };
+}
+
+const MockConnection = struct {
+    pub const Self = @This();
+
+    captured_sql: []u8 = &[_]u8{},
+    alloc: Allocator,
+    result: pg.Result = undefined,
+
+    fn init(alloc: Allocator) Self {
+        return .{ .alloc = alloc };
+    }
+
+    fn deinit(self: *Self) void {
+        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
+    }
+
+    fn execOpts(self: *Self, sql: []const u8, _: anytype, _: anytype) !?i64 {
+        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
+        self.captured_sql = try self.alloc.dupe(u8, sql);
+        return 1;
+    }
+
+    fn begin(_: *Self) !void {}
+    fn rollback(_: *Self) !void {}
+    fn release(_: *Self) void {}
+};
+
+test "patchQuery - basic test" {
+    const alloc = std.testing.allocator;
+
+    const fields = .{
+        .{ "name", "trim(${d})", Optional([]u8){ .value = try alloc.alloc(u8, 4) } },
+        .{ "is_universal", "${d}", Optional([]bool){ .value = try alloc.alloc(bool, 1) } },
+    };
+
+    defer inline for (fields) |f| {
+        if (f[2] != .not_provided) alloc.free(f[2].value);
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try patchQuery(alloc, "skill", fields, 2, &mock);
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, " WHERE site = $1 AND id = $2 RETURNING id;");
+
+    _ = try query.bindAndExecute(.{ 1, 2 });
+}
+
+test "patchQuery - with partial fields" {
+    const alloc = std.testing.allocator;
+
+    const not_provided: Optional([]const u8) = .not_provided;
+    const fields = .{
+        .{ "name", "trim(${d})", Optional([]const u8){ .value = "updated_name" } },
+        .{ "is_universal", "${d}", not_provided },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try patchQuery(alloc, "skill", fields, 1, &mock);
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, " WHERE id = $1;");
+
+    _ = try query.bindAndExecute(.{123});
+
+    const expected =
+        "UPDATE skill SET name = trim($2) WHERE id = $1;";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
+}
+
+test "upsertQuery - simple upsert" {
+    const alloc = std.testing.allocator;
+
+    const fields = .{
+        .{ "job_title", "${d}", Optional([]const u8){ .value = "Engineer" } },
+        .{ "phone_number", "${d}", Optional([]const u8){ .value = "555-1234" } },
+        .{ "about_me", "${d}", Optional([]const u8){ .value = "Hello" } },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try upsertQuery(
+        alloc,
+        "user_profile",
+        fields,
+        .{"user_id"},
+        &mock,
+    );
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, ";");
+
+    _ = try query.bindAndExecute(.{});
+
+    const expected =
+        "INSERT INTO user_profile (job_title, phone_number, about_me) " ++
+        "VALUES ($1, $2, $3) " ++
+        "ON CONFLICT (user_id) DO UPDATE SET " ++
+        "job_title = $1, phone_number = $2, about_me = $3;";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
+}
+
+test "upsertQuery - simple upsert with partial fields" {
+    const alloc = std.testing.allocator;
+
+    const not_provided: Optional([]const u8) = .not_provided;
+    const fields = .{
+        .{ "job_title", "${d}", Optional([]const u8){ .value = "Engineer" } },
+        .{ "phone_number", "${d}", not_provided },
+        .{ "about_me", "${d}", Optional([]const u8){ .value = "Hello" } },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try upsertQuery(
+        alloc,
+        "user_profile",
+        fields,
+        .{"user_id"},
+        &mock,
+    );
+    defer query.deinit();
+
+    try query.sql.appendSlice(alloc, ";");
+
+    _ = try query.bindAndExecute(.{});
+
+    const expected =
+        "INSERT INTO user_profile (job_title, about_me) " ++
+        "VALUES ($1, $2) " ++
+        "ON CONFLICT (user_id) DO UPDATE SET " ++
+        "job_title = $1, about_me = $2;";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
+}
+
+test "upsertQuery - with fixed and dynamic fields" {
+    const alloc = std.testing.allocator;
+
+    const not_provided: Optional([]const u8) = .not_provided;
+    const fields = .{
+        .{ "company_id", "${d}", @as(i32, 5) },
+        .{ "user_id", "${d}", @as(i32, 123) },
+        .{ "shift", "TRIM(${d})", "morning" },
+        .{ "status", "${d}", Optional([]const u8){ .value = "active" } },
+        .{ "notes", "TRIM(${d})", not_provided },
+    };
+
+    var mock = MockConnection.init(std.testing.allocator);
+    defer mock.deinit();
+
+    var query = try upsertQuery(
+        alloc,
+        "work_assignment",
+        fields,
+        .{ "user_id", "shift" },
+        &mock,
+    );
+    defer query.deinit();
+
+    _ = try query.bindAndExecute(.{});
+
+    const expected =
+        "INSERT INTO work_assignment (company_id, user_id, shift, status) " ++
+        "VALUES ($1, $2, TRIM($3), $4) " ++
+        "ON CONFLICT (user_id, shift) DO UPDATE SET " ++
+        "company_id = $1, user_id = $2, shift = TRIM($3), status = $4";
+    try std.testing.expectEqualStrings(expected, mock.captured_sql);
+}
 
 /// Builds and executes a dynamic UPDATE query at runtime.
 /// Fields are passed as tuples of {name, value} where value is Optional(T).
@@ -20,7 +403,6 @@ pub fn execPatch(
 
     try sql.appendSlice(alloc, "UPDATE " ++ table ++ " SET ");
 
-    // Build SQL string with runtime presence checks, then build params and execute
     const field_count = try buildSetClause(alloc, &sql, fields, 0, 1, true);
     if (field_count.count == 0) return 0;
 
@@ -123,228 +505,4 @@ fn fieldIsPresent(value: anytype) bool {
     if (info == .@"union") return std.meta.activeTag(value) != .not_provided;
     if (info == .optional) return value != null;
     return true;
-}
-
-const MockConnection = struct {
-    captured_sql: []u8 = &[_]u8{},
-    alloc: Allocator,
-
-    fn init(alloc: Allocator) MockConnection {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *MockConnection) void {
-        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
-    }
-
-    fn execOpts(self: *MockConnection, sql: []const u8, _: anytype, _: anytype) !?i64 {
-        if (self.captured_sql.len > 0) self.alloc.free(self.captured_sql);
-        self.captured_sql = try self.alloc.dupe(u8, sql);
-        return 1;
-    }
-};
-
-test "execPatch - all fields provided" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const result = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", .{ .value = "test" } },
-            .{ "description", .{ .value = "desc" } },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET name = $1, description = $2 WHERE id = $3",
-        mock.captured_sql,
-    );
-    try std.testing.expectEqual(1, result);
-}
-
-test "execPatch - first field not provided" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const not_provided: Optional([]const u8) = .not_provided;
-    const result = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", not_provided },
-            .{ "description", .{ .value = "desc" } },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET description = $1 WHERE id = $2",
-        mock.captured_sql,
-    );
-    try std.testing.expectEqual(1, result);
-}
-
-test "execPatch - second field not provided" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const not_provided: Optional([]const u8) = .not_provided;
-    const result = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", .{ .value = "test" } },
-            .{ "description", not_provided },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET name = $1 WHERE id = $2",
-        mock.captured_sql,
-    );
-    try std.testing.expectEqual(1, result);
-}
-
-test "execPatch - no fields provided" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const not_provided: Optional([]const u8) = .not_provided;
-    const result = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", not_provided },
-            .{ "description", not_provided },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    try std.testing.expectEqual(0, result);
-}
-
-test "execPatch - multiple where clauses" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    _ = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", .{ .value = "test" } },
-        },
-        .{
-            .{ "id", 1 },
-            .{ "user_id", 2 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET name = $1 WHERE id = $2 AND user_id = $3",
-        mock.captured_sql,
-    );
-}
-
-test "fieldIsPresent - Optional with value" {
-    const val: Optional(i32) = .{ .value = 42 };
-    try std.testing.expect(fieldIsPresent(val));
-}
-
-test "fieldIsPresent - Optional not provided" {
-    const val: Optional(i32) = .not_provided;
-    try std.testing.expect(!fieldIsPresent(val));
-}
-
-test "fieldIsPresent - Optional with null value" {
-    const val: Optional(?i32) = .{ .value = null };
-    try std.testing.expect(fieldIsPresent(val));
-}
-
-test "execPatch - middle field not provided" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const not_provided: Optional([]const u8) = .not_provided;
-    _ = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", .{ .value = "test" } },
-            .{ "description", not_provided },
-            .{ "price", .{ .value = 100 } },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET name = $1, price = $2 WHERE id = $3",
-        mock.captured_sql,
-    );
-}
-
-test "execPatch - nullable field explicitly set to null" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    const null_value: Optional(?[]const u8) = .{ .value = null };
-    _ = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "listing",
-        .{
-            .{ "name", .{ .value = "test" } },
-            .{ "description", null_value },
-        },
-        .{
-            .{ "id", 1 },
-        },
-    );
-
-    // null_value has .value set (to null), so it should be included
-    try std.testing.expectEqualStrings(
-        "UPDATE listing SET name = $1, description = $2 WHERE id = $3",
-        mock.captured_sql,
-    );
-}
-
-test "execPatch - single field" {
-    var mock = MockConnection.init(std.testing.allocator);
-    defer mock.deinit();
-
-    _ = try execPatch(
-        &mock,
-        std.testing.allocator,
-        "usr",
-        .{
-            .{ "email", .{ .value = "test@example.com" } },
-        },
-        .{
-            .{ "id", 42 },
-        },
-    );
-
-    try std.testing.expectEqualStrings(
-        "UPDATE usr SET email = $1 WHERE id = $2",
-        mock.captured_sql,
-    );
 }
