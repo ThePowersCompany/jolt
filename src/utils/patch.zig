@@ -70,14 +70,14 @@ pub fn patchQuery(
 /// Generates an INSERT ... ON CONFLICT DO UPDATE SET (upsert) query.
 /// Automatically distinguishes fixed vs dynamic fields based on whether params are Optional types.
 /// Non-Optional params are fixed (always included), Optional params are dynamic (included only if .value).
+/// The ON CONFLICT UPDATE SET clause automatically includes all fields except those in conflict_columns.
 ///
 /// @param alloc - Allocator for SQL string construction
 /// @param table - The table name to upsert into
 /// @param fields - Tuple of .{key, expr, param} triples
 ///   (e.g. .{.{"user_id", "${d}", user_id}, .{"status", "${d}", status_param}})
-/// @param conflict_columns - Columns that trigger the conflict (e.g. .{"user_id"})
-/// @param update_columns - Columns to include in the ON CONFLICT SET clause (e.g. .{"user_id", "status"}).
-///   Only these columns will be updated when a conflict occurs.
+/// @param conflict_columns - Columns that trigger the conflict (e.g. .{"user_id"}).
+///   These columns are excluded from the ON CONFLICT UPDATE SET clause.
 /// @param conn - The database connection
 ///
 /// @returns A PatchQuery that generates the full INSERT ... ON CONFLICT DO UPDATE statement
@@ -86,23 +86,8 @@ pub fn upsertQuery(
     table: []const u8,
     fields: anytype,
     conflict_columns: anytype,
-    update_columns: anytype,
     conn: anytype,
 ) !PatchQuery(@TypeOf(fields), @TypeOf(conn)) {
-    // Validate update_columns at comptime
-    comptime {
-        for (update_columns) |col| {
-            var found = false;
-            for (fields) |f| {
-                if (std.mem.eql(u8, f[0], col)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) @compileError("Column not found in fields");
-        }
-    }
-
     var parameter_count: usize = 0;
     inline for (fields) |f| {
         const param = f[2];
@@ -157,22 +142,28 @@ pub fn upsertQuery(
     try sql.appendSlice(alloc, ") DO UPDATE SET ");
 
     first = true;
-    inline for (update_columns) |col| {
-        if (!first) try sql.appendSlice(alloc, ", ");
+    outer: inline for (fields) |f| {
+        const key = f[0];
+        const param = f[2];
 
-        inline for (fields) |f| {
-            if (std.mem.eql(u8, f[0], col)) {
-                const expr = f[1];
-                const col_param_num = getColParamNum(fields, col);
-                const formatted_expr = try allocPrint(alloc, expr, .{col_param_num});
-                defer alloc.free(formatted_expr);
-                const set_clause = try allocPrint(alloc, "{s} = {s}", .{ col, formatted_expr });
-                defer alloc.free(set_clause);
-                try sql.appendSlice(alloc, set_clause);
-                break;
-            }
+        // Skip columns that are in conflict_columns
+        inline for (conflict_columns) |col| {
+            if (comptime std.mem.eql(u8, key, col)) continue :outer;
         }
-        first = false;
+
+        // Only include fields that are provided
+        if (@typeInfo(@TypeOf(param)) != .@"union" or param != .not_provided) {
+            if (!first) try sql.appendSlice(alloc, ", ");
+
+            const expr = f[1];
+            const col_param_num = getColParamNum(fields, key);
+            const formatted_expr = try allocPrint(alloc, expr, .{col_param_num});
+            defer alloc.free(formatted_expr);
+            const set_clause = try allocPrint(alloc, "{s} = {s}", .{ key, formatted_expr });
+            defer alloc.free(set_clause);
+            try sql.appendSlice(alloc, set_clause);
+            first = false;
+        }
     }
 
     return .{
@@ -337,7 +328,6 @@ test "upsertQuery - simple upsert" {
         "user_profile",
         fields,
         .{"user_id"},
-        .{ "job_title", "phone_number", "about_me" },
         &mock,
     );
     defer query.deinit();
@@ -372,7 +362,6 @@ test "upsertQuery - simple upsert with partial fields" {
         "user_profile",
         fields,
         .{"user_id"},
-        .{ "job_title", "about_me" },
         &mock,
     );
     defer query.deinit();
@@ -389,7 +378,7 @@ test "upsertQuery - simple upsert with partial fields" {
     try std.testing.expectEqualStrings(expected, mock.captured_sql);
 }
 
-test "upsertQuery - with fixed and dynamic fields, only update dynamic" {
+test "upsertQuery - with fixed and dynamic fields, auto-exclude conflict columns" {
     const alloc = std.testing.allocator;
 
     const not_provided: Optional([]const u8) = .not_provided;
@@ -409,7 +398,6 @@ test "upsertQuery - with fixed and dynamic fields, only update dynamic" {
         "work_assignment",
         fields,
         .{ "user_id", "shift" },
-        .{"status"},
         &mock,
     );
     defer query.deinit();
@@ -420,7 +408,7 @@ test "upsertQuery - with fixed and dynamic fields, only update dynamic" {
         "INSERT INTO work_assignment (company_id, user_id, shift, status) " ++
         "VALUES ($1, $2, TRIM($3), $4) " ++
         "ON CONFLICT (user_id, shift) DO UPDATE SET " ++
-        "status = $4";
+        "company_id = $1, status = $4";
     try std.testing.expectEqualStrings(expected, mock.captured_sql);
 }
 
@@ -443,7 +431,6 @@ test "upsertQuery - multiple update columns with expressions" {
         "users",
         fields,
         .{"user_id"},
-        .{ "name", "email" },
         &mock,
     );
     defer query.deinit();
@@ -458,10 +445,11 @@ test "upsertQuery - multiple update columns with expressions" {
     try std.testing.expectEqualStrings(expected, mock.captured_sql);
 }
 
-test "upsertQuery - all optional fields" {
+test "upsertQuery - all optional fields with auto-excluded conflict" {
     const alloc = std.testing.allocator;
 
     const fields = .{
+        .{ "metric_id", "${d}", @as(i32, 1) },
         .{ "status", "${d}", Optional([]const u8){ .value = "active" } },
         .{ "count", "${d}", Optional(i32){ .value = 42 } },
     };
@@ -474,7 +462,6 @@ test "upsertQuery - all optional fields" {
         "metrics",
         fields,
         .{"metric_id"},
-        .{ "status", "count" },
         &mock,
     );
     defer query.deinit();
@@ -482,10 +469,10 @@ test "upsertQuery - all optional fields" {
     _ = try query.bindAndExecute(.{});
 
     const expected =
-        "INSERT INTO metrics (status, count) " ++
-        "VALUES ($1, $2) " ++
+        "INSERT INTO metrics (metric_id, status, count) " ++
+        "VALUES ($1, $2, $3) " ++
         "ON CONFLICT (metric_id) DO UPDATE SET " ++
-        "status = $1, count = $2";
+        "status = $2, count = $3";
     try std.testing.expectEqualStrings(expected, mock.captured_sql);
 }
 
