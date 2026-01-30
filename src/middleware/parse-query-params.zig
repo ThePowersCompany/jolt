@@ -102,6 +102,15 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         return error.InvalidEnumVariant;
                     }
                 },
+                .@"struct" => {
+                    const parsed = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
+                        try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
+                        return true;
+                    };
+                    defer parsed.deinit();
+
+                    @field(@field(ctx, query_params), field_name) = parsed.value;
+                },
                 else => {
                     try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                     return true;
