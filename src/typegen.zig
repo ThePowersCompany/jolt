@@ -171,12 +171,17 @@ const TypeGenerator = struct {
             _, const EndpointType = endpoint;
             const type_info = @typeInfo(EndpointType);
             inline for (type_info.@"struct".decls) |decl| {
-                const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
-                switch (decl_info) {
+                const T = @TypeOf(@field(EndpointType, decl.name));
+                switch (@typeInfo(T)) {
                     .type => {
                         const t_info = @typeInfo(@field(EndpointType, decl.name));
                         if (t_info == .@"struct") {
                             try self.setTopLevelType(decl.name, .{ .parsed = "", .optional = false });
+                        } else if (t_info == .@"enum") {
+                            if (!self.top_level_types.contains(decl.name)) {
+                                const parsed = try self.parseEnum(t_info.@"enum");
+                                try self.setTopLevelType(decl.name, .{ .parsed = parsed, .optional = false });
+                            }
                         }
                     },
                     else => {},
@@ -754,6 +759,12 @@ const TypeGenerator = struct {
                 return try self.parseStruct(type_name, type_info.@"struct");
             },
             .@"enum" => {
+                const type_name = shortTypeName(@typeName(T));
+                std.log.err("{s}", .{type_name});
+                if (self.top_level_types.get(type_name)) |gen| {
+                    std.log.err("  {s}", .{gen.parsed});
+                    return .{ .parsed = type_name, .optional = gen.optional };
+                }
                 return .{ .parsed = try self.parseEnum(type_info.@"enum") };
             },
             .@"union" => {
