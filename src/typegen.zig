@@ -760,9 +760,7 @@ const TypeGenerator = struct {
             },
             .@"enum" => {
                 const type_name = shortTypeName(@typeName(T));
-                std.log.err("{s}", .{type_name});
                 if (self.top_level_types.get(type_name)) |gen| {
-                    std.log.err("  {s}", .{gen.parsed});
                     return .{ .parsed = type_name, .optional = gen.optional };
                 }
                 return .{ .parsed = try self.parseEnum(type_info.@"enum") };
