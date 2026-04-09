@@ -770,7 +770,8 @@ const TypeGenerator = struct {
             },
             .optional => {
                 return .{
-                    // .optional = true,
+                    // "optional" in zig means nullable, not actually optional.
+                    // This means the value could still be required, but could be set to null.
                     .optional = false,
                     .parsed = try allocPrint(self.arena_alloc, "{s}|null", .{
                         (try self.extractIdentifier(type_info.optional.child)).parsed,
