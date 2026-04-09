@@ -42,7 +42,7 @@ pub fn Optional(comptime T: type) type {
                     @compileError("Type mismatch: " ++ @typeName(inner_type) ++ " - " ++ @typeName(T));
                 }
                 if (e) |v| return .{ .value = v };
-                return .{.not_provided};
+                return .not_provided;
             } else {
                 if (E != T) @compileError("Type mismatch: " ++ @typeName(E) ++ " - " ++ @typeName(T));
                 return .{ .value = e };
@@ -152,14 +152,25 @@ test "to" {
         foo: i32,
     };
 
-    const foo: Foo = .{ .foo = 123 };
+    {
+        const foo: Foo = .{ .foo = 123 };
+        const opt: Optional(Foo) = .to(foo);
 
-    const opt: Optional(Foo) = .to(foo);
+        const got = opt.get();
 
-    const got = opt.get();
+        try std.testing.expect(@TypeOf(got) == ?Foo);
+        try std.testing.expect(got.?.foo == 123);
+    }
 
-    try std.testing.expect(@TypeOf(got) == ?Foo);
-    try std.testing.expect(got.?.foo == 123);
+    {
+        const foo: ?Foo = .{ .foo = 123 };
+        const opt: Optional(Foo) = .to(foo);
+
+        const got = opt.get();
+
+        try std.testing.expect(@TypeOf(got) == ?Foo);
+        try std.testing.expect(got.?.foo == 123);
+    }
 }
 
 test "parse json array" {
