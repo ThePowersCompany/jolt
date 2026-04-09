@@ -770,7 +770,8 @@ const TypeGenerator = struct {
             },
             .optional => {
                 return .{
-                    .optional = true,
+                    // .optional = true,
+                    .optional = false,
                     .parsed = try allocPrint(self.arena_alloc, "{s}|null", .{
                         (try self.extractIdentifier(type_info.optional.child)).parsed,
                     }),
@@ -791,6 +792,35 @@ const TypeGenerator = struct {
         return std.mem.containsAtLeast(u8, struct_name, 1, "__struct_");
     }
 };
+
+test "required nullable fields" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Foo = struct {
+        // Optional and nullable
+        foo: ?i32 = null,
+        // Nullable (not optional)
+        bar: ?i32,
+        baz: i32 = 0,
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractIdentifier(Foo);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\foo?: number|null
+        \\bar: number|null
+        \\baz?: number
+        \\}
+    ,
+        parse_result.parsed,
+    );
+}
 
 test "Nested Optionals" {
     const alloc = std.testing.allocator;
