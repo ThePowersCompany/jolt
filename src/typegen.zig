@@ -804,6 +804,7 @@ test "required nullable fields" {
         foo: ?i32 = null,
         // Nullable (not optional)
         bar: ?i32,
+        baz: i32 = 0,
     };
 
     var type_generator = try TypeGenerator.init(arena.allocator());
@@ -814,6 +815,7 @@ test "required nullable fields" {
         \\{
         \\foo?: number|null
         \\bar: number|null
+        \\baz?: number
         \\}
     ,
         parse_result.parsed,
