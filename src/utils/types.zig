@@ -32,6 +32,23 @@ pub fn Optional(comptime T: type) type {
             return null;
         }
 
+        /// Wraps a value in an Optional.
+        pub fn to(e: anytype) Optional(T) {
+            const E = @TypeOf(e);
+            const info = @typeInfo(E);
+            if (info == .optional) {
+                const inner_type = info.optional.child;
+                if (inner_type != T) {
+                    @compileError("Type mismatch: " ++ @typeName(inner_type) ++ " - " ++ @typeName(T));
+                }
+                if (e) |v| return .{ .value = v };
+                return .{.not_provided};
+            } else {
+                if (E != T) @compileError("Type mismatch: " ++ @typeName(E) ++ " - " ++ @typeName(T));
+                return .{ .value = e };
+            }
+        }
+
         pub fn jsonParse(
             allocator: std.mem.Allocator,
             source: anytype,
@@ -128,6 +145,21 @@ pub fn JsonArray(comptime T: type) type {
             try json.Stringify.write(jws, self.list.items);
         }
     };
+}
+
+test "to" {
+    const Foo = struct {
+        foo: i32,
+    };
+
+    const foo: Foo = .{ .foo = 123 };
+
+    const opt: Optional(Foo) = .to(foo);
+
+    const got = opt.get();
+
+    try std.testing.expect(@TypeOf(got) == ?Foo);
+    try std.testing.expect(got.?.foo == 123);
 }
 
 test "parse json array" {
