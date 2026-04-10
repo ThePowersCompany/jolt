@@ -60,6 +60,10 @@ pub fn Optional(comptime T: type) type {
             source: anytype,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(source.*))!Self {
+            const info = @typeInfo(T);
+            if (info == .optional) {
+                return .{ .value = try json.innerParse(T, allocator, source, options) };
+            }
             // Supports implicitly parsing `null` to `.not_provided`
             const value: ?T = try json.innerParse(?T, allocator, source, options);
             return if (value) |v| .{ .value = v } else .not_provided;
@@ -70,6 +74,10 @@ pub fn Optional(comptime T: type) type {
             source: json.Value,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(allocator))!Self {
+            const info = @typeInfo(T);
+            if (info == .optional) {
+                return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
+            }
             // Supports implicitly parsing `null` to `.not_provided`
             const value: ?T = try json.parseFromValueLeaky(?T, allocator, source, options);
             return if (value) |v| .{ .value = v } else .not_provided;
@@ -89,37 +97,17 @@ pub fn Optional(comptime T: type) type {
         }
 
         pub fn fromPgzRow(
-            data: []const u8,
+            value: pg.Result.State.Value,
             oid: i32,
         ) !Self {
-            // Note: Unable to access the `is_null` flag of the pg.zig value,
-            // so this is our best option
-            if (data.len == 0) return .not_provided;
-            return getScalar(data, oid);
-        }
-
-        // Note: Copied from pg.zig library. Ideally, the library should be updated to export this function.
-        fn getScalar(data: []const u8, oid: i32) T {
-            switch (T) {
-                u8 => return pg.types.Char.decode(data, oid),
-                i16 => return pg.types.Int16.decode(data, oid),
-                i32 => return pg.types.Int32.decode(data, oid),
-                i64 => return pg.types.Int64.decode(data, oid),
-                f32 => return pg.types.Float32.decode(data, oid),
-                f64 => return pg.types.Float64.decode(data, oid),
-                bool => return pg.types.Bool.decode(data, oid),
-                []const u8 => return pg.types.Bytea.decode(data, oid),
-                []u8 => return @constCast(pg.types.Bytea.decode(data, oid)),
-                pg.types.Numeric => return pg.types.Numeric.decode(data, oid),
-                pg.types.Cidr => return pg.types.Cidr.decode(data, oid),
-                else => switch (@typeInfo(T)) {
-                    .@"enum" => {
-                        const str = pg.types.Bytea.decode(data, oid);
-                        return std.meta.stringToEnum(T, str).?;
-                    },
-                    else => @compileError("cannot get value of type " ++ @typeName(T)),
-                },
+            if (value.is_null) {
+                const info = @typeInfo(T);
+                if (info == .optional) {
+                    return .{ .value = null };
+                }
+                return .not_provided;
             }
+            return pg.types.decodeScalar(value.data, oid);
         }
     };
 }
