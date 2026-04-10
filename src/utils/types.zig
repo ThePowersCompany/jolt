@@ -2,6 +2,8 @@
 const std = @import("std");
 const json = std.json;
 
+const pg = @import("pg");
+
 pub fn Unwrap(T: type) type {
     const info = @typeInfo(T);
     if (info == .optional) return Unwrap(info.optional.child);
@@ -16,6 +18,10 @@ pub fn unwrap(T: type, t: T) ?Unwrap(T) {
         }
     }
     return t;
+}
+
+pub fn isOptional(comptime T: type) bool {
+    return @typeInfo(T) == .@"union" and @hasField(T, "value") and @hasField(T, "not_provided");
 }
 
 pub fn Optional(comptime T: type) type {
@@ -54,7 +60,9 @@ pub fn Optional(comptime T: type) type {
             source: anytype,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(source.*))!Self {
-            return .{ .value = try json.innerParse(T, allocator, source, options) };
+            // Supports implicitly parsing `null` to `.not_provided`
+            const value: ?T = try json.innerParse(?T, allocator, source, options);
+            return if (value) |v| .{ .value = v } else .not_provided;
         }
 
         pub fn jsonParseFromValue(
@@ -62,12 +70,61 @@ pub fn Optional(comptime T: type) type {
             source: json.Value,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(allocator))!Self {
-            return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
+            // Supports implicitly parsing `null` to `.not_provided`
+            const value: ?T = try json.parseFromValueLeaky(?T, allocator, source, options);
+            return if (value) |v| .{ .value = v } else .not_provided;
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            switch (self.*) {
+                .value => |v| try json.Stringify.write(jws, v),
+                .not_provided => {
+                    // It's not possible to stringify an optional that's not provided,
+                    // so the only logical action is to error.
+                    // It's the responsibility of the parent struct (JsonObject)
+                    // to skip stringifying the optional field.
+                    return json.Stringify.Error.WriteFailed;
+                },
+            }
+        }
+
+        pub fn fromPgzRow(
+            value: pg.Result.State.Value,
+            oid: i32,
+        ) !Self {
+            if (value.is_null) return .not_provided;
+            return pg.types.decodeScalar(value.data, oid);
         }
     };
 }
 
-test "Optional" {
+test "Optional.to" {
+    const Foo = struct {
+        foo: i32,
+    };
+
+    {
+        const foo: Foo = .{ .foo = 123 };
+        const opt: Optional(Foo) = .to(foo);
+
+        const got = opt.get();
+
+        try std.testing.expect(@TypeOf(got) == ?Foo);
+        try std.testing.expect(got.?.foo == 123);
+    }
+
+    {
+        const foo: ?Foo = .{ .foo = 123 };
+        const opt: Optional(Foo) = .to(foo);
+
+        const got = opt.get();
+
+        try std.testing.expect(@TypeOf(got) == ?Foo);
+        try std.testing.expect(got.?.foo == 123);
+    }
+}
+
+test "parse json Optional" {
     const Foo = struct {
         foo: Optional(?i32) = .not_provided,
         bar: Optional(?i32) = .not_provided,
@@ -117,6 +174,108 @@ test "Optional" {
     if (foo.bar.value) |_| try std.testing.expect(false);
 }
 
+test "stringify json Optional" {
+    const stringify = @import("json.zig").stringify;
+    const alloc = std.testing.allocator;
+
+    {
+        const opt: Optional(i32) = .{ .value = 1 };
+        const str = try stringify(alloc, opt, .{});
+        defer alloc.free(str);
+        try std.testing.expectEqualStrings(str, "1");
+    }
+
+    {
+        const opt: Optional(i32) = .not_provided;
+        const strOrError = stringify(alloc, opt, .{});
+        try std.testing.expectError(json.Stringify.Error.WriteFailed, strOrError);
+    }
+
+    const Foo = struct {
+        data: Optional(i32),
+    };
+
+    {
+        const foo: Foo = .{
+            .data = .not_provided,
+        };
+        const strOrError = stringify(alloc, foo, .{});
+        try std.testing.expectError(json.Stringify.Error.WriteFailed, strOrError);
+    }
+    {
+        const foo: Foo = .{
+            .data = .{ .value = 123 },
+        };
+        const str = try stringify(alloc, foo, .{});
+        defer alloc.free(str);
+        try std.testing.expectEqualStrings(str, "{\"data\":123}");
+    }
+}
+
+pub fn JsonObject(comptime T: type) type {
+    const info = @typeInfo(T);
+    const S = switch (info) {
+        .@"struct" => |S| S,
+        else => @compileError("JsonObject must wrap a struct: " ++ @typeName(T)),
+    };
+    return struct {
+        const Self = @This();
+
+        obj: T,
+
+        pub fn init(obj: T) Self {
+            return .{ .obj = obj };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            try jws.beginObject();
+            inline for (S.fields) |Field| {
+                if (Field.type == void) continue;
+
+                var emit_field: bool = true;
+                if (comptime isOptional(Field.type)) {
+                    if (@field(self.obj, Field.name) == .not_provided) {
+                        emit_field = false;
+                    }
+                }
+
+                if (emit_field) {
+                    try jws.objectField(Field.name);
+                    const j: Json(Field.type) = .init(@field(self.obj, Field.name));
+                    try jws.write(j);
+                }
+            }
+            try jws.endObject();
+        }
+    };
+}
+
+test "stringify JsonObject" {
+    const stringify = @import("json.zig").stringify;
+    const alloc = std.testing.allocator;
+
+    const Foo = JsonObject(struct {
+        data: Optional(i32),
+    });
+
+    {
+        const foo: Foo = .{
+            .obj = .{ .data = .not_provided },
+        };
+        const str = try stringify(alloc, foo, .{});
+        defer alloc.free(str);
+        try std.testing.expectEqualStrings(str, "{}");
+    }
+    {
+        const foo: Foo = .{
+            .obj = .{ .data = .{ .value = 123 } },
+        };
+        const str = try stringify(alloc, foo, .{});
+        defer alloc.free(str);
+        try std.testing.expectEqualStrings(str, "{\"data\":123}");
+    }
+}
+
 pub fn JsonArray(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -142,35 +301,10 @@ pub fn JsonArray(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
-            try json.Stringify.write(jws, self.list.items);
+            const j: JsonSlice(T) = .init(self.list.items);
+            try jws.write(j);
         }
     };
-}
-
-test "to" {
-    const Foo = struct {
-        foo: i32,
-    };
-
-    {
-        const foo: Foo = .{ .foo = 123 };
-        const opt: Optional(Foo) = .to(foo);
-
-        const got = opt.get();
-
-        try std.testing.expect(@TypeOf(got) == ?Foo);
-        try std.testing.expect(got.?.foo == 123);
-    }
-
-    {
-        const foo: ?Foo = .{ .foo = 123 };
-        const opt: Optional(Foo) = .to(foo);
-
-        const got = opt.get();
-
-        try std.testing.expect(@TypeOf(got) == ?Foo);
-        try std.testing.expect(got.?.foo == 123);
-    }
 }
 
 test "parse json array" {
@@ -214,4 +348,103 @@ test "stringify json array" {
     defer alloc.free(str);
 
     try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
+}
+
+pub fn JsonSlice(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        slice: []const T,
+
+        pub fn init(slice: []const T) Self {
+            return .{ .slice = slice };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            try jws.beginArray();
+            for (self.slice) |x| {
+                const j: Json(T) = .init(x);
+                try jws.write(j);
+            }
+            try jws.endArray();
+        }
+    };
+}
+
+pub fn JsonNullable(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: ?T,
+
+        pub fn init(value: ?T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            if (self.value) |v| {
+                const j: Json(T) = .init(v);
+                try jws.write(j);
+            } else {
+                try jws.write(null);
+            }
+        }
+    };
+}
+
+pub fn JsonUnion(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        pub fn init(value: T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            switch (self.value) {
+                inline else => |v| {
+                    const j: Json(@TypeOf(v)) = .init(v);
+                    try jws.write(j);
+                },
+            }
+        }
+    };
+}
+
+pub fn JsonPrimitive(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        pub fn init(value: T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            try jws.write(self.value);
+        }
+    };
+}
+
+pub fn Json(comptime T: type) type {
+    const info = @typeInfo(T);
+    switch (info) {
+        .@"struct" => |S| {
+            if (S.decls.len == 0) return JsonObject(T);
+        },
+        .pointer => |p| {
+            if (p.child != u8) return JsonSlice(p.child);
+        },
+        .optional => |O| return JsonNullable(O.child),
+        .@"union" => {
+            if (!isOptional(T)) return JsonUnion(T);
+        },
+        .array => @compileError("array not supported"),
+        .vector => @compileError("vector not supported"),
+        else => {},
+    }
+    return JsonPrimitive(T);
 }
