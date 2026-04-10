@@ -107,7 +107,7 @@ pub fn Optional(comptime T: type) type {
                 }
                 return .not_provided;
             }
-            return pg.types.decodeScalar(value.data, oid);
+            return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), value.data, oid) };
         }
     };
 }
@@ -136,6 +136,12 @@ test "Optional.to" {
         try std.testing.expect(@TypeOf(got) == ?Foo);
         try std.testing.expect(got.?.foo == 123);
     }
+}
+
+test "Optional.fromPgzRow" {
+    _ = Optional(i32).fromPgzRow(.{ .is_null = false, .data = "123" }, 0) catch {};
+    const o = try Optional(?i32).fromPgzRow(.{ .is_null = true, .data = "" }, 0);
+    try std.testing.expect(o.value == null);
 }
 
 test "parse json Optional" {
