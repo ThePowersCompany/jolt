@@ -11,9 +11,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .pg = .{
-            // .url = "git+https://github.com/ThePowersCompany/pg.zig?ref=master#e58b318b7867ef065b3135983f829219c5eef891",
-            // .hash = "pg-0.0.0-Wp_7gXFoBgD0fQ72WICKa-bxLga03AXXQ3BbIsjjohQ3",
-            .path = "../pg.zig",
+            .url = "git+https://github.com/ThePowersCompany/pg.zig?ref=powers#526d5cb3f7bb419d039c704f5fb7bdd64e066d1d",
+            .hash = "pg-0.0.0-Wp_7gV1pBgAN_atgbzpICLXPcJ0gJJxVfFmuaprjCUew",
         },
     },
 }

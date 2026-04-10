@@ -60,6 +60,10 @@ pub fn Optional(comptime T: type) type {
             source: anytype,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(source.*))!Self {
+            const info = @typeInfo(T);
+            if (info == .optional) {
+                return .{ .value = try json.innerParse(T, allocator, source, options) };
+            }
             // Supports implicitly parsing `null` to `.not_provided`
             const value: ?T = try json.innerParse(?T, allocator, source, options);
             return if (value) |v| .{ .value = v } else .not_provided;
@@ -70,6 +74,10 @@ pub fn Optional(comptime T: type) type {
             source: json.Value,
             options: json.ParseOptions,
         ) json.ParseError(@TypeOf(allocator))!Self {
+            const info = @typeInfo(T);
+            if (info == .optional) {
+                return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
+            }
             // Supports implicitly parsing `null` to `.not_provided`
             const value: ?T = try json.parseFromValueLeaky(?T, allocator, source, options);
             return if (value) |v| .{ .value = v } else .not_provided;
