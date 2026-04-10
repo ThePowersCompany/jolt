@@ -202,12 +202,16 @@ pub fn JsonObject(comptime T: type) type {
     const info = @typeInfo(T);
     const S = switch (info) {
         .@"struct" => |S| S,
-        else => @compileError("JsonObject must wrap a struct"),
+        else => @compileError("JsonObject must wrap a struct: " ++ @typeName(T)),
     };
     return struct {
         const Self = @This();
 
         obj: T,
+
+        pub fn init(obj: T) Self {
+            return .{ .obj = obj };
+        }
 
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
             try jws.beginObject();
@@ -215,13 +219,16 @@ pub fn JsonObject(comptime T: type) type {
                 if (Field.type == void) continue;
 
                 var emit_field: bool = true;
-                if (isOptional(Field.type) and @field(self.obj, Field.name) == .not_provided) {
-                    emit_field = false;
+                if (comptime isOptional(Field.type)) {
+                    if (@field(self.obj, Field.name) == .not_provided) {
+                        emit_field = false;
+                    }
                 }
 
                 if (emit_field) {
                     try jws.objectField(Field.name);
-                    try jws.write(@field(self.obj, Field.name));
+                    const j: Json(Field.type) = .init(@field(self.obj, Field.name));
+                    try jws.write(j);
                 }
             }
             try jws.endObject();
@@ -280,7 +287,8 @@ pub fn JsonArray(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
-            try json.Stringify.write(jws, self.list.items);
+            const j: JsonSlice(T) = .init(self.list.items);
+            try jws.write(j);
         }
     };
 }
@@ -326,4 +334,103 @@ test "stringify json array" {
     defer alloc.free(str);
 
     try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
+}
+
+pub fn JsonSlice(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        slice: []const T,
+
+        pub fn init(slice: []const T) Self {
+            return .{ .slice = slice };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            try jws.beginArray();
+            for (self.slice) |x| {
+                const j: Json(T) = .init(x);
+                try jws.write(j);
+            }
+            try jws.endArray();
+        }
+    };
+}
+
+pub fn JsonNullable(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: ?T,
+
+        pub fn init(value: ?T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            if (self.value) |v| {
+                const j: Json(T) = .init(v);
+                try jws.write(j);
+            } else {
+                try jws.write(null);
+            }
+        }
+    };
+}
+
+pub fn JsonUnion(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        pub fn init(value: T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            switch (self.value) {
+                inline else => |v| {
+                    const j: Json(@TypeOf(v)) = .init(v);
+                    try jws.write(j);
+                },
+            }
+        }
+    };
+}
+
+pub fn JsonPrimitive(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        pub fn init(value: T) Self {
+            return .{ .value = value };
+        }
+
+        pub fn jsonStringify(self: *const Self, jws: anytype) !void {
+            try jws.write(self.value);
+        }
+    };
+}
+
+pub fn Json(comptime T: type) type {
+    const info = @typeInfo(T);
+    switch (info) {
+        .@"struct" => |S| {
+            if (S.decls.len == 0) return JsonObject(T);
+        },
+        .pointer => |p| {
+            if (p.child != u8) return JsonSlice(p.child);
+        },
+        .optional => |O| return JsonNullable(O.child),
+        .@"union" => {
+            if (!isOptional(T)) return JsonUnion(T);
+        },
+        .array => @compileError("array not supported"),
+        .vector => @compileError("vector not supported"),
+        else => {},
+    }
+    return JsonPrimitive(T);
 }

@@ -14,6 +14,7 @@ const JoltServer = @import("../main.zig").JoltServer;
 
 const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const stringify = @import("../utils/json.zig").stringify;
+const Json = @import("../utils/types.zig").Json;
 
 pub fn MiddlewareContext(comptime Context: type) type {
     return struct {
@@ -153,7 +154,8 @@ pub const RequestHandler = struct {
                             if (response.content_type == null) {
                                 try req.setHeader("content-type", "application/json");
                             }
-                            break :blk try stringify(alloc, body, response.opts);
+                            const json: Json(ReturnType) = .init(body);
+                            break :blk try stringify(alloc, json, response.opts);
                         },
                     };
                     try req.sendBody(data);

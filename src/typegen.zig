@@ -556,7 +556,7 @@ const TypeGenerator = struct {
         var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
-        if (isOptional(T)) {
+        if (comptime isOptional(T)) {
             const parsed_res = try self.extractIdentifier(@FieldType(T, "value"));
             try res.appendSlice(self.arena_alloc, parsed_res.parsed);
             return res.toOwnedSlice(self.arena_alloc);
