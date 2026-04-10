@@ -61,7 +61,6 @@ pub fn Response(comptime ReturnType: type) type {
         body: ?ReturnType = null,
         err: ?[]const u8 = null,
         content_type: ?[]const u8 = null,
-        opts: std.json.Stringify.Options = .{},
         status: ?StatusCode = null,
         finished: bool = false, // supports WebSockets
     };
@@ -155,7 +154,7 @@ pub const RequestHandler = struct {
                                 try req.setHeader("content-type", "application/json");
                             }
                             const json: Json(ReturnType) = .init(body);
-                            break :blk try stringify(alloc, json, response.opts);
+                            break :blk try stringify(alloc, json, .{});
                         },
                     };
                     try req.sendBody(data);
