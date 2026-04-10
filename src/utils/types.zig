@@ -100,7 +100,13 @@ pub fn Optional(comptime T: type) type {
             value: pg.Result.State.Value,
             oid: i32,
         ) !Self {
-            if (value.is_null) return .not_provided;
+            if (value.is_null) {
+                const info = @typeInfo(T);
+                if (info == .optional) {
+                    return .{ .value = null };
+                }
+                return .not_provided;
+            }
             return pg.types.decodeScalar(value.data, oid);
         }
     };
