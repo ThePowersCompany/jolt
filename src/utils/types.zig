@@ -301,8 +301,9 @@ pub fn JsonArray(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
-            const j: JsonSlice(T) = .init(self.list.items);
-            try jws.write(j);
+            // const j: JsonSlice(T) = .init(self.list.items);
+            // try jws.write(j);
+            try json.Stringify.write(jws, self.list.items);
         }
     };
 }
