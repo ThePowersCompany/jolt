@@ -10,7 +10,9 @@ const Type = std.builtin.Type;
 const EndpointDef = @import("main.zig").EndpointDef;
 const stringToEnum = std.meta.stringToEnum;
 const UnionRepr = @import("middleware/parse-body.zig").UnionRepr;
-const JsonArray = @import("utils/types.zig").JsonArray;
+const types = @import("utils/types.zig");
+const isOptional = types.isOptional;
+const JsonArray = types.JsonArray;
 
 const endpoint_fn_names = [_][]const u8{ "get", "post", "put", "patch", "delete" };
 
@@ -554,16 +556,10 @@ const TypeGenerator = struct {
         var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
-        if (strEqls(shortTypeName(@typeName(T)), "Optional")) {
-            inline for (U.fields) |f| {
-                if (strEqls(f.name, "value")) {
-                    const parsed_res = try self.extractIdentifier(f.type);
-                    try res.appendSlice(self.arena_alloc, parsed_res.parsed);
-
-                    return res.toOwnedSlice(self.arena_alloc);
-                }
-            }
-            return error.InvalidOptionalDeclaration;
+        if (isOptional(T)) {
+            const parsed_res = try self.extractIdentifier(@FieldType(T, "value"));
+            try res.appendSlice(self.arena_alloc, parsed_res.parsed);
+            return res.toOwnedSlice(self.arena_alloc);
         }
 
         var union_repr: ?UnionRepr = null;
