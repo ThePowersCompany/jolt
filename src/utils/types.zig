@@ -39,20 +39,9 @@ pub fn Optional(comptime T: type) type {
         }
 
         /// Wraps a value in an Optional.
-        pub fn to(e: anytype) Optional(T) {
-            const E = @TypeOf(e);
-            const info = @typeInfo(E);
-            if (info == .optional) {
-                const inner_type = info.optional.child;
-                if (inner_type != T) {
-                    @compileError("Type mismatch: " ++ @typeName(inner_type) ++ " - " ++ @typeName(T));
-                }
-                if (e) |v| return .{ .value = v };
-                return .not_provided;
-            } else {
-                if (E != T) @compileError("Type mismatch: " ++ @typeName(E) ++ " - " ++ @typeName(T));
-                return .{ .value = e };
-            }
+        pub fn to(value: ?T) Optional(T) {
+            if (value) |v| return .{ .value = v };
+            return .not_provided;
         }
 
         pub fn jsonParse(
@@ -135,6 +124,12 @@ test "Optional.to" {
 
         try std.testing.expect(@TypeOf(got) == ?Foo);
         try std.testing.expect(got.?.foo == 123);
+    }
+
+    {
+        // Support anonymous structs
+        const opt: Optional(Foo) = Optional(Foo).to(.{ .foo = 123 });
+        try std.testing.expectEqual(123, opt.value.foo);
     }
 }
 
