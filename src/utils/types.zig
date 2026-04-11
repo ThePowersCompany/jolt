@@ -455,8 +455,11 @@ pub fn JsonUnion(comptime T: type) type {
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
             switch (self.value) {
                 inline else => |v| {
-                    const j: Json(@TypeOf(v)) = .init(v);
-                    try jws.write(j);
+                    const V = @TypeOf(v);
+                    if (V != void) {
+                        const j: Json(V) = .init(v);
+                        try jws.write(j);
+                    }
                 },
             }
         }
@@ -489,9 +492,7 @@ pub fn Json(comptime T: type) type {
             if (p.child != u8) return JsonSlice(p.child);
         },
         .optional => |O| return JsonNullable(O.child),
-        .@"union" => {
-            if (!isOptional(T)) return JsonUnion(T);
-        },
+        .@"union" => return JsonUnion(T),
         .array => @compileError("array not supported"),
         .vector => @compileError("vector not supported"),
         else => {},
