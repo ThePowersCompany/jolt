@@ -16,6 +16,18 @@ pub fn unwrap(T: type, t: T) ?Unwrap(T) {
         if (t) |inner| {
             return unwrap(info.optional.child, inner);
         }
+        return null;
+    }
+    return t;
+}
+
+pub fn unwrapPtr(T: type, t: *T) ?*Unwrap(T) {
+    const info = @typeInfo(T);
+    if (info == .optional) {
+        if (t.*) |*inner| {
+            return unwrapPtr(info.optional.child, inner);
+        }
+        return null;
     }
     return t;
 }
@@ -34,8 +46,19 @@ pub fn Optional(comptime T: type) type {
         /// Returns the value if it is present in this Optional, otherwise returns null.
         /// This function will unwrap multiple levels of null, down to the actual value.
         pub fn get(self: Self) ?Unwrap(T) {
-            if (self == .value) return unwrap(T, self.value);
-            return null;
+            return switch (self) {
+                .value => |v| unwrap(T, v),
+                else => null,
+            };
+        }
+
+        /// Returns a pointer to the value if it is present in this Optional, otherwise returns null.
+        /// This function will unwrap multiple levels of null, down to the actual value.
+        pub fn getPtr(self: *Self) ?*Unwrap(T) {
+            return switch (self.*) {
+                .value => |*v| unwrapPtr(T, v),
+                else => null,
+            };
         }
 
         /// Wraps a value in an Optional.
@@ -99,6 +122,18 @@ pub fn Optional(comptime T: type) type {
             return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), value.data, oid) };
         }
     };
+}
+
+test "Optional.getPtr" {
+    {
+        var opt: Optional(i32) = .to(123);
+        opt.getPtr().?.* = 456;
+        try std.testing.expectEqual(456, opt.value);
+    }
+    {
+        var opt: Optional(?i32) = .to(null);
+        try std.testing.expectEqual(null, opt.getPtr());
+    }
 }
 
 test "Optional.to" {
