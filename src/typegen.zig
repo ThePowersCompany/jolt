@@ -193,7 +193,7 @@ const TypeGenerator = struct {
 
         // Second pass: Generate typings for all top-level types across all endpoint files
         inline for (endpoints) |endpoint| {
-            _, const EndpointType = endpoint;
+            const endpoint_path, const EndpointType = endpoint;
             const type_info = @typeInfo(EndpointType);
             inline for (type_info.@"struct".decls) |decl| {
                 const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
@@ -202,7 +202,14 @@ const TypeGenerator = struct {
                         const t_info = @typeInfo(@field(EndpointType, decl.name));
                         switch (t_info) {
                             .@"struct" => |s| {
-                                const res = try self.parseStruct(decl.name, s);
+                                const res = self.parseStruct(decl.name, s) catch |err| {
+                                    std.log.info(
+                                        "Endpoint: {s} - Type: {s}",
+                                        .{ endpoint_path, decl.name },
+                                    );
+
+                                    return err;
+                                };
                                 try self.setTopLevelType(decl.name, res);
                             },
                             else => {},
@@ -310,7 +317,13 @@ const TypeGenerator = struct {
             const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
             switch (decl_info) {
                 // Find get/post/put/patch/delete functions
-                .@"fn" => try self.populateFnTypescript(decl, decl_info.@"fn", endpoint_path),
+                .@"fn" => self.populateFnTypescript(decl, decl_info.@"fn", endpoint_path) catch |err| {
+                    std.log.info(
+                        "Endpoint: {s} - Type: {s}",
+                        .{ endpoint_path, decl.name },
+                    );
+                    return err;
+                },
                 else => {},
             }
         }
@@ -360,13 +373,10 @@ const TypeGenerator = struct {
     fn parseStruct(self: *Self, struct_name: []const u8, S: Type.Struct) !ParseResult {
         // Find adjacent union ahead of time
         var adjacent_union: ?AdjacentUnion = null;
-        var union_ts: []const u8 = undefined;
         {
             inline for (S.fields) |field| {
                 const info = @typeInfo(field.type);
                 if (info != .@"union") continue;
-
-                union_ts = try self.parseUnion(info.@"union", field.type);
 
                 var union_repr: ?UnionRepr = null;
                 inline for (info.@"union".decls) |decl| {
@@ -434,6 +444,15 @@ const TypeGenerator = struct {
             comptime var T: type = field.type;
             if (comptime startsWith(@typeName(T), "utils.types.JsonArray(")) {
                 T = @FieldType(@FieldType(T, "list"), "items");
+            }
+
+            // Ensure Optionals have default values
+            if (comptime isOptional(field.type) and field.defaultValue() == null) {
+                std.log.info(
+                    "Optional type \"{s}\" must have a provided default value: {s}",
+                    .{ field.name, @typeName(field.type) },
+                );
+                return error.OptionalMissingDefault;
             }
 
             const parse_result = try self.extractIdentifier(T);
@@ -848,6 +867,31 @@ test "Nested Optionals" {
         \\}
         \\}
     );
+}
+
+test "Optionals require default values" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Optional = @import("utils/types.zig").Optional;
+
+    const Foo = struct {
+        opt: Optional(bool),
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    // This should throw an error
+    _ = type_generator.extractIdentifier(Foo) catch |err| {
+        try std.testing.expectEqual(err, error.OptionalMissingDefault);
+        return;
+    };
+
+    // If this is reached, we did not throw an error when expected.
+    try std.testing.expect(false);
 }
 
 test "JsonArray(T)" {
