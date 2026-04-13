@@ -16,6 +16,18 @@ pub fn unwrap(T: type, t: T) ?Unwrap(T) {
         if (t) |inner| {
             return unwrap(info.optional.child, inner);
         }
+        return null;
+    }
+    return t;
+}
+
+pub fn unwrapPtr(T: type, t: *T) ?*Unwrap(T) {
+    const info = @typeInfo(T);
+    if (info == .optional) {
+        if (t.*) |*inner| {
+            return unwrapPtr(info.optional.child, inner);
+        }
+        return null;
     }
     return t;
 }
@@ -34,25 +46,25 @@ pub fn Optional(comptime T: type) type {
         /// Returns the value if it is present in this Optional, otherwise returns null.
         /// This function will unwrap multiple levels of null, down to the actual value.
         pub fn get(self: Self) ?Unwrap(T) {
-            if (self == .value) return unwrap(T, self.value);
-            return null;
+            return switch (self) {
+                .value => |v| unwrap(T, v),
+                else => null,
+            };
+        }
+
+        /// Returns a pointer to the value if it is present in this Optional, otherwise returns null.
+        /// This function will unwrap multiple levels of null, down to the actual value.
+        pub fn getPtr(self: *Self) ?*Unwrap(T) {
+            return switch (self.*) {
+                .value => |*v| unwrapPtr(T, v),
+                else => null,
+            };
         }
 
         /// Wraps a value in an Optional.
-        pub fn to(e: anytype) Optional(T) {
-            const E = @TypeOf(e);
-            const info = @typeInfo(E);
-            if (info == .optional) {
-                const inner_type = info.optional.child;
-                if (inner_type != T) {
-                    @compileError("Type mismatch: " ++ @typeName(inner_type) ++ " - " ++ @typeName(T));
-                }
-                if (e) |v| return .{ .value = v };
-                return .not_provided;
-            } else {
-                if (E != T) @compileError("Type mismatch: " ++ @typeName(E) ++ " - " ++ @typeName(T));
-                return .{ .value = e };
-            }
+        pub fn to(value: ?T) Optional(T) {
+            if (value) |v| return .{ .value = v };
+            return .not_provided;
         }
 
         pub fn jsonParse(
@@ -107,9 +119,21 @@ pub fn Optional(comptime T: type) type {
                 }
                 return .not_provided;
             }
-            return pg.types.decodeScalar(value.data, oid);
+            return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), value.data, oid) };
         }
     };
+}
+
+test "Optional.getPtr" {
+    {
+        var opt: Optional(i32) = .to(123);
+        opt.getPtr().?.* = 456;
+        try std.testing.expectEqual(456, opt.value);
+    }
+    {
+        var opt: Optional(?i32) = .to(null);
+        try std.testing.expectEqual(null, opt.getPtr());
+    }
 }
 
 test "Optional.to" {
@@ -136,6 +160,18 @@ test "Optional.to" {
         try std.testing.expect(@TypeOf(got) == ?Foo);
         try std.testing.expect(got.?.foo == 123);
     }
+
+    {
+        // Support anonymous structs
+        const opt: Optional(Foo) = Optional(Foo).to(.{ .foo = 123 });
+        try std.testing.expectEqual(123, opt.value.foo);
+    }
+}
+
+test "Optional.fromPgzRow" {
+    _ = Optional(i32).fromPgzRow(.{ .is_null = false, .data = "123" }, 0) catch {};
+    const o = try Optional(?i32).fromPgzRow(.{ .is_null = true, .data = "" }, 0);
+    try std.testing.expect(o.value == null);
 }
 
 test "parse json Optional" {
@@ -315,9 +351,8 @@ pub fn JsonArray(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
-            // const j: JsonSlice(T) = .init(self.list.items);
-            // try jws.write(j);
-            try json.Stringify.write(jws, self.list.items);
+            const j: JsonSlice(T) = .init(self.list.items);
+            try jws.write(j);
         }
     };
 }
@@ -420,8 +455,11 @@ pub fn JsonUnion(comptime T: type) type {
         pub fn jsonStringify(self: *const Self, jws: anytype) !void {
             switch (self.value) {
                 inline else => |v| {
-                    const j: Json(@TypeOf(v)) = .init(v);
-                    try jws.write(j);
+                    const V = @TypeOf(v);
+                    if (V != void) {
+                        const j: Json(V) = .init(v);
+                        try jws.write(j);
+                    }
                 },
             }
         }
@@ -454,9 +492,7 @@ pub fn Json(comptime T: type) type {
             if (p.child != u8) return JsonSlice(p.child);
         },
         .optional => |O| return JsonNullable(O.child),
-        .@"union" => {
-            if (!isOptional(T)) return JsonUnion(T);
-        },
+        .@"union" => return JsonUnion(T),
         .array => @compileError("array not supported"),
         .vector => @compileError("vector not supported"),
         else => {},
