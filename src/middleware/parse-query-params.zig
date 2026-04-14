@@ -191,6 +191,18 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             const FieldType = @typeInfo(field.type);
             const param_opt = try req.getParamDecoded(alloc, field.name);
             if (param_opt) |param| {
+                if (FieldType == .optional) {
+                    return try _handleQueryParam(
+                        ctx,
+                        alloc,
+                        req,
+                        FieldType.optional.child,
+                        field.name,
+                        param.items,
+                        false,
+                    );
+                }
+
                 const is_optional = comptime isOptional(field.type);
                 const T = if (is_optional) field.type.childType() else field.type;
                 return try _handleQueryParam(ctx, alloc, req, T, field.name, param.items, is_optional);
