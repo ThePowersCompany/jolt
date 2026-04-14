@@ -43,6 +43,10 @@ pub fn Optional(comptime T: type) type {
 
         const Self = @This();
 
+        pub fn childType() type {
+            return T;
+        }
+
         /// Returns the value if it is present in this Optional, otherwise returns null.
         /// This function will unwrap multiple levels of null, down to the actual value.
         pub fn get(self: Self) ?Unwrap(T) {
@@ -120,6 +124,19 @@ pub fn Optional(comptime T: type) type {
                 return .not_provided;
             }
             return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), value.data, oid) };
+        }
+
+        pub fn pgzMoveOwner(self: Self, alloc: std.mem.Allocator) !Self {
+            const info = @typeInfo(T);
+            if (info == .optional) @compileError("Do not wrap nullable in an Optional");
+            if (comptime (T == []u8 or T == []const u8)) {
+                if (self == .value) {
+                    return .{ .value = try alloc.dupe(u8, self.value) };
+                }
+            } else if (info == .pointer) {
+                @compileError("Optional does not support slices, except strings");
+            }
+            return self;
         }
     };
 }
