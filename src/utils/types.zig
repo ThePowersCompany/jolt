@@ -43,6 +43,10 @@ pub fn Optional(comptime T: type) type {
 
         const Self = @This();
 
+        pub fn childType() type {
+            return T;
+        }
+
         /// Returns the value if it is present in this Optional, otherwise returns null.
         /// This function will unwrap multiple levels of null, down to the actual value.
         pub fn get(self: Self) ?Unwrap(T) {

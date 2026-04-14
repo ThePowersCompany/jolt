@@ -14,6 +14,9 @@ const parseInt = std.fmt.parseInt;
 const parseFloat = std.fmt.parseFloat;
 const Type = std.builtin.Type;
 
+const types = @import("../utils/types.zig");
+const isOptional = types.isOptional;
+
 const query_params = "query_params";
 
 /// Parses the query params of the request and attaches it to the given Context.
@@ -56,60 +59,65 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             comptime field_name: []const u8,
             param: []const u8,
         ) !bool {
-            const T = @typeInfo(FieldType);
-            switch (T) {
+            const is_optional = comptime isOptional(FieldType);
+            const T = if (is_optional) FieldType.childType() else FieldType;
+            const info = @typeInfo(T);
+
+            switch (info) {
                 .bool => {
                     if (std.mem.eql(u8, param, "true")) {
-                        @field(@field(ctx, query_params), field_name) = true;
+                        @field(@field(ctx, query_params), field_name) = if (is_optional) .to(true) else true;
                     } else if (std.mem.eql(u8, param, "false")) {
-                        @field(@field(ctx, query_params), field_name) = false;
+                        @field(@field(ctx, query_params), field_name) = if (is_optional) .to(false) else false;
                     } else {
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     }
                 },
                 .int => {
-                    const val = parseInt(FieldType, param, 10) catch {
+                    const val = parseInt(T, param, 10) catch {
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
-                    @field(@field(ctx, query_params), field_name) = val;
+                    @field(@field(ctx, query_params), field_name) = if (is_optional) .to(val) else val;
                 },
                 .float => {
-                    const val = parseFloat(FieldType, param) catch {
+                    const val = parseFloat(T, param) catch {
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
-                    @field(@field(ctx, query_params), field_name) = val;
+                    @field(@field(ctx, query_params), field_name) = if (is_optional) .to(val) else val;
                 },
                 .pointer => {
-                    const ChildT = T.pointer.child;
+                    const ChildT = info.pointer.child;
                     if (ChildT == u8) {
                         // Strings arrive here
-                        @field(@field(ctx, query_params), field_name) = param;
+                        @field(@field(ctx, query_params), field_name) = if (is_optional) .to(param) else param;
                     } else {
                         const value = parseArrayFromString(alloc, ChildT, param) catch {
                             try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                             return true;
                         };
-                        @field(@field(ctx, query_params), field_name) = value;
+                        @field(@field(ctx, query_params), field_name) = if (is_optional) .to(value) else value;
                     }
                 },
                 .@"enum" => {
-                    if (std.meta.stringToEnum(FieldType, param)) |v| {
-                        @field(@field(ctx, query_params), field_name) = v;
+                    if (std.meta.stringToEnum(T, param)) |v| {
+                        @field(@field(ctx, query_params), field_name) = if (is_optional) .to(v) else v;
                     } else {
                         return error.InvalidEnumVariant;
                     }
                 },
                 .@"struct", .@"union" => {
-                    const parsed = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
+                    const parsed = std.json.parseFromSlice(T, alloc, param, .{}) catch {
+                        std.log.info("parse union failed: {s} - {s}", .{ @typeName(FieldType), param });
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
                     defer parsed.deinit();
 
-                    @field(@field(ctx, query_params), field_name) = parsed.value;
+                    const value = if (is_optional) .to(parsed.value) else parsed.value;
+                    @field(@field(ctx, query_params), field_name) = value;
                 },
                 else => {
                     try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
@@ -194,7 +202,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
                 if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
                     inline for (@typeInfo(ctx_field.type).@"struct".fields) |field| {
-                        if (@typeInfo(field.type) != .optional and field.defaultValue() == null) {
+                        if (!isOptional(field.type) and field.defaultValue() == null) {
                             all_fields_are_optional = false;
                             break :outer;
                         }
