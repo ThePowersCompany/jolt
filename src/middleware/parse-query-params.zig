@@ -58,11 +58,9 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             comptime FieldType: type,
             comptime field_name: []const u8,
             param: []const u8,
+            comptime is_optional: bool,
         ) !bool {
-            const is_optional = comptime isOptional(FieldType);
-            const T = if (is_optional) FieldType.childType() else FieldType;
-            const info = @typeInfo(T);
-
+            const info = @typeInfo(FieldType);
             switch (info) {
                 .bool => {
                     if (std.mem.eql(u8, param, "true")) {
@@ -75,14 +73,14 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     }
                 },
                 .int => {
-                    const val = parseInt(T, param, 10) catch {
+                    const val = parseInt(FieldType, param, 10) catch {
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
                     @field(@field(ctx, query_params), field_name) = if (is_optional) .to(val) else val;
                 },
                 .float => {
-                    const val = parseFloat(T, param) catch {
+                    const val = parseFloat(FieldType, param) catch {
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
                     };
@@ -102,14 +100,14 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     }
                 },
                 .@"enum" => {
-                    if (std.meta.stringToEnum(T, param)) |v| {
+                    if (std.meta.stringToEnum(FieldType, param)) |v| {
                         @field(@field(ctx, query_params), field_name) = if (is_optional) .to(v) else v;
                     } else {
                         return error.InvalidEnumVariant;
                     }
                 },
                 .@"struct", .@"union" => {
-                    const parsed = std.json.parseFromSlice(T, alloc, param, .{}) catch {
+                    const parsed = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
                         std.log.info("parse union failed: {s} - {s}", .{ @typeName(FieldType), param });
                         try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
                         return true;
@@ -118,6 +116,24 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
 
                     const value = if (is_optional) .to(parsed.value) else parsed.value;
                     @field(@field(ctx, query_params), field_name) = value;
+                },
+                .optional => {
+                    if (std.mem.eql(u8, param, "null")) {
+                        @field(@field(ctx, query_params), field_name) = if (is_optional)
+                            .{ .value = null }
+                        else
+                            null;
+                    } else {
+                        return try _handleQueryParam(
+                            ctx,
+                            alloc,
+                            req,
+                            info.optional.child,
+                            field_name,
+                            param,
+                            is_optional,
+                        );
+                    }
                 },
                 else => {
                     try sendInvalidParamTypeResponse(alloc, req, FieldType, field_name);
@@ -175,8 +191,9 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             const FieldType = @typeInfo(field.type);
             const param_opt = try req.getParamDecoded(alloc, field.name);
             if (param_opt) |param| {
-                const T = if (FieldType == .optional) FieldType.optional.child else field.type;
-                return try _handleQueryParam(ctx, alloc, req, T, field.name, param.items);
+                const is_optional = comptime isOptional(field.type);
+                const T = if (is_optional) field.type.childType() else field.type;
+                return try _handleQueryParam(ctx, alloc, req, T, field.name, param.items, is_optional);
             } else if (field.defaultValue()) |default_value| {
                 // Param is missing, but has a default value. Set to the default value.
                 @field(@field(ctx, query_params), field.name) = default_value;
