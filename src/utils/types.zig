@@ -127,12 +127,14 @@ pub fn Optional(comptime T: type) type {
         }
 
         pub fn pgzMoveOwner(self: Self, alloc: std.mem.Allocator) !Self {
-            if (@typeInfo(T) == .optional) @compileError("Do not wrap nullable in an Optional");
-
+            const info = @typeInfo(T);
+            if (info == .optional) @compileError("Do not wrap nullable in an Optional");
             if (comptime (T == []u8 or T == []const u8)) {
                 if (self == .value) {
                     return .{ .value = try alloc.dupe(u8, self.value) };
                 }
+            } else if (info == .pointer) {
+                @compileError("Optional does not support slices, except strings");
             }
             return self;
         }
