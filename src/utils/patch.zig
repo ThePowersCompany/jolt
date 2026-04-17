@@ -107,7 +107,7 @@ pub fn upsertQuery(
     inline for (fields) |f| {
         const key = f[0];
         const param = f[2];
-        if (comptime !isOptional(@TypeOf(param)) or param == .value) {
+        if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
             if (!first) try sql.appendSlice(alloc, ", ");
             try sql.appendSlice(alloc, key);
             first = false;
@@ -121,7 +121,7 @@ pub fn upsertQuery(
     inline for (fields) |f| {
         const expr = f[1];
         const param = f[2];
-        if (comptime !isOptional(@TypeOf(param)) or param == .value) {
+        if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
             if (!first) try sql.appendSlice(alloc, ", ");
             const subbed = try subPlaceholders(alloc, expr, param_num);
             defer alloc.free(subbed);
@@ -149,7 +149,7 @@ pub fn upsertQuery(
         }
 
         // Only include fields that are provided
-        if (comptime !isOptional(@TypeOf(param)) or param == .value) {
+        if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
             if (!first) try sql.appendSlice(alloc, ", ");
 
             const expr = f[1];
@@ -181,7 +181,7 @@ fn getColParamNum(fields: anytype, col: []const u8) usize {
     inline for (fields) |f| {
         const field_key = f[0];
         const param = f[2];
-        if (comptime !isOptional(@TypeOf(param)) or param == .value) {
+        if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
             if (std.mem.eql(u8, field_key, col)) return param_num;
             param_num += 1;
         }
