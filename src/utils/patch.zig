@@ -23,9 +23,9 @@ const isOptional = types.isOptional;
 /// @returns A PatchQuery that can be extended with WHERE clauses and executed
 pub fn patchQuery(
     alloc: Allocator,
-    table: []const u8,
+    comptime table: []const u8,
     fields: anytype,
-    param_offset: usize,
+    comptime param_offset: usize,
     conn: anytype,
 ) !PatchQuery(@TypeOf(fields), @TypeOf(conn)) {
     var parameter_count: usize = 0;
@@ -45,14 +45,20 @@ pub fn patchQuery(
     try sql.print(alloc, "UPDATE {s} SET ", .{table});
 
     var param_num: usize = 1;
+    var bind_num: usize = 1;
     inline for (fields) |f| {
         const key = f[0];
         const expr = f[1];
         const param = f[2];
         if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
-            const subbed = try subPlaceholders(alloc, expr, param_offset + param_num);
-            defer alloc.free(subbed);
-            try sql.print(alloc, "{s} = {s}", .{ key, subbed });
+            if (comptime hasPlaceholders(expr)) {
+                const subbed = try subPlaceholders(alloc, expr, param_offset + bind_num);
+                defer alloc.free(subbed);
+                try sql.print(alloc, "{s} = {s}", .{ key, subbed });
+                bind_num += 1;
+            } else {
+                try sql.print(alloc, "{s} = {s}", .{ key, expr });
+            }
             if (param_num < parameter_count) try sql.appendSlice(alloc, ", ");
             param_num += 1;
         }
@@ -116,17 +122,21 @@ pub fn upsertQuery(
 
     try sql.appendSlice(alloc, ") VALUES (");
 
-    var param_num: usize = 1;
+    var bind_num: usize = 1;
     first = true;
     inline for (fields) |f| {
         const expr = f[1];
         const param = f[2];
         if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
             if (!first) try sql.appendSlice(alloc, ", ");
-            const subbed = try subPlaceholders(alloc, expr, param_num);
-            defer alloc.free(subbed);
-            try sql.print(alloc, "{s}", .{subbed});
-            param_num += 1;
+            if (comptime hasPlaceholders(expr)) {
+                const subbed = try subPlaceholders(alloc, expr, bind_num);
+                defer alloc.free(subbed);
+                try sql.appendSlice(alloc, subbed);
+                bind_num += 1;
+            } else {
+                try sql.appendSlice(alloc, expr);
+            }
             first = false;
         }
     }
@@ -153,10 +163,14 @@ pub fn upsertQuery(
             if (!first) try sql.appendSlice(alloc, ", ");
 
             const expr = f[1];
-            const col_param_num = getColParamNum(fields, key);
-            const subbed = try subPlaceholders(alloc, expr, col_param_num);
-            defer alloc.free(subbed);
-            try sql.print(alloc, "{s} = {s}", .{ key, subbed });
+            if (comptime hasPlaceholders(expr)) {
+                const col_bind_num = try getColBindNum(fields, key);
+                const subbed = try subPlaceholders(alloc, expr, col_bind_num);
+                defer alloc.free(subbed);
+                try sql.print(alloc, "{s} = {s}", .{ key, subbed });
+            } else {
+                try sql.appendSlice(alloc, expr);
+            }
             first = false;
         }
     }
@@ -169,24 +183,30 @@ pub fn upsertQuery(
     };
 }
 
+fn hasPlaceholders(comptime expr: []const u8) bool {
+    return comptime std.mem.indexOf(u8, expr, "$$") != null;
+}
+
 fn subPlaceholders(alloc: Allocator, expr: []const u8, num: usize) ![]const u8 {
     const replacement = try allocPrint(alloc, "${d}", .{num});
     defer alloc.free(replacement);
     return try std.mem.replaceOwned(u8, alloc, expr, "$$", replacement);
 }
 
-/// Returns the parameter number for a field by col name
-fn getColParamNum(fields: anytype, col: []const u8) usize {
-    var param_num: usize = 1;
+/// Returns the bind number for a field by col name
+fn getColBindNum(fields: anytype, comptime col: []const u8) !usize {
+    var bind_num: usize = 1;
     inline for (fields) |f| {
+        const expr = f[1];
+        if (comptime !hasPlaceholders(expr)) continue;
         const field_key = f[0];
+        if (comptime std.mem.eql(u8, field_key, col)) return bind_num;
         const param = f[2];
         if ((comptime !isOptional(@TypeOf(param))) or param == .value) {
-            if (std.mem.eql(u8, field_key, col)) return param_num;
-            param_num += 1;
+            bind_num += 1;
         }
     }
-    return 0;
+    return error.ColumnNotFound;
 }
 
 pub fn PatchQuery(P: type, ConnType: type) type {
@@ -219,11 +239,14 @@ pub fn PatchQuery(P: type, ConnType: type) type {
                     try stmt.prepare(self.sql.items, null);
                     inline for (fixed_params) |p| try stmt.bind(p);
                     inline for (self.params) |f| {
+                        const expr = f[1];
                         const param = f[2];
-                        if (comptime isOptional(@TypeOf(param))) {
-                            if (param == .value) try stmt.bind(param.value);
-                        } else {
-                            try stmt.bind(param);
+                        if (comptime hasPlaceholders(expr)) {
+                            if (comptime isOptional(@TypeOf(param))) {
+                                if (param == .value) try stmt.bind(param.value);
+                            } else {
+                                try stmt.bind(param);
+                            }
                         }
                     }
 
