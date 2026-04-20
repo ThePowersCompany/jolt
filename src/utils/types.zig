@@ -502,7 +502,9 @@ pub fn JsonPrimitive(comptime T: type) type {
 pub fn Json(comptime T: type) type {
     const info = @typeInfo(T);
     switch (info) {
-        .@"struct" => return JsonObject(T),
+        .@"struct" => {
+            if (!std.meta.hasFn(T, "jsonStringify")) return JsonObject(T);
+        },
         .pointer => |p| {
             if (p.child != u8) return JsonSlice(p.child);
         },
