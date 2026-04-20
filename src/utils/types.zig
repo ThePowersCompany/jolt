@@ -349,6 +349,10 @@ pub fn JsonArray(comptime T: type) type {
 
         list: std.ArrayList(T) = .empty,
 
+        pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+            self.list.deinit(alloc);
+        }
+
         pub fn jsonParse(
             allocator: std.mem.Allocator,
             source: anytype,
@@ -515,4 +519,26 @@ pub fn Json(comptime T: type) type {
         else => {},
     }
     return JsonPrimitive(T);
+}
+
+test "Json(JsonArray(T))" {
+    const stringify = @import("json.zig").stringify;
+    const alloc = std.testing.allocator;
+
+    const Foo = struct {
+        data: JsonArray(i32),
+    };
+
+    var arr: JsonArray(i32) = .{};
+    defer arr.deinit(alloc);
+
+    try arr.list.append(alloc, 1);
+    try arr.list.append(alloc, 2);
+    try arr.list.append(alloc, 3);
+
+    const foo: Json(Foo) = .init(.{ .data = arr });
+
+    const str = try stringify(alloc, foo, .{});
+    defer alloc.free(str);
+    try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
 }
