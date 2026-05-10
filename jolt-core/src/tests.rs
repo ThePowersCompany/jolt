@@ -514,4 +514,156 @@ mod response {
             "zzz-9"
         );
     }
+
+    async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_unit_body_serializes_as_json_null() {
+        use axum::http::header::CONTENT_TYPE;
+
+        let response: axum::response::Response = Response::new(StatusCode::Ok, ()).into();
+
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(body_bytes(response).await, b"null");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_bool_body_serializes_as_json_boolean() {
+        let true_response: axum::response::Response = Response::new(StatusCode::Ok, true).into();
+        assert_eq!(body_bytes(true_response).await, b"true");
+
+        let false_response: axum::response::Response = Response::new(StatusCode::Ok, false).into();
+        assert_eq!(body_bytes(false_response).await, b"false");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_integer_body_serializes_as_json_number() {
+        let response: axum::response::Response = Response::new(StatusCode::Ok, 42i32).into();
+        assert_eq!(body_bytes(response).await, b"42");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_float_body_serializes_as_json_number() {
+        let response: axum::response::Response = Response::new(StatusCode::Ok, 1.5f64).into();
+        assert_eq!(body_bytes(response).await, b"1.5");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_json_array_value_serializes_correctly() {
+        use serde_json::json;
+
+        let response: axum::response::Response =
+            Response::new(StatusCode::Ok, json!([1, 2, 3])).into();
+        assert_eq!(body_bytes(response).await, b"[1,2,3]");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_user_defined_struct_body_serializes_as_json() {
+        use axum::http::header::CONTENT_TYPE;
+        use crate::JsonBody;
+
+        #[derive(serde::Serialize)]
+        struct Item {
+            name: &'static str,
+            count: u32,
+        }
+        impl JsonBody for Item {}
+
+        let response: axum::response::Response = Response::new(
+            StatusCode::Ok,
+            Item {
+                name: "widget",
+                count: 3,
+            },
+        )
+        .into();
+
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(body_bytes(response).await, br#"{"name":"widget","count":3}"#);
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_empty_string_body_sends_empty_body() {
+        use axum::http::header::CONTENT_TYPE;
+
+        let response: axum::response::Response =
+            Response::new(StatusCode::Ok, String::new()).into();
+
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert!(body_bytes(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_empty_str_body_sends_empty_body() {
+        let response: axum::response::Response = Response::new(StatusCode::Ok, "").into();
+        assert!(body_bytes(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_status_passes_through_named_variants() {
+        let cases: &[(StatusCode, axum::http::StatusCode)] = &[
+            (StatusCode::Ok, axum::http::StatusCode::OK),
+            (StatusCode::Created, axum::http::StatusCode::CREATED),
+            (StatusCode::NoContent, axum::http::StatusCode::NO_CONTENT),
+            (StatusCode::BadRequest, axum::http::StatusCode::BAD_REQUEST),
+            (StatusCode::NotFound, axum::http::StatusCode::NOT_FOUND),
+            (
+                StatusCode::InternalServerError,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (jolt, expected) in cases {
+            let response: axum::response::Response = Response::new(*jolt, 0u32).into();
+            assert_eq!(response.status(), *expected, "status mismatch for {jolt:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_status_passes_through_other_variant() {
+        let response: axum::response::Response =
+            Response::new(StatusCode::Other(418), 0u32).into();
+        assert_eq!(response.status().as_u16(), 418);
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_no_content_with_string_body_sends_body_as_is() {
+        // Documents current behavior: the bridge does NOT enforce RFC 7230's
+        // "204 MUST have empty body" — the caller's body is sent verbatim.
+        // If enforcement is added later, this test should be updated, not deleted.
+        let response: axum::response::Response =
+            Response::new(StatusCode::NoContent, "leftover".to_string()).into();
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+        assert_eq!(body_bytes(response).await, b"leftover");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_overrides_caller_set_content_type() {
+        use axum::http::header::CONTENT_TYPE;
+        use axum::http::HeaderValue;
+
+        let mut jolt_response = Response::new(StatusCode::Ok, 1u32);
+        jolt_response
+            .headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
+        let response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
 }

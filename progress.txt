@@ -458,3 +458,49 @@ Notes for next iterations:
 - Phase04 begins with JOLT-RS-019 (RequestExt with AtomicBool). The deferred Request.finished migration plan in JOLT-RS-014's notes is still authoritative.
 - Doc-test note: the `JsonBody` doc-comment example (`impl JsonBody for MyStruct {}`) is illustrative only, not a doc test (no ```rust block). If JOLT-RS-018 or later adds doc tests anywhere, ensure JsonBody's doc is reviewed for example correctness.
 - Naming: chose `JsonBody` over alternatives like `Json`, `JsonResponse`, `IntoJson`. `Json` would conflict with the obvious axum::Json wrapper name pattern; `JsonResponse` is misleading (it's the body, not the response); `IntoJson` would suggest a method that converts. `JsonBody` reads as "this type IS a JSON body" — which matches its usage as a type-level marker.
+
+## 2026-05-10 — JOLT-RS-018: Comprehensive Response body-type tests (closes phase03)
+
+PRD item: JOLT-RS-018 (priority 18, phase03-response-type) — Write unit tests for all Response body types (json, string, empty/NoContent). Closes phase03.
+
+Verification:
+- `cargo test -p jolt-core -- tests::response` → 19 passed (7 prior + 12 new), 0 failed, 35 filtered out; finished in 0.00s.
+- `cargo test -p jolt-core --lib` → 54 passed total (up from 42); 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.21s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..017 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added 12 new tests in `tests::response` covering the gaps flagged in JOLT-RS-016/017 progress notes:
+  * `into_axum_response_with_unit_body_serializes_as_json_null` — Response<()> → "null", application/json. Locks in the () JsonBody impl's actual body bytes (previously only the impl existed; no body-bytes test).
+  * `into_axum_response_with_bool_body_serializes_as_json_boolean` — both true and false in one test (combined since they share the code path; splitting would be redundant).
+  * `into_axum_response_with_integer_body_serializes_as_json_number` — Response<i32> → "42" body bytes (the existing `forwards_custom_headers` test uses u32 but only asserts headers).
+  * `into_axum_response_with_float_body_serializes_as_json_number` — Response<f64> → "1.5" body bytes.
+  * `into_axum_response_with_json_array_value_serializes_correctly` — serde_json::Value array (existing test only covered Object).
+  * `into_axum_response_with_user_defined_struct_body_serializes_as_json` — proves the OPEN JsonBody marker trait actually works for user code: `#[derive(Serialize)] struct Item; impl JsonBody for Item {}` → JSON body bytes. This is the load-bearing test for the JOLT-RS-017 architectural decision (open vs sealed marker). If a future change accidentally seals JsonBody (e.g. moves it to a private supertrait or adds a sealed marker bound), this test fails to compile.
+  * `into_axum_response_with_empty_string_body_sends_empty_body` and `into_axum_response_with_empty_str_body_sends_empty_body` — empty String / empty &str → empty body bytes, text/plain. Locks in that the bridge doesn't synthesize a placeholder for empty bodies.
+  * `into_axum_response_status_passes_through_named_variants` — table-driven over Ok/Created/NoContent/BadRequest/NotFound/InternalServerError. JOLT-RS-010 tested the StatusCode→axum bridge in isolation; this test proves the Response→axum bridge actually invokes that conversion (would catch e.g. a regression that hardcoded 200 in the builder).
+  * `into_axum_response_status_passes_through_other_variant` — Other(418) → axum status 418. Closes the named/Other passthrough surface.
+  * `into_axum_response_no_content_with_string_body_sends_body_as_is` — DOCUMENTS the deliberate non-enforcement of RFC 7230 §3.3.3 ("204 MUST have empty body"). The bridge ships the caller's body verbatim. Inline comment explicitly says "if enforcement is added later, update this test, don't delete it" — so a future agent doesn't remove the test thinking it's a bug-locking test for a bug.
+  * `into_axum_response_overrides_caller_set_content_type` — caller sets Content-Type: application/xml on Response<u32>; framework overrides with application/json. Locks in the precedence rule from JOLT-RS-016 (response.headers_mut().extend then insert CONTENT_TYPE last) which the prior progress notes flagged as "load-bearing for the JSON path." Without this test, a refactor that swaps `extend` and `insert` order would silently let caller Content-Types win.
+- Extracted a `body_bytes(response) -> Vec<u8>` async test helper that wraps `axum::body::to_bytes(_, 1024)` + `.unwrap()` + `.to_vec()`. The existing tests inline this 3-line dance; the 8 new tests that read body bytes use the helper. Did NOT refactor the prior tests (JOLT-RS-016/017's body-reading tests) to use the helper — they pre-date the helper, work fine, and changing them is out of JOLT-RS-018's scope (would muddy the diff). If a future PRD touches those tests, swapping in the helper is trivial.
+- Did NOT add new JsonBody impls (Vec<T>, Option<T>, HashMap<String, T>, etc.) per JOLT-RS-017's flagged guidance: "Add these in 018 when a test demands them, not preemptively." None of the body-type tests require them — primitives + Value + user-defined struct are sufficient to prove the bridge handles the full JSON shape space (since serde_json::Value can represent arrays/objects/null already, and user structs prove the extension point).
+- Did NOT add a test for JOLT-RS-016's "binary header value forwarding" or any header-edge-case beyond the existing trace-id tests. Those belong with the header surface, not the body-type surface; out of scope for 018's "body types" framing.
+- Test naming follows the existing `into_axum_response_with_<body>_<assertion>` pattern. The `_status_passes_through_*` and `_overrides_caller_set_content_type` tests deviate from that pattern intentionally — they're cross-cutting (any body type) rather than body-specific.
+- All new tests use `#[tokio::test]` (axum::body::to_bytes is async) — consistent with JOLT-RS-016/017's tests. tokio is already a workspace dep with `features = ["full"]`.
+- Test `body_bytes` helper has the 1024-byte cap from prior tests. None of the new tests need bigger bodies (the largest is 27 bytes for the user-struct JSON). If a future test needs to push more, raise it locally rather than globally — keeps unbounded-body bugs surfacing fast.
+
+Files changed:
+- jolt-core/src/tests.rs — added `body_bytes` async helper and 12 new `#[tokio::test]` cases in `tests::response`.
+- prd.json — JOLT-RS-018 passes: true.
+
+Notes for next iterations:
+- phase03-response-type is now CLOSED. All 4 items (015/016/017/018) are passes: true.
+- JOLT-RS-019 opens phase04-requestext-flag: `RequestExt struct with finished: AtomicBool. Implement new() defaulting to false.` First atomic primitive in the codebase. Architectural questions for that agent:
+  * `AtomicBool` requires `std::sync::atomic::AtomicBool` and an Ordering choice for load/store. Defer the Ordering question to JOLT-RS-020 (which adds mark_finished/is_finished); 019 is just struct definition + new(). Likely Ordering::Relaxed for both — finished is a one-way latch (false → true), no other state hangs off it, no acquire/release relationship to another datum.
+  * Where does RequestExt live in the module tree? Two viable options: (a) new `jolt-core/src/request_ext.rs` module, mirroring `request.rs` and `response.rs`; (b) submodule of `request` (extend `request.rs` or add `request/ext.rs`). Recommend (a) — RequestExt is conceptually a different type of state (mutable, async-shared) than Request (immutable, owned), and a flat module list at the crate root is the established pattern. Re-export at crate root via `pub use request_ext::RequestExt` per the precedent of Cookie/Method/Request/Response/StatusCode.
+  * AtomicBool is `!Default` if a non-zero default is needed, but defaults to `false` via `AtomicBool::new(false)`. The PRD says "defaults to false" so `new()` is `Self { finished: AtomicBool::new(false) }`. If `Default` derive is wanted, `#[derive(Default)]` works (AtomicBool::default() == AtomicBool::new(false)) — but only do this if a downstream consumer asks; otherwise overspecified.
+- JOLT-RS-021 (priority 21): the deferred `Request.finished` field migration. Per JOLT-RS-014 progress notes: the migration plan is mechanical — JOLT-RS-021 either adds an `extensions: axum::http::Extensions` field to Request and stores RequestExt there, or wraps Request in a shim type. The current `pub finished: bool` field on Request gets deleted at that point. `has_finished()` body switches from `self.finished` to whatever lookup 021 settles on. The JOLT-RS-014 `has_finished_reflects_finished_flag` test will need to be rewritten to use `mark_finished()` (from JOLT-RS-020) instead of `req.finished = true`.
+- JsonBody trait is openness now locked in by `into_axum_response_with_user_defined_struct_body_serializes_as_json`. Future agents wanting to seal the trait must explicitly delete or rework that test — not a silent refactor.
+- Content-Type override precedence for the JSON path is locked in. A symmetric test for the text/plain path (`Response<String>` with caller-set CONTENT_TYPE) was NOT added — same code path through `finalize_axum_response`, would be redundant. If the helper is ever broken into per-content-type branches, add the symmetric test then.
+- The `body_bytes` test helper is private to `tests::response` (same module). If `tests::request` or future test modules need similar bytes-extraction helpers, factor up to `mod tests` (sibling to `mod response`) — but only if a second consumer materializes; YAGNI applies.
