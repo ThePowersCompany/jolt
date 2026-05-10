@@ -2149,3 +2149,104 @@ mod server {
         server.abort();
     }
 }
+
+mod cors {
+    //! PRD-mandated verification for JOLT-RS-056: "Unit test: OPTIONS /api/test
+    //! → 204 with CORS headers, finished flag set."
+    //!
+    //! The layer wraps an inner stub service that panics if invoked, so the
+    //! short-circuit contract (OPTIONS never reaches inner) is structurally
+    //! enforced — a regression that delegated `OPTIONS` to inner before
+    //! returning would crash this test on the panic, not on a status mismatch.
+
+    use std::convert::Infallible;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE,
+    };
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use tower::{Layer, ServiceExt};
+
+    use crate::{CorsConfig, CorsLayer, Method, RequestExt};
+
+    #[tokio::test]
+    async fn options_request_returns_204_with_cors_headers_and_marks_finished() {
+        // PRD-mandated verification for JOLT-RS-056. Builds a CorsLayer with a
+        // populated CorsConfig (origin + methods + headers + max_age), wraps an
+        // inner service that panics if invoked (structurally enforces the
+        // short-circuit contract: any non-panic outcome has, by construction,
+        // exercised the layer's OPTIONS-bypass path), sends
+        // `OPTIONS /api/test` carrying a caller-supplied `Arc<RequestExt>`,
+        // and verifies status, all four CORS headers, and the finished flag.
+        let config = CorsConfig {
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec![Method::Get, Method::Post, Method::Options],
+            allow_headers: vec!["content-type".to_string(), "authorization".to_string()],
+            max_age: 600,
+        };
+        let layer = CorsLayer::new(config);
+        // `service_fn` produces a service whose Future is a Send + 'static
+        // async block — matches the bounds `CorsService::<S>: Service<AxumRequest>`
+        // requires on S::Future.
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            panic!("inner service must NOT be called for OPTIONS preflight");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let svc = layer.layer(inner);
+
+        // Caller-supplied RequestExt so the test can observe the finished flag
+        // after the layer returns. The layer's preserve-or-inject contract
+        // (mirroring Router's JOLT-RS-035 behavior) keeps THIS Arc alive in
+        // extensions; the `mark_finished()` call inside the layer is observable
+        // here because both sides hold clones of the same Arc.
+        let ext = Arc::new(RequestExt::new());
+
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::OPTIONS)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://example.com"),
+        );
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_METHODS)
+                .and_then(|v| v.to_str().ok()),
+            Some("GET, POST, OPTIONS"),
+        );
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_HEADERS)
+                .and_then(|v| v.to_str().ok()),
+            Some("content-type, authorization"),
+        );
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_MAX_AGE)
+                .and_then(|v| v.to_str().ok()),
+            Some("600"),
+        );
+
+        assert!(
+            ext.is_finished(),
+            "CorsLayer must mark RequestExt finished on OPTIONS short-circuit"
+        );
+    }
+}

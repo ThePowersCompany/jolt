@@ -1,6 +1,7 @@
 #![doc = "jolt-core: HTTP, WebSocket, SSE, tasks, and pub/sub primitives for the Jolt framework."]
 
 pub mod cookie;
+pub mod cors;
 pub mod endpoint;
 pub mod endpoint_registry;
 pub mod method;
@@ -13,6 +14,7 @@ pub mod server;
 pub mod status;
 
 pub use cookie::Cookie;
+pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
 pub use method::{Method, ParseMethodError};
