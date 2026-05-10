@@ -386,3 +386,27 @@ mod request {
         assert!(req.has_finished());
     }
 }
+
+mod response {
+    use crate::{Response, StatusCode};
+
+    #[test]
+    fn new_constructs_response_with_given_status_and_body() {
+        let res: Response<u32> = Response::new(StatusCode::Ok, 42);
+        assert_eq!(res.status, StatusCode::Ok);
+        assert_eq!(res.body, 42);
+        assert!(res.headers.is_empty());
+    }
+
+    #[test]
+    fn struct_literal_construction_reaches_every_field() {
+        let res = Response {
+            status: StatusCode::NoContent,
+            headers: axum::http::HeaderMap::new(),
+            body: (),
+        };
+        assert_eq!(res.status, StatusCode::NoContent);
+        assert!(res.headers.is_empty());
+        let _: () = res.body;
+    }
+}
