@@ -132,6 +132,44 @@
 //!     `.fetch_*` methods *do* return `Result<_, sqlx::Error>` for the
 //!     normal runtime failure modes (acquire timeout, row count mismatch,
 //!     column type mismatch, etc.).
+//!
+//! [`JoltDb::transaction`] (JOLT-RS-088) layers the auto-commit / auto-
+//! rollback wrapper on top of [`sqlx::PgPool::begin`]. A caller hands in a
+//! `FnOnce(&mut Transaction)` whose body returns a `Result<T, sqlx::Error>`;
+//! `transaction` opens a tx, runs the closure, commits on `Ok` and rolls
+//! back on `Err`. Architectural decisions pinned here for JOLT-RS-089 and
+//! onward:
+//!
+//! 12. **The closure receives `&mut sqlx::Transaction<'static, Postgres>`
+//!     directly — sqlx-native, not a JoltDb wrapper (JOLT-RS-088).** A wrapper
+//!     would have to re-implement the typed-query helpers (or a tx-aware
+//!     [`TypedQuery`] variant) to give callers anything beyond raw sqlx, and
+//!     the [`pool`](Self::pool) getter from JOLT-RS-084 already exposes raw
+//!     sqlx for the non-tx path. Symmetric design: outside the closure callers
+//!     reach for raw sqlx via `db.pool()`; inside they reach for raw sqlx via
+//!     the `&mut Transaction`. A future tx-aware `TypedQuery` can be added
+//!     without disturbing this contract — it would be a layer on top, not a
+//!     replacement.
+//!
+//! 13. **The closure returns `Pin<Box<dyn Future + Send + 'c>>`, not a bare
+//!     `Future` value (JOLT-RS-088).** The future borrows the `&'c mut
+//!     Transaction` argument for the duration of its body, which Rust's
+//!     stable trait system cannot express as a non-`'static` HRTB on a bare
+//!     `impl Future` return without async closures. The `Box::pin(async
+//!     move { ... })` pattern at the call site is the established workaround
+//!     and matches how sqlx's own examples wire transactions in stable Rust.
+//!     When async closures stabilize this signature can be loosened without
+//!     breaking callers.
+//!
+//! 14. **`Ok` commits, `Err` rolls back; if `commit` itself fails the error
+//!     surfaces, but if `rollback` itself fails the closure's error wins
+//!     (JOLT-RS-088).** Rationale: when the closure returns `Err` the user
+//!     already knows the operation failed and cares about *why*; a follow-on
+//!     rollback failure (typically connection-level) would mask the real
+//!     cause. Dropping a `Transaction` without commit also auto-rolls-back
+//!     at the connection level, so a failed explicit rollback is rarely
+//!     load-bearing. On the commit path the commit error *is* the reason the
+//!     txn didn't take effect, so propagating it directly is correct.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -274,6 +312,59 @@ impl JoltDb {
             pool: self.pool.clone(),
             args: sqlx::postgres::PgArguments::default(),
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Run `f` inside a Postgres transaction (JOLT-RS-088).
+    ///
+    /// Opens a transaction with [`sqlx::PgPool::begin`], hands the closure a
+    /// `&mut sqlx::Transaction<'static, Postgres>` (decision 12), and:
+    /// - on `Ok(value)`, commits and returns `Ok(value)`;
+    /// - on `Err(err)`, rolls back and returns `Err(err)` — the closure's
+    ///   error wins even if the rollback itself fails (decision 14).
+    ///
+    /// The closure returns `Pin<Box<dyn Future + Send + 'c>>` (decision 13);
+    /// at the call site this is the standard `|tx| Box::pin(async move {
+    /// ... })` pattern. Inside the closure callers run queries against
+    /// `&mut **tx` (the `&mut PgConnection` derefs sqlx's
+    /// `Transaction → PgConnection` chain).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// db.transaction(|tx| {
+    ///     Box::pin(async move {
+    ///         sqlx::query("INSERT INTO accounts (id) VALUES ($1)")
+    ///             .bind(7_i32)
+    ///             .execute(&mut **tx)
+    ///             .await?;
+    ///         Ok(())
+    ///     })
+    /// })
+    /// .await?;
+    /// ```
+    pub async fn transaction<F, T>(&self, f: F) -> Result<T, sqlx::Error>
+    where
+        F: for<'c> FnOnce(
+            &'c mut sqlx::Transaction<'static, sqlx::Postgres>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, sqlx::Error>> + Send + 'c>,
+        >,
+    {
+        let mut tx = self.pool.begin().await?;
+        match f(&mut tx).await {
+            Ok(value) => {
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                // Best-effort rollback. The closure's error is the real
+                // user-facing cause (decision 14); a rollback failure here
+                // is typically a downstream connection issue and dropping
+                // the transaction also auto-rolls-back at the sqlx layer.
+                let _ = tx.rollback().await;
+                Err(err)
+            }
         }
     }
 }
@@ -755,5 +846,123 @@ mod tests {
             .await
             .expect("fetch_one of SELECT $1::int4 AS v with bind(42)");
         assert_eq!(row.v, 42);
+    }
+
+    // ---- JOLT-RS-088: JoltDb::transaction ----
+
+    /// Compile-time pin: `db.transaction(|tx| Box::pin(async move { ... }))`
+    /// typechecks against the documented signature (decisions 12–13). The
+    /// `_pin` fn never runs; it exists so a regression that changes the
+    /// closure parameter type away from `&mut Transaction<'static, Postgres>`
+    /// or the return type away from `Pin<Box<dyn Future ...>>` fails the
+    /// build.
+    #[test]
+    fn transaction_signature_accepts_box_pin_closure() {
+        async fn _pin(db: &JoltDb) -> Result<i32, sqlx::Error> {
+            db.transaction(|_tx| Box::pin(async move { Ok::<_, sqlx::Error>(42_i32) }))
+                .await
+        }
+    }
+
+    /// Commit path: closure returns `Ok` → transaction commits → the
+    /// inserted row is visible after `transaction` returns. Env-gated.
+    /// Uses a unique table name (`_jolt_tx_commit_test`) and aggressive
+    /// `DROP TABLE IF EXISTS` setup/teardown so the test is self-contained
+    /// and parallel-safe against the rollback test below (different table).
+    #[tokio::test]
+    async fn transaction_commits_on_ok_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        sqlx::query("DROP TABLE IF EXISTS _jolt_tx_commit_test")
+            .execute(db.pool())
+            .await
+            .expect("drop table (setup)");
+        sqlx::query("CREATE TABLE _jolt_tx_commit_test (id INT)")
+            .execute(db.pool())
+            .await
+            .expect("create table");
+
+        let result = db
+            .transaction(|tx| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO _jolt_tx_commit_test (id) VALUES (1)")
+                        .execute(&mut **tx)
+                        .await?;
+                    Ok::<_, sqlx::Error>(())
+                })
+            })
+            .await;
+        assert!(result.is_ok(), "expected Ok from commit-path transaction");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_commit_test")
+            .fetch_one(db.pool())
+            .await
+            .expect("count after commit");
+        assert_eq!(
+            count.0, 1,
+            "expected committed insert to be visible after transaction returned Ok",
+        );
+
+        sqlx::query("DROP TABLE _jolt_tx_commit_test")
+            .execute(db.pool())
+            .await
+            .expect("drop table (teardown)");
+    }
+
+    /// Rollback path: closure returns `Err` → transaction rolls back → the
+    /// attempted insert is *not* visible. The closure's error propagates
+    /// out (decision 14). Env-gated; uses a separate table from the commit
+    /// test for parallel safety.
+    #[tokio::test]
+    async fn transaction_rolls_back_on_err_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        sqlx::query("DROP TABLE IF EXISTS _jolt_tx_rollback_test")
+            .execute(db.pool())
+            .await
+            .expect("drop table (setup)");
+        sqlx::query("CREATE TABLE _jolt_tx_rollback_test (id INT)")
+            .execute(db.pool())
+            .await
+            .expect("create table");
+
+        let result = db
+            .transaction(|tx| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO _jolt_tx_rollback_test (id) VALUES (2)")
+                        .execute(&mut **tx)
+                        .await?;
+                    // User-defined sentinel error — RowNotFound is the
+                    // simplest sqlx::Error variant to construct in-place.
+                    Err::<(), _>(sqlx::Error::RowNotFound)
+                })
+            })
+            .await;
+        assert!(
+            matches!(result, Err(sqlx::Error::RowNotFound)),
+            "expected closure's Err to surface unchanged, got {result:?}",
+        );
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_rollback_test")
+            .fetch_one(db.pool())
+            .await
+            .expect("count after rollback");
+        assert_eq!(
+            count.0, 0,
+            "expected rolled-back insert to be invisible after transaction returned Err",
+        );
+
+        sqlx::query("DROP TABLE _jolt_tx_rollback_test")
+            .execute(db.pool())
+            .await
+            .expect("drop table (teardown)");
     }
 }

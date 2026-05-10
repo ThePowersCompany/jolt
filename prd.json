@@ -1273,7 +1273,7 @@
       "verification": [
         "Unit test: transaction that commits \u2192 changes persisted. Transaction that returns Err \u2192 rollback."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-089",
