@@ -657,7 +657,7 @@
       "verification": [
         "Integration test: endpoints defined in multiple crates all register into server."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-045",

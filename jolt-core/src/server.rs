@@ -16,6 +16,7 @@ use axum::Router;
 
 use crate::endpoint::Endpoint;
 use crate::endpoint_registry::EndpointRegistry;
+use crate::registered_endpoint::RegisteredEndpoint;
 
 #[derive(Debug)]
 pub struct CorsConfig;
@@ -73,19 +74,60 @@ impl JoltServer {
         self
     }
 
+    /// Collect every [`RegisteredEndpoint`] discovered at compile time via
+    /// `#[endpoint(..)]` (across all linked crates) and register it into
+    /// [`Self::registry`]. Registration uses the [`Endpoint`] impl on
+    /// `&'static RegisteredEndpoint` (see `registered_endpoint.rs`), so no
+    /// allocation or boxing is needed for the inventory entries themselves —
+    /// the registry only `Arc`s the static reference.
+    ///
+    /// Idempotent in spirit but NOT enforced: calling twice would push every
+    /// entry twice. The intended usage is one call from [`Self::start`] just
+    /// before serving; expose it as `pub` so test harnesses (and advanced
+    /// users who want to inspect the registry pre-serve) can drive the
+    /// collection without binding a port.
+    pub fn collect_inventory_endpoints(mut self) -> Self {
+        for entry in inventory::iter::<RegisteredEndpoint> {
+            self.registry.register(entry);
+        }
+        self
+    }
+
+    /// Build the axum [`Router`] this server will serve: collects every
+    /// `inventory::iter::<RegisteredEndpoint>()` entry into the registry,
+    /// sorts longest-path-first (so `/api/hello` matches before `/api`), and
+    /// returns the registry's compiled router. Used by [`Self::start`] and
+    /// exposed publicly so tests can exercise inventory-collected routes
+    /// through `tower::ServiceExt::oneshot` without binding a TCP port.
+    pub fn into_router(self) -> Router {
+        let mut server = self.collect_inventory_endpoints();
+        server.registry.sort();
+        server.registry.build_router()
+    }
+
     /// Bind the configured router on `0.0.0.0:port` and serve it until a
     /// shutdown signal arrives (SIGINT, plus SIGTERM on unix). Bind failures
     /// (port-in-use, EACCES on low ports) and signal-handler installation
     /// failures both surface as `io::Result::Err`.
     ///
+    /// JOLT-RS-044: before binding, every `inventory::iter::<RegisteredEndpoint>()`
+    /// entry from any linked crate is registered into [`Self::registry`] and
+    /// merged into the user-supplied `extra_router` via [`Router::merge`]. The
+    /// merge order is `extra_router.merge(inventory_router)`; axum panics on
+    /// route conflicts at the `merge` call, which is the right failure mode
+    /// (a duplicate route is a wiring bug, not a runtime condition).
+    ///
     /// `self.threads` is currently advisory: the server runs on the caller's
     /// existing tokio runtime, so worker count is whatever that runtime was
     /// built with. A future runtime-build PRD item can wire `threads` through
     /// without changing this signature.
-    pub async fn start(self, router: Router) -> std::io::Result<()> {
-        let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, self.port));
+    pub async fn start(self, extra_router: Router) -> std::io::Result<()> {
+        let port = self.port;
+        let inventory_router = self.into_router();
+        let merged = extra_router.merge(inventory_router);
+        let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, router)
+        axum::serve(listener, merged)
             .with_graceful_shutdown(shutdown_signal())
             .await
     }

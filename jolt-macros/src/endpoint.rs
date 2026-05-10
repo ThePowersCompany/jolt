@@ -348,28 +348,34 @@ pub(crate) fn strip_verb_attrs(item: &mut ItemImpl) {
 
 /// Emit `::jolt_core::inventory::submit! { ... }` blocks — one per discovered
 /// method — that register a [`::jolt_core::RegisteredEndpoint`] for the
-/// (path, method) pair. JOLT-RS-044 will iterate
-/// `inventory::iter::<RegisteredEndpoint>()` from `JoltServer::start` to
-/// register every entry across all linked crates into an
-/// [`::jolt_core::EndpointRegistry`].
+/// (path, method, handler) triple. [`crate::expand_endpoint`] arranges for
+/// `JoltServer::start` (JOLT-RS-044) to call
+/// `inventory::iter::<RegisteredEndpoint>()` and register every entry across
+/// all linked crates into an [`::jolt_core::EndpointRegistry`].
 ///
-/// This iteration emits the path + method only; JOLT-RS-043's handler-wrapper
-/// codegen will extend the record (or supplement it with a sibling submit) with
-/// the handler fn pointer. Splitting the metadata-only submit from the handler
-/// submit keeps 042 testable in isolation: the integration test asserts
-/// `inventory::iter::<RegisteredEndpoint>()` sees one entry per `#[get]` /
-/// `#[post]` / etc. method, with no dependency on handler-wrapper codegen.
+/// The `handler` field references the per-method wrapper emitted by
+/// [`generate_handler_wrappers`] (`__jolt_handler_<user_fn>`). The path is
+/// rendered via the explicit-disambiguation `<#self_ty>::#wrapper_name` form so
+/// it works for both bare-ident self types (`Probe`) and path-style ones
+/// (`crate::api::User`). `inventory::submit!` requires the value to be
+/// constructible in `const` context, which is the reason the wrapper is a
+/// `pub fn` (not a closure or boxed trait object) — only `fn` pointers
+/// resolve in static-init.
 fn generate_inventory_submits(
     path: &LitStr,
+    self_ty: &Type,
     methods: &[DiscoveredMethod],
 ) -> proc_macro2::TokenStream {
     let submits = methods.iter().map(|m| {
         let variant = m.http_method.as_jolt_core_variant_ident();
+        let user_fn = &m.sig.ident;
+        let wrapper_name = format_ident!("__jolt_handler_{}", user_fn);
         quote! {
             ::jolt_core::inventory::submit! {
                 ::jolt_core::RegisteredEndpoint {
                     path: #path,
                     method: ::jolt_core::Method::#variant,
+                    handler: <#self_ty>::#wrapper_name,
                 }
             }
         }
@@ -505,7 +511,7 @@ pub(crate) fn expand_endpoint(
     }
     let self_ty = (*impl_block.self_ty).clone();
     strip_verb_attrs(&mut impl_block);
-    let submits = generate_inventory_submits(&attr_parsed.path, &methods);
+    let submits = generate_inventory_submits(&attr_parsed.path, &self_ty, &methods);
     let wrappers = generate_handler_wrappers(&self_ty, &methods);
     quote! {
         #impl_block
@@ -1212,7 +1218,8 @@ mod tests {
         );
         let methods = scan_methods(&item).expect("scan succeeds");
         let path = parse_path_lit(r#""/api/test""#);
-        let rendered = generate_inventory_submits(&path, &methods).to_string();
+        let self_ty = parse_self_ty("Api");
+        let rendered = generate_inventory_submits(&path, &self_ty, &methods).to_string();
         // One submit per method.
         let submit_count = rendered.matches(":: jolt_core :: inventory :: submit").count();
         assert_eq!(submit_count, 3, "expected 3 submits, rendered: {rendered}");
@@ -1234,8 +1241,65 @@ mod tests {
         // No verb-tagged methods → no submits. (The impl block is still
         // re-emitted by expand_endpoint, but the submits stream is empty.)
         let path = parse_path_lit(r#""/empty""#);
-        let rendered = generate_inventory_submits(&path, &[]).to_string();
+        let self_ty = parse_self_ty("Empty");
+        let rendered = generate_inventory_submits(&path, &self_ty, &[]).to_string();
         assert_eq!(rendered, "", "empty methods must emit zero submits");
+    }
+
+    #[test]
+    fn generate_inventory_submits_includes_handler_fn_path_per_method() {
+        // PRD-mandated verification (044): each emitted RegisteredEndpoint
+        // carries a `handler` field pointing at the matching __jolt_handler_*
+        // wrapper on the user's type, expressed via the explicit-
+        // disambiguation `<SelfTy>::__jolt_handler_<name>` form so it works
+        // uniformly for bare and path-style self types. A regression that
+        // dropped the field, swapped the two methods' handlers, or hard-coded
+        // `Self::` (which would fail at the macro-output module scope) would
+        // fail this test.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn list(&self) -> Response<()> { todo!() }
+                #[post] fn create(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = parse_path_lit(r#""/api/test""#);
+        let self_ty = parse_self_ty("Api");
+        let rendered = generate_inventory_submits(&path, &self_ty, &methods).to_string();
+        assert!(
+            rendered.contains("handler : < Api > :: __jolt_handler_list"),
+            "expected handler: <Api>::__jolt_handler_list, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("handler : < Api > :: __jolt_handler_create"),
+            "expected handler: <Api>::__jolt_handler_create, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generate_inventory_submits_threads_path_style_self_ty() {
+        // `<crate::api::User>::__jolt_handler_fetch` must round-trip through
+        // the explicit-disambiguation form — bare `crate::api::User::__jolt_handler_fetch`
+        // is also valid Rust but the angle-bracket form is the one we commit to
+        // (so an audit of expanded output reads consistently regardless of
+        // whether the user wrote `impl Foo` or `impl crate::api::Foo`).
+        let item = parse_impl(
+            r#"
+            impl crate::api::User {
+                #[get] fn fetch(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = (*item.self_ty).clone();
+        let path = parse_path_lit(r#""/users""#);
+        let rendered = generate_inventory_submits(&path, &self_ty, &methods).to_string();
+        assert!(
+            rendered.contains("handler : < crate :: api :: User > :: __jolt_handler_fetch"),
+            "expected <crate::api::User>::__jolt_handler_fetch, rendered: {rendered}"
+        );
     }
 
     #[test]

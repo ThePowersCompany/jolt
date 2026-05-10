@@ -1,4 +1,4 @@
-//! JOLT-RS-042 + JOLT-RS-043 PRD-mandated integration tests.
+//! JOLT-RS-042 + JOLT-RS-043 + JOLT-RS-044 PRD-mandated integration tests.
 //!
 //! 042: a struct decorated with `#[endpoint("/path")]` and verb-tagged methods
 //! shows up in `inventory::iter::<RegisteredEndpoint>()` at static-init time
@@ -11,14 +11,31 @@
 //! body / status come from invoking the user's `&self` method on a
 //! `Default::default()` instance of the endpoint type.
 //!
+//! 044: every entry collected by `inventory::iter::<RegisteredEndpoint>()`
+//! across all linked crates is registered into the [`JoltServer`]'s
+//! [`EndpointRegistry`] when [`JoltServer::start`] (or its in-process sibling
+//! [`JoltServer::into_router`]) is called. The inventory record carries a
+//! `handler: fn(Request) -> EndpointFuture` field pointing at the wrapper from
+//! 043, which makes the inventory entry directly usable as an [`Endpoint`]
+//! trait object via the `impl Endpoint for &'static RegisteredEndpoint` bridge.
+//!
 //! This is an *integration* test (not a unit test) because the macro can
 //! only be exercised through cargo's compile pipeline — the proc-macro
 //! crate's own unit tests parse-check the emitted token stream but cannot
-//! actually expand and link the inventory submission or the wrapper.
+//! actually expand and link the inventory submission or the wrapper. The
+//! tests live in `jolt-core/tests/` rather than `jolt-macros/tests/` because
+//! the link contract is "downstream crate's `#[endpoint]` submits land in
+//! jolt-core's `inventory::collect!` slot" — testing it requires a different
+//! crate from jolt-core. This test binary IS that different crate.
 
-use axum::body::to_bytes;
-use jolt_core::{endpoint, Method, RegisteredEndpoint, Request, Response, StatusCode};
+use axum::body::{to_bytes, Body};
+use axum::http::Request as AxumRequest;
+use jolt_core::{
+    endpoint, EndpointFuture, JoltServer, Method, RegisteredEndpoint, Request, Response,
+    StatusCode,
+};
 use std::collections::HashMap;
+use tower::ServiceExt;
 
 #[derive(Default)]
 struct Probe;
@@ -33,6 +50,22 @@ impl Probe {
     #[post]
     fn record(&self) -> Response<&'static str> {
         Response::new(StatusCode::Created, "recorded")
+    }
+}
+
+/// Second endpoint type defined in the same test crate as `Probe`. Pinned to
+/// prove that JOLT-RS-044's iteration walks every inventory entry, not just
+/// the first emitted struct's submits. A regression that broke after the first
+/// match (e.g. `iter().next()` instead of `iter()`) would fail the
+/// `into_router_serves_secondary_endpoint` test below.
+#[derive(Default)]
+struct Secondary;
+
+#[endpoint("/secondary")]
+impl Secondary {
+    #[get]
+    fn fetch(&self) -> Response<&'static str> {
+        Response::new(StatusCode::Ok, "secondary-pong")
     }
 }
 
@@ -95,4 +128,110 @@ async fn handler_wrappers_are_distinct_per_method() {
         .await
         .expect("body collects");
     assert_eq!(&body_bytes[..], b"recorded");
+}
+
+#[tokio::test]
+async fn registered_endpoint_carries_handler_fn_pointer() {
+    // JOLT-RS-044: the inventory record now carries a `handler: fn(Request) ->
+    // EndpointFuture` field, populated by the macro with
+    // `<SelfTy>::__jolt_handler_<user_fn>`. Pin that the field is wired by
+    // looking up the GET /probe entry, type-checking the field shape via a
+    // typed let-binding, and round-tripping the wrapper invocation: the same
+    // GET /probe handler must produce the same status + body as
+    // `Probe::__jolt_handler_ping` directly. A regression that dropped the
+    // field, populated it with the wrong wrapper, or changed the fn signature
+    // would fail this test.
+    let entry = jolt_core::inventory::iter::<RegisteredEndpoint>
+        .into_iter()
+        .find(|e| e.path == "/probe" && e.method == Method::Get)
+        .expect("GET /probe entry present in inventory");
+    let handler: fn(Request) -> EndpointFuture = entry.handler;
+    let response = handler(empty_request(Method::Get, "/probe")).await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body_bytes[..], b"pong");
+}
+
+#[tokio::test]
+async fn into_router_serves_inventory_registered_get_endpoint() {
+    // JOLT-RS-044 PRD-mandated verification: "endpoints defined in multiple
+    // crates all register into server." This test crate is NOT jolt-core
+    // (jolt-core hosts `inventory::collect!`; this test binary defines the
+    // submits via `#[endpoint]`), so seeing the submits register and route
+    // through `JoltServer::into_router` proves the cross-crate path works.
+    //
+    // GET /probe → 200 + "pong".
+    let router = JoltServer::new().into_router();
+    let req = AxumRequest::builder()
+        .method("GET")
+        .uri("/probe")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await.expect("oneshot succeeds");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body_bytes[..], b"pong");
+}
+
+#[tokio::test]
+async fn into_router_serves_inventory_registered_post_endpoint() {
+    // Same path (/probe), different verb: confirms the registry-build process
+    // distinguishes (Method::Get, "/probe") from (Method::Post, "/probe") and
+    // routes each to its own __jolt_handler_<name> wrapper. A regression that
+    // collapsed the two submits into a single arm or registered them with the
+    // wrong handler swap would fail this test.
+    let router = JoltServer::new().into_router();
+    let req = AxumRequest::builder()
+        .method("POST")
+        .uri("/probe")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await.expect("oneshot succeeds");
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let body_bytes = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body_bytes[..], b"recorded");
+}
+
+#[tokio::test]
+async fn into_router_serves_secondary_endpoint() {
+    // Two distinct endpoint TYPES (Probe and Secondary) defined in the same
+    // crate. Pin that JOLT-RS-044's iteration registers BOTH — a regression
+    // that walked only the first inventory entry, or that confused the
+    // `<SelfTy>` binding by re-using `Probe`'s for `Secondary`'s submit, would
+    // fail this test.
+    let router = JoltServer::new().into_router();
+    let req = AxumRequest::builder()
+        .method("GET")
+        .uri("/secondary")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await.expect("oneshot succeeds");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body_bytes[..], b"secondary-pong");
+}
+
+#[test]
+fn collect_inventory_endpoints_populates_registry_without_serving() {
+    // Companion to into_router: pin the public `collect_inventory_endpoints`
+    // method so advanced users (and tests) can drive registration without
+    // building a full router or binding a port. The registry length must
+    // match the visible inventory entry count once collection runs.
+    let inventory_len = jolt_core::inventory::iter::<RegisteredEndpoint>
+        .into_iter()
+        .count();
+    let server = JoltServer::new().collect_inventory_endpoints();
+    assert_eq!(
+        server.registry.len(),
+        inventory_len,
+        "registry length must match inventory iter count after collection"
+    );
 }
