@@ -69,7 +69,7 @@
       "verification": [
         "cargo check -p jolt-core succeeds."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-003",

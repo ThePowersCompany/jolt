@@ -23,3 +23,23 @@ Notes for next iterations:
 - JOLT-RS-002..006 each need to ADD deps + flesh out lib.rs for their crate; the stub Cargo.toml already exists.
 - Cargo.lock will be auto-generated on first build with real deps; not committed yet.
 - examples/basic crate not yet in workspace members; will be added when phase06 needs it.
+
+## 2026-05-10 — JOLT-RS-002: jolt-core crate deps + stub lib.rs
+
+PRD item: JOLT-RS-002 (priority 2, phase00-workspace-scaffold) — Add deps to jolt-core/Cargo.toml (axum, tokio, serde, serde_json, tower, tower-http, tokio-stream, futures-util) and stub lib.rs.
+
+Verification: `cargo check -p jolt-core` → succeeds (compiled clean in 13.58s; full dep graph resolved including axum 0.7.9, tokio 1.52.3, tower-http 0.6.10).
+
+Key decisions:
+- All deps pulled from [workspace.dependencies] via `{ workspace = true }` — no version overrides, no per-crate feature additions. Keeps the Cargo.toml a thin shim over the workspace pinning.
+- lib.rs is just a top-level doc comment; no module declarations yet. Subsequent PRD items (Method, StatusCode, Request/Response, etc.) will add modules and `pub use` re-exports as they land.
+- Did NOT add http, hyper, or tokio-tungstenite directly — axum re-exports what callers need, and adding them now would invite version-skew bugs later.
+
+Files changed:
+- jolt-core/Cargo.toml (filled in [dependencies])
+- jolt-core/src/lib.rs (added crate-level doc string; was 0 bytes)
+- prd.json — JOLT-RS-002 passes: true
+
+Notes for next iterations:
+- JOLT-RS-003 (jolt-macros): set proc-macro = true and pull syn/quote/proc-macro2 from workspace; stub a #[proc_macro_attribute] and a #[proc_macro_derive] so `cargo check -p jolt-macros` exercises both attribute paths.
+- JOLT-RS-007 (Method enum) will be the first jolt-core module — likely create src/method.rs and `pub mod method;` in lib.rs.
