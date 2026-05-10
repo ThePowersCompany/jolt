@@ -207,6 +207,7 @@ mod request {
             query_params: HashMap::new(),
             body: Vec::new(),
             cookies: Vec::new(),
+            finished: false,
         }
     }
 
@@ -222,6 +223,7 @@ mod request {
                 name: "sid".to_string(),
                 value: "abc".to_string(),
             }],
+            finished: false,
         };
 
         assert_eq!(req.method, Method::Post);
@@ -232,6 +234,7 @@ mod request {
         assert_eq!(req.cookies.len(), 1);
         assert_eq!(req.cookies[0].name, "sid");
         assert_eq!(req.cookies[0].value, "abc");
+        assert!(!req.finished);
     }
 
     #[test]
@@ -320,5 +323,66 @@ mod request {
         let req = empty_request();
         let result: serde_json::Result<serde_json::Value> = req.json();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cookie_returns_matching_entry() {
+        let mut req = empty_request();
+        req.cookies.push(Cookie {
+            name: "sid".to_string(),
+            value: "abc".to_string(),
+        });
+        req.cookies.push(Cookie {
+            name: "theme".to_string(),
+            value: "dark".to_string(),
+        });
+
+        let found = req.cookie("theme").unwrap();
+        assert_eq!(found.name, "theme");
+        assert_eq!(found.value, "dark");
+    }
+
+    #[test]
+    fn cookie_returns_none_for_missing_name() {
+        let req = empty_request();
+        assert!(req.cookie("sid").is_none());
+    }
+
+    #[test]
+    fn cookie_lookup_is_case_sensitive() {
+        let mut req = empty_request();
+        req.cookies.push(Cookie {
+            name: "SID".to_string(),
+            value: "abc".to_string(),
+        });
+        assert!(req.cookie("sid").is_none());
+        assert!(req.cookie("SID").is_some());
+    }
+
+    #[test]
+    fn cookie_returns_first_match_when_duplicate_names_exist() {
+        let mut req = empty_request();
+        req.cookies.push(Cookie {
+            name: "sid".to_string(),
+            value: "first".to_string(),
+        });
+        req.cookies.push(Cookie {
+            name: "sid".to_string(),
+            value: "second".to_string(),
+        });
+        assert_eq!(req.cookie("sid").unwrap().value, "first");
+    }
+
+    #[test]
+    fn has_finished_defaults_to_false() {
+        let req = empty_request();
+        assert!(!req.has_finished());
+    }
+
+    #[test]
+    fn has_finished_reflects_finished_flag() {
+        let mut req = empty_request();
+        req.finished = true;
+        assert!(req.has_finished());
     }
 }

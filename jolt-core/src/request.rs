@@ -16,6 +16,7 @@ pub struct Request {
     pub query_params: HashMap<String, String>,
     pub body: Vec<u8>,
     pub cookies: Vec<Cookie>,
+    pub finished: bool,
 }
 
 impl Request {
@@ -33,5 +34,16 @@ impl Request {
     /// Deserialize the raw request body as JSON into `T`.
     pub fn json<T: DeserializeOwned>(&self) -> serde_json::Result<T> {
         serde_json::from_slice(&self.body)
+    }
+
+    /// Look up a cookie by exact name match. Returns the first matching cookie.
+    pub fn cookie(&self, name: &str) -> Option<&Cookie> {
+        self.cookies.iter().find(|c| c.name == name)
+    }
+
+    /// Whether middleware has marked this request as finished, signaling
+    /// downstream layers to skip further handler dispatch.
+    pub fn has_finished(&self) -> bool {
+        self.finished
     }
 }
