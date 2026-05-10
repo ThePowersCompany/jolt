@@ -795,6 +795,74 @@ mod request_ext_extensions {
     }
 }
 
+mod endpoint {
+    //! PRD JOLT-RS-028 verification ("Trait compiles") plus the load-bearing
+    //! contracts the registry layer (JOLT-RS-029) and Router layer
+    //! (JOLT-RS-033..) will lean on: object-safety with `Send + Sync`, and a
+    //! handler future that actually resolves to an axum response.
+
+    use crate::{Endpoint, EndpointFuture, Method, Request};
+    use axum::body::Body;
+    use axum::http::HeaderMap;
+    use std::collections::HashMap;
+
+    struct StaticHello;
+
+    impl Endpoint for StaticHello {
+        fn path(&self) -> &str {
+            "/hello"
+        }
+
+        fn method(&self) -> Method {
+            Method::Get
+        }
+
+        fn handler(&self, _req: Request) -> EndpointFuture {
+            Box::pin(async {
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .body(Body::from("hello"))
+                    .unwrap()
+            })
+        }
+    }
+
+    fn empty_request() -> Request {
+        Request {
+            method: Method::Get,
+            path: "/hello".to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Vec::new(),
+            cookies: Vec::new(),
+            finished: false,
+        }
+    }
+
+    #[test]
+    fn trait_is_object_safe_with_send_sync_bounds() {
+        // Locks in JOLT-RS-029's prerequisite: the registry stores
+        // `Box<dyn Endpoint + Send + Sync>`. If a future change adds an
+        // associated type or generic method to the trait, this assignment
+        // stops compiling — exactly the regression we want to catch here.
+        let endpoint: Box<dyn Endpoint + Send + Sync> = Box::new(StaticHello);
+        assert_eq!(endpoint.path(), "/hello");
+        assert_eq!(endpoint.method(), Method::Get);
+    }
+
+    #[tokio::test]
+    async fn handler_future_resolves_to_axum_response() {
+        let endpoint = StaticHello;
+        let response = endpoint.handler(empty_request()).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body_bytes[..], b"hello");
+    }
+}
+
 mod server {
     use crate::{CorsConfig, JoltServer};
 

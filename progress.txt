@@ -763,3 +763,45 @@ Notes for next iterations:
 - `start` currently swallows the `self.threads`, `self.cors_config`, `self.tls_config` fields. When wiring lands (phase02 CORS, phase06 TLS, future runtime-build), `start`'s signature stays the same — only the body grows. No PRD-26-blocker yet.
 - The `expect(...)` on signal-handler installation could become a `?` if a future PRD requires fully-recoverable startup. Today the panic is fine: failure-to-install-SIGINT-handler means the runtime is broken in a way the caller can't meaningfully handle.
 - If a clippy gate ever lands (per JOLT-RS-023 notes), `Default for JoltServer` becomes the natural fix; `start`'s code wouldn't need to change.
+
+## 2026-05-10 — JOLT-RS-028: Endpoint trait (pulled forward, opens phase06)
+
+PRD item: JOLT-RS-028 (priority 28, phase06-endpoint-registry) — Define the `Endpoint` trait with `path() -> &str`, `method() -> Method`, and `handler(Request) -> Pin<Box<dyn Future<Output = axum::response::Response> + Send>>`.
+
+Why pulled out of strict-priority order: JOLT-RS-026 (priority 26) is `endpoint<E: Endpoint>(self) -> Self` and JOLT-RS-027 (priority 27) is the server-builder test suite. JOLT-RS-026 references `E: Endpoint` and cannot compile without the trait first. Every prior progress note (JOLT-RS-022/023/024/025) flagged this and recommended pulling JOLT-RS-028 forward. Per the auto-prompt's prioritization rule ("architectural decisions and core abstractions" first, then integration points), the trait is the load-bearing abstraction — JOLT-RS-026, 029, 030, 031, 033, 034, 036, 037 all consume it. Picking 028 unblocks the entire phase05/phase06 chain in one move; picking 026 first would force a stub trait now and a refactor when 028 lands.
+
+Verification:
+- `cargo check -p jolt-core` → clean in 0.82s.
+- `cargo test -p jolt-core --lib -- tests::endpoint` → 2/2 passed (object-safety + handler-future), 70 filtered out, 0.00s.
+- `cargo test -p jolt-core --lib` → 72 passed (up from 70); 0 failed.
+- `cargo check --workspace` → clean in 0.29s; no regressions in any sibling crate.
+
+Note on harness instructions: same as JOLT-RS-007..025 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- `pub trait Endpoint { fn path(&self) -> &str; fn method(&self) -> Method; fn handler(&self, req: Request) -> EndpointFuture; }` lives in a new `jolt-core/src/endpoint.rs`. Re-exported as `pub use endpoint::{Endpoint, EndpointFuture}` from `lib.rs` so callers write `jolt_core::Endpoint` rather than `jolt_core::endpoint::Endpoint` (matches the existing flat re-export shape — cf. `Cookie`, `Method`, `Request`, `Response`, `JoltServer`, `StatusCode`).
+- Did NOT make `Send + Sync` supertraits of `Endpoint`. PRD-029 specifies `Vec<Box<dyn Endpoint + Send + Sync>>` — the `+ Send + Sync` adds the auto traits at the trait-object site, so requiring them on the trait itself is redundant and forecloses the option of holding endpoint values in non-shared contexts (e.g. a single-threaded test harness, or a future single-threaded runtime path). This matches the PRD spec verbatim.
+- Did NOT make the trait async via `async-trait` or trait `async fn` (Rust 1.75+). PRD-028 explicitly specifies the desugared `Pin<Box<dyn Future<Output = Response> + Send>>` shape — and that's the shape that lets the trait stay object-safe with no compiler-version pinning. `async fn` in traits would force the registry's `Box<dyn Endpoint>` to deal with associated-type-position-impl-trait dyn-safety which is a Rust 1.75+ unstable interaction; explicit boxing is the conservative, mechanically-clear choice the PRD picked. Adding a type alias `EndpointFuture` keeps callers from re-typing the long signature.
+- Type alias `pub type EndpointFuture = Pin<Box<dyn Future<Output = Response> + Send>>;` is genuinely useful — handler implementations in JOLT-RS-039+ (the macro-generated impls) will reference this name. Public so downstream crates can name it too.
+- Endpoint module docstring forward-references JOLT-RS-026 and JOLT-RS-029 to make the dependency chain explicit for the next iteration; the trait docstring explains *why* `Send + Sync` are not supertraits (the registry adds them at the use site).
+- Two tests under `mod endpoint`:
+  1. `trait_is_object_safe_with_send_sync_bounds` — assigns `Box<dyn Endpoint + Send + Sync> = Box::new(StaticHello)`. This is the load-bearing assertion: if a future change adds an associated type or generic method to the trait, the object-safety check fails at compile time, breaking JOLT-RS-029's `Vec<Box<dyn Endpoint + Send + Sync>>`. Catches the regression at the trait level rather than at the registry level.
+  2. `handler_future_resolves_to_axum_response` — calls `endpoint.handler(req).await` and asserts the response status + body bytes. Locks in that the Pin<Box<dyn Future>> pattern actually works end-to-end, not just at the type level.
+- The test fixture `StaticHello` uses `axum::response::Response::builder().body(Body::from("hello"))` rather than constructing through `crate::Response<T>` — keeps the test isolated to the Endpoint contract (doesn't pull in `JsonBody`/`Response<T>` bridging machinery, which has its own test module).
+- `empty_request()` is duplicated from `mod request`'s helper rather than imported. Two reasons: (a) `mod request`'s helper is private to that module, (b) duplication is cheap and keeps test modules independently-readable. If a third module needs it, hoist to a shared `mod tests::fixtures`.
+- No new dependencies. `axum` and `tokio` are already in `jolt-core/Cargo.toml`.
+
+Files changed:
+- jolt-core/src/endpoint.rs — new file: `Endpoint` trait + `EndpointFuture` type alias.
+- jolt-core/src/lib.rs — added `pub mod endpoint;` and `pub use endpoint::{Endpoint, EndpointFuture};`.
+- jolt-core/src/tests.rs — new `mod endpoint` with 2 tests, inserted before `mod server`.
+- prd.json — JOLT-RS-028 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-026 (priority 26) is now unblocked. Implementation: add a `Vec<Box<dyn Endpoint + Send + Sync>>` field to `JoltServer` (or pull JOLT-RS-029 `EndpointRegistry` forward and embed that — recommended; JOLT-RS-022/023/024/025 progress notes prefer (b)). The PRD signature is `endpoint<E: Endpoint>(self) -> Self`. Open question for JOLT-RS-026: does `E` need `+ Send + Sync + 'static`? Yes — the registry stores boxed `dyn Endpoint + Send + Sync`, so the bound on the generic must be at least as strong. The PRD step text omits these bounds; add them and document. The `'static` bound is needed because trait objects without explicit lifetimes default to `'static`.
+- JOLT-RS-029 (priority 29) `EndpointRegistry` struct + `register(endpoint)`. Trivial now that the trait exists. Recommend implementing `Default` + `new()` to match the JoltServer constructor shape; PRD doesn't mandate it but the test-fixture ergonomics reward it.
+- JOLT-RS-030 path-length-descending sort: subtle — "longest path first" means `cmp` is `b.path().len().cmp(&a.path().len())`. Stable sort preserves insertion order for equal-length paths, which the PRD doesn't specify but matches the principle of least surprise. Use `sort_by_key(|e| std::cmp::Reverse(e.path().len()))` for clarity.
+- JOLT-RS-031 `build_router()` → `axum::Router`: the trick is that axum's `Router::route(path, MethodRouter)` wants a `MethodRouter` typed by the verb. Switch on `endpoint.method()` to call the matching axum builder (`get(handler)`, `post(handler)`, etc.). The handler closure needs to capture the endpoint (Arc it, not Box, since it'll be cloned per request) and call `endpoint.handler(req)`. Plan to convert each registered Endpoint into an axum handler that takes axum's request, builds a Jolt `Request`, calls `endpoint.handler(jolt_req).await`, and returns. This Request-construction step is the hidden dependency on phase04 request-extraction (already done — Request struct exists with all fields).
+- JOLT-RS-027 (priority 27 — server builder unit tests, particularly port-binding-conflict handling): not yet done. Recommended shape (already documented in JOLT-RS-025 progress notes): bind a probe `TcpListener` and HOLD it (don't drop), then `JoltServer::new().port(held_port).start(Router::new())` and assert `Err(io::ErrorKind::AddrInUse)`. Could be done now or after 026/029/030/031 — no dependency either way. The current `mod server` already has 4 builder-shape tests + 1 bind-and-serve test (5 total); 027 just needs the conflict-path test to round it out.
+- Pulling 028 forward leaves 026 and 027 as the only phase05 holdouts. Once both land, phase05 is complete and 029-032 finish phase06.
+- No clippy gate yet; if added later, `Default for JoltServer` and possibly `Default for EndpointRegistry` are the natural homes.
