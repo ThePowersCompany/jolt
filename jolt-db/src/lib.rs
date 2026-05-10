@@ -466,6 +466,64 @@
 //!     contract is the only invariant on the field's contents and
 //!     decision 32's auto-populate enforces it at the only entry
 //!     point.
+//!
+//! JOLT-RS-098 opens phase23 by extending [`JoltDb::connect`] to
+//! auto-create the `_migrations` bookkeeping table on every successful
+//! connection. The table records which migrations have run, their
+//! recorded SHA-256 checksums, and when each was applied; subsequent
+//! phase23 slices (JOLT-RS-099 read-back, JOLT-RS-100 apply, JOLT-RS-102
+//! tamper detection) read and write through this table.
+//!
+//! 34. **Auto-create happens inside [`JoltDb::connect`] after the pool
+//!     opens, not as a separate `JoltDb::ensure_migrations_table()`
+//!     verb (JOLT-RS-098).** PRD-098 specifies "On JoltDb::connect()".
+//!     Collocating the schema setup with connection setup extends
+//!     decision 7's "fail-fast on misconfiguration" contract to schema
+//!     readiness: a deployment lacking `CREATE TABLE` permission on
+//!     the configured user surfaces at startup, the same place where
+//!     auth and unreachable-server errors already surface. The
+//!     alternative (a separate ensure-verb that callers remember to
+//!     call) opens a window where a fresh-DB deployment can pass
+//!     `connect` and then fail at first migration apply because the
+//!     bookkeeping table never got created. The cost is that callers
+//!     who never run migrations still pay one `CREATE TABLE IF NOT
+//!     EXISTS` round trip at startup — acceptable for the fail-fast
+//!     symmetry and matches PRD-098 verbatim. The CREATE statement is
+//!     intentionally non-transactional / non-rollback-on-error: if it
+//!     fails, the pool is dropped along with the unsuccessful `connect`
+//!     return so the caller sees one error and an unusable handle, not
+//!     a half-initialized `JoltDb`.
+//!
+//! 35. **`_migrations` schema is `id SERIAL PRIMARY KEY, name TEXT NOT
+//!     NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT
+//!     NOW()` exactly as PRD-098 specifies (JOLT-RS-098).** `id` is
+//!     the surrogate primary key — `SERIAL` makes the insertion order
+//!     a stable, timestamp-independent ordering for the eventual
+//!     JOLT-RS-101 "list applied migrations" verb so two migrations
+//!     applied in the same `NOW()` second still order deterministically
+//!     by id. `name` is the discovered [`MigrationFile::name`]
+//!     verbatim and is the natural lookup key for JOLT-RS-099's
+//!     `HashMap<String, String>` read-back; the `NOT NULL` constraint
+//!     prevents an accidental empty-string insertion that would
+//!     silently mark an unnamed migration as applied. `checksum`
+//!     stores the JOLT-RS-095 [`sha256_hex`] output (64 lowercase hex
+//!     chars per decision 31) as `TEXT` — the lowercase contract is
+//!     the only invariant, so `TEXT` is the right column type rather
+//!     than a `CHAR(64)` fixed-width type that would silently
+//!     right-pad on shorter input. `applied_at` defaults to `NOW()`
+//!     so inserts only need to supply `name` + `checksum`; the
+//!     `TIMESTAMPTZ` type pins UTC semantics across deployments in
+//!     different timezones.
+//!
+//! 36. **`CREATE TABLE IF NOT EXISTS`, not bare `CREATE TABLE`
+//!     (JOLT-RS-098).** Idempotency is load-bearing: `JoltDb::connect`
+//!     is called on every process restart, and `connect_returns_ok_*`
+//!     tests run repeatedly against the same fixture database.
+//!     `IF NOT EXISTS` makes the first connect against a fresh
+//!     database create the table and every subsequent connect a
+//!     no-op (a single `Notice` in Postgres logs, no error). The
+//!     PRD wording "auto-create _migrations table if not exists"
+//!     captures this requirement directly.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -519,6 +577,23 @@ impl Default for DbConfig {
     }
 }
 
+/// `CREATE TABLE IF NOT EXISTS _migrations (...)` DDL executed inside
+/// [`JoltDb::connect`] (JOLT-RS-098). See module docs decisions 34–36
+/// for the architectural contract: PRD-mandated schema, idempotent via
+/// `IF NOT EXISTS`, ran from `connect` rather than a separate verb.
+///
+/// Public so JOLT-RS-099+ tests (and any caller that wants to recreate
+/// the bookkeeping table by hand against a non-`JoltDb` pool) can
+/// reference the same DDL the production connect path uses; pinning it
+/// here makes a schema drift between connect and a test fixture
+/// impossible.
+pub const MIGRATIONS_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS _migrations (\
+    id SERIAL PRIMARY KEY, \
+    name TEXT NOT NULL, \
+    checksum TEXT NOT NULL, \
+    applied_at TIMESTAMPTZ DEFAULT NOW()\
+)";
+
 /// Runtime handle around a [`sqlx::PgPool`] consumed by every downstream
 /// phase19/20/21 slice (JOLT-RS-083). See module docs decisions 5–7 for
 /// the ownership shape, error contract, and connect semantics; decisions
@@ -543,6 +618,17 @@ impl JoltDb {
     /// auth / unreachable-server errors surface at startup rather than at
     /// first-query time (decision 7).
     ///
+    /// After the pool opens, `connect` issues a `CREATE TABLE IF NOT
+    /// EXISTS _migrations (...)` round trip to ensure the migration
+    /// bookkeeping table exists (JOLT-RS-098, decisions 34–36). The
+    /// schema is `id SERIAL PRIMARY KEY, name TEXT NOT NULL, checksum
+    /// TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW()` and is
+    /// idempotent across restarts. A `CREATE TABLE` failure (typically
+    /// a permission error on the configured user) propagates as the
+    /// raw [`sqlx::Error`] and the pool is dropped along with the
+    /// unsuccessful return so callers never see a half-initialized
+    /// [`JoltDb`].
+    ///
     /// [`PgPoolOptions::max_connections`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.max_connections
     /// [`PgPoolOptions::acquire_timeout`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.acquire_timeout
     /// [`PgPoolOptions::connect`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.connect
@@ -554,6 +640,7 @@ impl JoltDb {
             ))
             .connect(&config.database_url)
             .await?;
+        sqlx::query(MIGRATIONS_TABLE_DDL).execute(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -958,7 +1045,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbConfig, JoltDb, MigrationFile, TypedQuery, read_migration_files, sha256_hex,
+        DbConfig, JoltDb, MIGRATIONS_TABLE_DDL, MigrationFile, TypedQuery, read_migration_files,
+        sha256_hex,
     };
 
     #[test]
@@ -1888,5 +1976,109 @@ mod tests {
         assert_ne!(files[0].checksum, files[1].checksum);
         assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
         assert_eq!(files[1].checksum, sha256_hex(files[1].content.as_bytes()));
+    }
+
+    // ---- JOLT-RS-098: connect auto-creates _migrations table ----
+
+    /// Compile-time pin: `MIGRATIONS_TABLE_DDL` is a `&'static str`
+    /// containing all four PRD-mandated columns (decision 35). A
+    /// regression that drops a column, renames `_migrations`, or
+    /// changes the type of any column fails this assertion without
+    /// needing a live Postgres.
+    #[test]
+    fn migrations_table_ddl_pins_prd_schema() {
+        // Pin every PRD-098 column name + type + the `_migrations` table
+        // identifier + the `IF NOT EXISTS` idempotency clause (decision
+        // 36). Substring checks rather than full-DDL equality so a
+        // formatting tweak (extra whitespace, case change) doesn't
+        // require updating the test.
+        assert!(MIGRATIONS_TABLE_DDL.contains("CREATE TABLE IF NOT EXISTS _migrations"));
+        assert!(MIGRATIONS_TABLE_DDL.contains("id SERIAL PRIMARY KEY"));
+        assert!(MIGRATIONS_TABLE_DDL.contains("name TEXT NOT NULL"));
+        assert!(MIGRATIONS_TABLE_DDL.contains("checksum TEXT NOT NULL"));
+        assert!(MIGRATIONS_TABLE_DDL.contains("applied_at TIMESTAMPTZ DEFAULT NOW()"));
+    }
+
+    /// PRD-mandated verification for JOLT-RS-098: "fresh DB →
+    /// _migrations table created." Env-gated on `JOLT_TEST_DATABASE_URL`
+    /// (same convention as 083/084/086/088/090/091/092): without a
+    /// live Postgres the test skips trivially so the default
+    /// `cargo test -p jolt-db` flow stays runnable.
+    ///
+    /// With the env var set: drops the `_migrations` table (best-effort
+    /// — fresh-DB simulation), calls `JoltDb::connect`, then queries
+    /// `information_schema.tables` to confirm the table now exists with
+    /// the four PRD-mandated columns (id, name, checksum, applied_at).
+    /// Also pins decision 34 (the auto-create is inside `connect`, not
+    /// a separate verb) — a regression that moves the DDL to an
+    /// uncalled `ensure_migrations_table` would leave the table missing
+    /// after `connect` and fail this assertion.
+    #[tokio::test]
+    async fn connect_auto_creates_migrations_table_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+
+        // Fresh-DB simulation: drop any pre-existing _migrations table
+        // so the assertion below verifies *this* connect call did the
+        // creating, not a leftover from a prior test run. Best-effort
+        // cleanup — a missing table is fine.
+        {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .expect("setup pool for DROP TABLE");
+            sqlx::query("DROP TABLE IF EXISTS _migrations")
+                .execute(&pool)
+                .await
+                .expect("drop _migrations (setup)");
+        }
+
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Verify the table exists and carries the four PRD-mandated
+        // columns. Querying `information_schema.columns` (rather than
+        // `to_regclass` or `pg_tables`) gives us the column-shape
+        // check the connect path is supposed to land.
+        let column_names: Vec<(String,)> = sqlx::query_as(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_name = '_migrations' ORDER BY ordinal_position",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("query information_schema after connect");
+        let names: Vec<String> = column_names.into_iter().map(|(n,)| n).collect();
+        assert_eq!(
+            names,
+            vec!["id", "name", "checksum", "applied_at"],
+            "expected the four PRD-mandated columns in order",
+        );
+    }
+
+    /// Decision 36 idempotency: calling `JoltDb::connect` twice
+    /// against the same database does not fail. The second call hits
+    /// the `IF NOT EXISTS` short-circuit; a regression that uses a
+    /// bare `CREATE TABLE` (no idempotency clause) would fail this
+    /// test with a "relation already exists" error on the second
+    /// connect. Env-gated.
+    #[tokio::test]
+    async fn connect_is_idempotent_with_existing_migrations_table_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+
+        // First connect creates the table (or no-ops if it already
+        // exists from a prior test run).
+        let _db1 = JoltDb::connect(&cfg).await.expect("first connect");
+
+        // Second connect against the now-existing table must also
+        // succeed. This is the idempotency pin.
+        let _db2 = JoltDb::connect(&cfg)
+            .await
+            .expect("second connect should be idempotent");
     }
 }
