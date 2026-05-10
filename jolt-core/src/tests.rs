@@ -2049,8 +2049,38 @@ mod server {
 
     #[test]
     fn cors_builder_wraps_arg_in_some() {
-        let server = JoltServer::new().cors(CorsConfig);
+        let server = JoltServer::new().cors(CorsConfig::default());
         assert!(server.cors_config.is_some());
+    }
+
+    #[test]
+    fn cors_config_default_is_empty_and_restrictive() {
+        // PRD-mandated verification for JOLT-RS-055: "Struct compiles with
+        // defaults." `CorsConfig::default()` must yield an empty config — no
+        // origins, no methods, no headers, max_age = 0 — so a server that
+        // wires it in without further configuration grants no CORS access.
+        let cfg = CorsConfig::default();
+        assert!(cfg.allow_origins.is_empty());
+        assert!(cfg.allow_methods.is_empty());
+        assert!(cfg.allow_headers.is_empty());
+        assert_eq!(cfg.max_age, 0);
+    }
+
+    #[test]
+    fn cors_config_constructed_with_explicit_fields() {
+        // Pins the public field surface 056..058 will read at request time.
+        // If a future refactor renames a field or boxes a Vec, this test
+        // breaks at the construction site rather than deep inside the layer.
+        let cfg = CorsConfig {
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec![Method::Get, Method::Post],
+            allow_headers: vec!["content-type".to_string()],
+            max_age: 600,
+        };
+        assert_eq!(cfg.allow_origins, vec!["https://example.com".to_string()]);
+        assert_eq!(cfg.allow_methods, vec![Method::Get, Method::Post]);
+        assert_eq!(cfg.allow_headers, vec!["content-type".to_string()]);
+        assert_eq!(cfg.max_age, 600);
     }
 
     #[test]

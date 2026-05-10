@@ -4,10 +4,15 @@
 //! optional CORS/TLS settings, an [`EndpointRegistry`] for routes registered
 //! via [`JoltServer::endpoint`], plus a [`JoltServer::start`] entry point that
 //! binds an axum [`Router`] on `0.0.0.0:port` with graceful shutdown driven by
-//! `tokio::signal` (SIGINT plus SIGTERM on unix). [`CorsConfig`] and
-//! [`TlsConfig`] remain stub markers whose fields are filled in when the
-//! corresponding middleware/TLS phases land — keeping them as nameable types
-//! now lets the builder surface compile against a stable shape.
+//! `tokio::signal` (SIGINT plus SIGTERM on unix).
+//!
+//! [`CorsConfig`] (JOLT-RS-055) carries the four CORS knobs the upcoming
+//! [`tower::Layer`](::tower::Layer) impls in JOLT-RS-056..058 read at request
+//! time: `allow_origins`, `allow_methods`, `allow_headers`, and `max_age`. The
+//! [`Default`] impl produces an empty/restrictive config (no origins, no
+//! methods, no headers, `max_age = 0`) — opening up CORS is an explicit
+//! caller decision, never the default. [`TlsConfig`] remains a stub marker
+//! whose fields are filled in when the TLS phase lands.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -16,10 +21,34 @@ use axum::Router;
 
 use crate::endpoint::Endpoint;
 use crate::endpoint_registry::EndpointRegistry;
+use crate::method::Method;
 use crate::registered_endpoint::RegisteredEndpoint;
 
-#[derive(Debug)]
-pub struct CorsConfig;
+/// Per-server CORS configuration consumed by the CORS [`tower::Layer`] landing
+/// in JOLT-RS-056..058.
+///
+/// Fields mirror the CORS preflight response headers verbatim:
+/// - `allow_origins` → `Access-Control-Allow-Origin` candidates. A single `"*"`
+///   entry is the conventional wildcard; multiple entries imply per-request
+///   origin matching against the request's `Origin` header.
+/// - `allow_methods` → `Access-Control-Allow-Methods`. Held as Jolt's
+///   [`Method`] enum so the CORS layer can serialize via [`Method::as_str`]
+///   without re-parsing strings.
+/// - `allow_headers` → `Access-Control-Allow-Headers`.
+/// - `max_age` → `Access-Control-Max-Age` (seconds the browser may cache the
+///   preflight). `u32` covers RFC 6454's effective range without sign concerns.
+///
+/// [`Default`] returns an empty/restrictive config: no origins, no methods,
+/// no headers, `max_age = 0`. Callers who want permissive behavior must set
+/// the fields explicitly — defaults intentionally do NOT enable CORS for any
+/// origin, mirroring how a server with no CORS layer at all would respond.
+#[derive(Debug, Clone, Default)]
+pub struct CorsConfig {
+    pub allow_origins: Vec<String>,
+    pub allow_methods: Vec<Method>,
+    pub allow_headers: Vec<String>,
+    pub max_age: u32,
+}
 
 #[derive(Debug)]
 pub struct TlsConfig;
