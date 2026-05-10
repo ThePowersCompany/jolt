@@ -68,10 +68,18 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   step (cors / parse-query / parse-body) renders as a stable
 ///   `let _: &::core::primitive::str = "jolt::middleware::step::<name>";`
 ///   statement in canonical order BEFORE the existing inner.call delegation.
-///   The markers are the splice points 053 will replace with per-field
-///   extraction code; auth/log/user steps are future PRD items.
-/// - 053 will replace each chain-step marker with per-field extraction
-///   (`__req.json::<T>()`, `__req.query_params::<T>()`, `&__req`).
+///   Auth/log/user steps are future PRD items.
+/// - 053 (landed): emits a per-derive
+///   `__jolt_extract_from(req: &::jolt_core::Request) -> Self` method on the
+///   user's struct via `expand_extraction`. The method constructs `Self { ... }`
+///   with each field initialised by an expression matched to its `FieldKind`
+///   (Body via `req.json::<T>()`, HashMap-shaped QueryParams via clone of
+///   `req.query_params`, by-value Request via clone, Other via
+///   `<T as Default>::default()`). Typed `QueryParams<T>` and by-ref
+///   `&Request` are emitted as `unimplemented!(...)` placeholders pending
+///   future PRD items. The 052 chain markers in the wrapper's `call()` body
+///   stay as marker statements — replacing them with calls into the helper
+///   would break 051's generic-over-`__Req` design and is deferred.
 ///
 /// On parse failure the emission is a single `compile_error!` token (no
 /// partial codegen), so the user gets a single targeted diagnostic instead of

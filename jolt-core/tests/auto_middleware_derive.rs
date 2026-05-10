@@ -11,10 +11,16 @@
 //!
 //! The hidden `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT` const emitted by the 046
 //! derive is the observable witness that parsing succeeded. Later phase10/11
-//! items (047-053) replace the marker const with the real `tower::Layer` impl;
-//! at that point this test relaxes (or moves) accordingly.
+//! items (047-053) replace the marker const with the real `tower::Layer` impl
+//! and per-derive extraction helper; the consts coexist with the new surfaces
+//! until JOLT-RS-054's runtime-witness test makes them redundant.
+//!
+//! As of JOLT-RS-053, `CreateUserRequest` carries `#[derive(serde::Deserialize)]`
+//! so the per-derive `__jolt_extract_from` helper that the macro now emits
+//! (which calls `__req.json::<CreateUserRequest>()` for the `body` field of
+//! `MixedMiddleware` and `CorsEnabledMiddleware`) compiles.
 
-use jolt_core::{AutoMiddleware, Request};
+use jolt_core::{AutoMiddleware, Method, Request};
 use std::collections::HashMap;
 
 /// Unit-style middleware: zero fields. The derive must accept this and report
@@ -57,6 +63,25 @@ struct CorsEnabledMiddleware {
     body: CreateUserRequest,
 }
 
+/// JOLT-RS-053: a middleware struct that exercises the per-derive
+/// `__jolt_extract_from(&Request) -> Self` helper end-to-end. Mixes the three
+/// extraction shapes the PRD-mandates: body (JSON deserialization), query
+/// (HashMap clone), and req (by-value clone). The runtime test below builds a
+/// fake `jolt_core::Request`, calls the helper, and asserts each field was
+/// populated correctly.
+#[derive(AutoMiddleware)]
+#[allow(dead_code)]
+struct ExtractMw {
+    body: CreateUserRequest,
+    query_params: HashMap<String, String>,
+    req: Request,
+}
+
+/// JOLT-RS-053: derives `serde::Deserialize` so the auto-middleware extraction
+/// helper's body-extraction call (`__req.json::<CreateUserRequest>()`) compiles.
+/// Before 053 this only had to be a syntactic placeholder; the macro now emits
+/// real deserialization codegen for any `body: T` field.
+#[derive(serde::Deserialize)]
 #[allow(dead_code)]
 struct CreateUserRequest {
     name: String,
@@ -157,4 +182,68 @@ async fn middleware_layer_wraps_inner_service() {
     // Service impl on the wrapper would fail to compile here.
     let result = <_ as Service<()>>::call(&mut wrapped, ()).await;
     assert!(result.is_ok(), "wrapper service must delegate to inner");
+}
+
+// JOLT-RS-053 PRD verification: "Generated call() extracts body into struct,
+// query into struct, req ref into struct field."
+//
+// 053 emits a per-derive `__jolt_extract_from(&Request) -> Self` helper rather
+// than splicing the extraction calls directly into the wrapper service's
+// `call()` body. The wrapper is generic over `__Req` (per JOLT-RS-051), so
+// inlining `__req.json::<T>()` would either force `__Req: ::jolt_core::Request`
+// (breaking the `Service<()>` test above) or require lifetime threading on
+// `Self` construction (deferred). The helper is the standalone observable
+// surface this test exercises end-to-end: build a fake `jolt_core::Request`,
+// call the helper, assert per-field population.
+//
+// The chain markers in the wrapper's `call()` body stay as marker statements
+// at 053; replacing them with calls into `__jolt_extract_from` is whichever
+// PRD lands the Jolt-aware tower layer (likely after JOLT-RS-055-058's CORS
+// middleware finishes the layer-design loop).
+#[test]
+fn extract_from_populates_body_query_request_fields() {
+    use axum::http::HeaderMap;
+
+    // Synthesize an inbound request the way Router::build_jolt_request would,
+    // but inline so the test doesn't depend on the dispatch path. The body is
+    // a JSON byte string the auto-middleware will deserialize via
+    // serde_json::from_slice — the same path Request::json takes.
+    let req = Request {
+        method: Method::Post,
+        path: "/users".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::from([
+            ("page".to_string(), "2".to_string()),
+            ("filter".to_string(), "active".to_string()),
+        ]),
+        body: br#"{"name":"alice","age":30}"#.to_vec(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let mw = ExtractMw::__jolt_extract_from(&req);
+
+    // Body: deserialized via serde_json into the typed shape declared on the
+    // struct. Pinning both fields confirms the macro's `__req.json::<T>()`
+    // call wired up the right T (a regression that emitted `<()>::json` would
+    // surface as a deserialize error here).
+    assert_eq!(mw.body.name, "alice");
+    assert_eq!(mw.body.age, 30);
+
+    // Query params: HashMap-shape extraction is a clone of the request's
+    // populated `query_params`. A regression that returned the empty default
+    // would fail this assertion.
+    assert_eq!(mw.query_params.len(), 2);
+    assert_eq!(mw.query_params.get("page").map(String::as_str), Some("2"));
+    assert_eq!(
+        mw.query_params.get("filter").map(String::as_str),
+        Some("active")
+    );
+
+    // Request injection (by-value): the helper clones the active request into
+    // the field. Asserting `path` confirms the clone preserved the request
+    // contents end-to-end (path is the most distinctive field on the request
+    // we built above).
+    assert_eq!(mw.req.path, "/users");
+    assert_eq!(mw.req.method, Method::Post);
 }

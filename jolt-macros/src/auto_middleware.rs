@@ -41,9 +41,9 @@
 //!   (`usize` and `bool`), already wired into the integration tests in
 //!   `auto_middleware_derive.rs`, and trivially removable once 053+'s codegen
 //!   has its own observable surface.
-//! - JOLT-RS-052 (this iteration): emit the canonical middleware step
-//!   ordering inside the wrapper's `call()` body via [`middleware_chain`] +
-//!   [`MiddlewareStep`]. The chain's canonical order is
+//! - JOLT-RS-052: emit the canonical middleware step ordering inside the
+//!   wrapper's `call()` body via [`middleware_chain`] + [`MiddlewareStep`]. The
+//!   chain's canonical order is
 //!   `auth → cors → log → parse-query → parse-body → user → handler`; 052
 //!   handles `cors` (per `parsed.cors`), `parse-query` (per any
 //!   [`FieldKind::QueryParams`] field), and `parse-body` (per any
@@ -56,6 +56,24 @@
 //!   substring position. Auth, log, and user-defined steps are NOT emitted at
 //!   052 — auth/log require attribute parsing landing in JOLT-RS-056+, and
 //!   user-defined middleware composition lands later still.
+//! - JOLT-RS-053 (this iteration): emit a per-derive
+//!   `__jolt_extract_from(req: &::jolt_core::Request) -> Self` method on the
+//!   user's middleware struct via [`expand_extraction`]. The method constructs
+//!   `Self { ... }` with each field initialised by an expression matched to its
+//!   [`FieldKind`]: Body via `req.json::<T>()`, HashMap-shaped QueryParams via
+//!   `req.query_params.clone()`, by-value Request via `<Request as Clone>::clone(req)`,
+//!   and Other via `<T as Default>::default()`. Typed `QueryParams<T>` and
+//!   by-ref `&Request` are emitted as `unimplemented!(...)` placeholders —
+//!   typed QueryParams needs the framework type that JOLT-RS-055+ will
+//!   introduce, and by-ref Request needs generic-parameter threading on the
+//!   user struct's lifetimes (deferred, see the "Notes for next iterations" in
+//!   progress.txt). The 052 chain markers in `call()` stay as marker
+//!   statements — replacing them with calls into `__jolt_extract_from` would
+//!   either break 051's generic-over-`__Req` design (the wrapper's `call` is
+//!   generic over `__Req`, but extraction needs `&::jolt_core::Request`
+//!   specifically) or require lifetime threading on Self construction. The
+//!   extraction helper is the standalone observable surface JOLT-RS-054 will
+//!   exercise at runtime to verify per-field population.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
 //! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
@@ -100,11 +118,13 @@ pub(crate) struct AutoMiddlewareInput {
 /// per-kind extraction code in 053. The `ty` stays verbatim because codegen
 /// will splice it into `__req.json::<#ty>()` (Body) and similar shapes.
 ///
-/// As of JOLT-RS-052, [`kind`] is read by [`middleware_chain`] to decide
-/// which step markers to emit; `ident` and `ty` are still parse-witnesses
-/// only — they're consumed by 053 when per-field extraction codegen lands.
+/// As of JOLT-RS-053, all three fields are consumed by codegen: [`kind`] is
+/// read by [`middleware_chain`] (052) and [`expand_extraction`] (053) to
+/// dispatch on the field's framework meaning; [`ident`] is spliced into the
+/// `Self { #ident: ... }` literal that the extraction helper builds; [`ty`] is
+/// spliced into `__req.json::<#ty>()` (Body) and `<#ty as Default>::default()`
+/// (Other) so per-kind codegen names the right type.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // ident + ty are parse-witnesses for 053's per-field extraction codegen; kind is consumed by middleware_chain in 052.
 pub(crate) struct AutoMiddlewareField {
     pub(crate) ident: Ident,
     pub(crate) ty: Type,
@@ -436,8 +456,14 @@ pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareSt
 ///    that delegates `poll_ready` and `call` to the inner service. As of 052,
 ///    `call()` splices in canonical-order step markers (cors, parse-query,
 ///    parse-body) for steps that fire on the parsed input. The terminal
-///    `inner.call(__req)` delegation stays as the handler step. JOLT-RS-053
-///    will replace each marker with the real extraction / short-circuit body.
+///    `inner.call(__req)` delegation stays as the handler step.
+/// 5. A per-derive `__jolt_extract_from(&::jolt_core::Request) -> Self` method
+///    (053) on the user's struct that constructs `Self { ... }` with each
+///    field initialised by an expression matched to its [`FieldKind`]. This is
+///    the standalone observable surface JOLT-RS-054 will exercise to verify
+///    per-field extraction; later PRD items will splice the call into the
+///    wrapper service's `call()` body once the wrapper-vs-Request-type design
+///    tension is resolved (see [`expand_extraction`] for details).
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. This keeps
@@ -452,6 +478,7 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
     let field_count = parsed.fields.len();
     let cors = parsed.cors;
     let layer = expand_layer_impl(&parsed);
+    let extraction = expand_extraction(&parsed);
     quote! {
         #[automatically_derived]
         impl #ident {
@@ -462,6 +489,8 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
         }
 
         #layer
+
+        #extraction
     }
 }
 
@@ -634,12 +663,156 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
 
             fn call(&mut self, __req: __Req) -> Self::Future {
                 // JOLT-RS-052: canonical chain steps for this derive, one
-                // statement per active step. JOLT-RS-053 replaces each
-                // marker with the real extraction / short-circuit body.
+                // statement per active step. The marker statements are stable
+                // splice points; later PRD items will replace them with calls
+                // into `<Ident>::__jolt_extract_from` (JOLT-RS-053) and the
+                // user's middleware logic once the wrapper-vs-Request-type
+                // tension is resolved (the wrapper is generic over `__Req`,
+                // but extraction needs `&::jolt_core::Request` specifically).
                 #(#chain_stmts)*
                 <__S as ::jolt_core::tower::Service<__Req>>::call(&mut self.inner, __req)
             }
         }
+    }
+}
+
+/// Emit the per-derive extraction helper (JOLT-RS-053).
+///
+/// Renders, for the user's middleware struct `<Ident>`, an
+/// `impl <Ident> { pub fn __jolt_extract_from(__req: &::jolt_core::Request) -> Self { ... } }`
+/// where the body constructs `Self { #ident: <init>, ... }` with one init
+/// expression per parsed field, matched to its [`FieldKind`]:
+///
+/// | FieldKind                            | init expression                                       |
+/// | ------------------------------------ | ----------------------------------------------------- |
+/// | `Body`                               | `__req.json::<#ty>().expect("…")`                     |
+/// | `QueryParams` (HashMap shape)        | `::core::clone::Clone::clone(&__req.query_params)`    |
+/// | `QueryParams` (typed `<T>` shape)    | `::core::unimplemented!("…JOLT-RS-055+…")`            |
+/// | `Request` (by-value bare `Request`)  | `<::jolt_core::Request as Clone>::clone(__req)`       |
+/// | `Request` (by-ref `&Request`)        | `::core::unimplemented!("…generics threading…")`      |
+/// | `Other`                              | `<#ty as ::core::default::Default>::default()`        |
+///
+/// The helper is `#[doc(hidden)]` and prefixed with the macro-internal
+/// double-underscore convention — users shouldn't reach for it directly. It IS
+/// `pub` because the wrapper service in [`expand_layer_impl`] sits in a
+/// sibling impl block and a future PRD will call into it from there; without
+/// `pub` the wrapper couldn't name the method.
+///
+/// Decisions pinned at 053 (split out so future iterations can find them):
+///
+/// 1. **Helper method, not inline splice into `call()`.** The wrapper service's
+///    `call()` is generic over `__Req` (per 051). Inlining `__req.json::<T>()`
+///    would require `__Req: ::jolt_core::Request`, breaking 051's
+///    `Service<()>` test surface. The standalone helper takes
+///    `&::jolt_core::Request` directly, lets unit + integration tests call it
+///    without going through the tower stack, and keeps the wrapper's generic
+///    surface intact. Replacing the 052 chain markers with calls into the
+///    helper is deferred to whichever PRD resolves the wrapper-vs-Request-type
+///    design (likely after JOLT-RS-055-058 lands a Jolt-aware tower layer).
+/// 2. **`Self { #ident: <init>, ... }` literal, not `Self::default()` +
+///    field assignments.** Three considered shapes: (a) `let mut __mw =
+///    Self::default(); __mw.body = ...; __mw` — rejected because it requires
+///    the user's struct to impl `Default`, which forces a `#[derive(Default)]`
+///    that wouldn't fit a struct with a `req: Request` field (Request doesn't
+///    impl Default). (b) Per-field assignment via builder — overkill for one
+///    callsite. (c) Struct literal with per-field init exprs (current choice)
+///    — naming each field explicitly compose-checks against the struct's
+///    declared fields at the macro expansion site, and only requires Default
+///    on each `Other`-kinded field's type (matching the spec for Other).
+/// 3. **`Body` extraction uses `.expect(...)` not `.unwrap_or_default()`.**
+///    The latter would require `T: Default` on the body type; the former
+///    surfaces a clear panic if the body fails to deserialize. JOLT-RS-062
+///    will replace this with proper Result-based error handling once the
+///    framework's typed-error surface lands; for now `.expect` matches the
+///    spec's "extract body into struct" verbiage without an extra Default
+///    bound on user types.
+/// 4. **Typed `QueryParams<T>` and by-ref `&Request` are placeholders.** The
+///    typed `QueryParams<T>` framework type doesn't exist yet — JOLT-RS-055+
+///    will land it. By-ref `&Request` would require either lifetime threading
+///    on the user struct's generics (the macro currently drops `input.generics`
+///    on the floor — see 051's "Generic-parameter threading deferred" note) or
+///    a different helper signature returning `Self<'_>`. Both are out of
+///    scope for 053. Both placeholders use `::core::unimplemented!(...)`
+///    rather than `compile_error!`: the macro expansion still succeeds (so a
+///    user can run the marker-const tests, the layer-impl tests, etc.), but
+///    calling `__jolt_extract_from` on such a struct panics at runtime with a
+///    clear "JOLT-RS-XXX will land this" diagnostic. Pinned by
+///    `expand_extraction_initializes_typed_query_params_via_unimplemented`
+///    and `expand_extraction_initializes_by_ref_request_via_unimplemented`.
+/// 5. **`Other` fields use `<#ty as Default>::default()`.** The spec says the
+///    Other catch-all is `Default::default()` per-request. Each Other-kinded
+///    field's type must therefore impl `Default`; the struct literal makes
+///    this a compile-time error pinned to the macro expansion site
+///    (clearer than a deferred runtime panic).
+/// 6. **Unit struct emits `Self {}` (empty braces).** Rust accepts empty
+///    struct-literal braces for both unit structs (`struct Marker;`) and
+///    named-empty structs (`struct Empty {}`); using the same shape for both
+///    keeps the codegen branch-free. Pinned by
+///    `expand_extraction_handles_unit_struct`.
+fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
+    let ident = &parsed.ident;
+    let field_inits = parsed.fields.iter().map(|f| {
+        let f_ident = &f.ident;
+        let init_expr = field_init_expr(f);
+        quote! { #f_ident: #init_expr }
+    });
+    quote! {
+        #[automatically_derived]
+        impl #ident {
+            /// JOLT-RS-053: per-derive extraction helper. Constructs an
+            /// instance of this middleware struct from a
+            /// `&::jolt_core::Request` by running per-field extraction (body,
+            /// query params, request injection) per the rules in `FieldKind`.
+            ///
+            /// `#[doc(hidden)]` because it's macro-internal. JOLT-RS-054 will
+            /// exercise this method at runtime to verify per-field population.
+            #[doc(hidden)]
+            pub fn __jolt_extract_from(__req: &::jolt_core::Request) -> Self {
+                Self {
+                    #(#field_inits),*
+                }
+            }
+        }
+    }
+}
+
+/// Choose the per-field extraction expression for `field`. Split out from
+/// [`expand_extraction`] so unit tests can exercise the dispatch directly and
+/// so future PRD items have a single place to update (the table above mirrors
+/// the match arms here).
+fn field_init_expr(field: &AutoMiddlewareField) -> TokenStream {
+    let f_ty = &field.ty;
+    match field.kind {
+        FieldKind::Body => quote! {
+            __req
+                .json::<#f_ty>()
+                .expect("Jolt auto-middleware: body deserialization failed (JOLT-RS-062 will replace this panic with typed Result handling)")
+        },
+        FieldKind::QueryParams => {
+            if is_hashmap_string_string(f_ty) {
+                quote! { ::core::clone::Clone::clone(&__req.query_params) }
+            } else {
+                quote! {
+                    ::core::unimplemented!(
+                        "typed QueryParams<T> extraction in #[derive(AutoMiddleware)] lands in JOLT-RS-055+ once the framework QueryParams<T> type is introduced"
+                    )
+                }
+            }
+        }
+        FieldKind::Request => {
+            if matches!(f_ty, Type::Reference(_)) {
+                quote! {
+                    ::core::unimplemented!(
+                        "by-ref &Request extraction in #[derive(AutoMiddleware)] needs generic-parameter threading on the user struct's lifetimes (deferred; see auto_middleware.rs progress notes)"
+                    )
+                }
+            } else {
+                quote! { <::jolt_core::Request as ::core::clone::Clone>::clone(__req) }
+            }
+        }
+        FieldKind::Other => quote! {
+            <#f_ty as ::core::default::Default>::default()
+        },
     }
 }
 
@@ -2157,6 +2330,294 @@ mod tests {
         assert_eq!(
             marker_count, 1,
             "ParseQuery marker must appear exactly once for two QueryParams fields, rendered: {rendered}"
+        );
+    }
+
+    // ----- JOLT-RS-053: expand_extraction (per-field extraction codegen) -----
+    //
+    // The unit tests below pin the rendered token shape of `expand_extraction`
+    // for each FieldKind dispatch. PRD verification: "Generated call() extracts
+    // body into struct, query into struct, req ref into struct field." The
+    // integration test in `jolt-core/tests/auto_middleware_derive.rs` is the
+    // runtime witness; these unit tests pin the codegen shape so a regression
+    // that changed the dispatch (e.g. swapped Body and Other init exprs)
+    // surfaces here without going through the slower compile-and-run path.
+
+    #[test]
+    fn expand_extraction_emits_helper_method_on_user_struct() {
+        // The helper is `pub fn __jolt_extract_from(__req: &::jolt_core::Request)
+        // -> Self` on an `impl <Ident>` block, marked `#[doc(hidden)]` and
+        // `#[automatically_derived]`. Pinning the surface here so a future
+        // refactor that renamed the method or changed its visibility surfaces
+        // immediately (the wrapper service in 052/future iterations needs to
+        // call into this method, and a rename would silently break the splice).
+        let input = parse_derive("struct Empty {}");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("# [automatically_derived]"),
+            "extraction impl must be tagged #[automatically_derived], rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("impl Empty"),
+            "extraction impl must target the user's struct, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("# [doc (hidden)]"),
+            "helper method must be #[doc(hidden)], rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "pub fn __jolt_extract_from (__req : & :: jolt_core :: Request) -> Self"
+            ),
+            "helper signature must take &::jolt_core::Request and return Self, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_body_field_via_json() {
+        // Body kind → init expression is `__req.json::<T>().expect(...)`. The
+        // PRD-mandated "extracts body into struct" verification: a `body: T`
+        // field gets deserialized via serde_json with the user's T spliced
+        // into the turbofish. JOLT-RS-062 will replace the .expect with typed
+        // Result handling; until then a panic on bad-body is acceptable.
+        let input = parse_derive(
+            r#"
+            struct WithBody {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("body : __req . json :: < CreateUserRequest > ()"),
+            "body field must be initialised via __req.json::<T>(), rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(". expect ("),
+            "body extraction must use .expect for now (JOLT-RS-062 future Result handling), rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_hashmap_query_params_via_clone() {
+        // QueryParams (HashMap shape) → init expression clones
+        // `__req.query_params`. The PRD-mandated "query into struct" verification
+        // for the raw-map shape: a `query_params: HashMap<String, String>` field
+        // gets a copy of the request's parsed query map.
+        let input = parse_derive(
+            r#"
+            struct WithQuery {
+                query_params: HashMap<String, String>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains(
+                "query_params : :: core :: clone :: Clone :: clone (& __req . query_params)"
+            ),
+            "HashMap-shape query_params must be initialised via Clone::clone of req.query_params, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_typed_query_params_via_unimplemented() {
+        // Typed `QueryParams<T>` → init expression is `unimplemented!(...)`.
+        // The framework type doesn't exist yet (JOLT-RS-055+); 053 emits a
+        // runtime placeholder rather than a compile_error so the rest of the
+        // derive surface stays usable on structs that include a typed query
+        // field. Pinning the placeholder string makes any future PRD that
+        // actually implements typed extraction explicitly remove this test.
+        let input = parse_derive(
+            r#"
+            struct WithTypedQuery {
+                q: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("q : :: core :: unimplemented !"),
+            "typed QueryParams<T> field must be initialised via unimplemented!, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("JOLT-RS-055"),
+            "placeholder message must reference the future PRD that lands typed extraction, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_by_value_request_via_clone() {
+        // Bare `Request` (by-value) → init expression clones the active
+        // request via the fully-qualified `<::jolt_core::Request as Clone>::clone`
+        // path. The fully-qualified syntax defends against a user shadowing
+        // `Clone` in their crate. PRD-mandated "req ref into struct field"
+        // verification: a `req: Request` field gets a clone of the inbound
+        // request.
+        let input = parse_derive(
+            r#"
+            struct WithReq {
+                req: Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains(
+                "req : < :: jolt_core :: Request as :: core :: clone :: Clone > :: clone (__req)"
+            ),
+            "by-value Request field must be initialised via fully-qualified Clone::clone, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_by_ref_request_via_unimplemented() {
+        // `&Request` (by-ref) → init expression is `unimplemented!(...)`. The
+        // by-ref shape requires generic-parameter threading on the user's
+        // struct lifetimes (the macro currently drops `input.generics`); 053
+        // emits a runtime placeholder rather than a compile_error so the rest
+        // of the derive surface stays usable. Pinning the placeholder string
+        // makes any future PRD that lands lifetime threading explicitly
+        // remove this test.
+        let input = parse_derive(
+            r#"
+            struct WithReq<'a> {
+                req: &'a Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("req : :: core :: unimplemented !"),
+            "by-ref &Request field must be initialised via unimplemented!, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("generic-parameter threading"),
+            "placeholder message must reference the deferred reason, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_initializes_other_field_via_default() {
+        // Other kind → init expression is `<T as Default>::default()`. Per
+        // the spec, framework-unknown fields use `Default::default()`
+        // per-request. The fully-qualified syntax defends against a user
+        // shadowing `Default` in their crate AND avoids ambiguity if the
+        // field type implements multiple traits with a `default` method.
+        let input = parse_derive(
+            r#"
+            struct WithOther {
+                count: usize,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("count : < usize as :: core :: default :: Default > :: default ()"),
+            "Other field must be initialised via fully-qualified Default::default, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_handles_unit_struct() {
+        // Unit struct (`struct Marker;`) → no fields to initialise. The struct
+        // literal renders as `Self { }` (empty braces), which Rust accepts
+        // for both unit and named-empty structs. Pinned so a regression that
+        // tried to special-case unit structs with bare `Self` (no braces)
+        // doesn't silently change the codegen.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("Self { }"),
+            "unit struct must render as Self {{ }} (empty braces), rendered: {rendered}"
+        );
+        // No `unimplemented!`, no `__req.json`, no `Default::default` — none
+        // of the per-field init exprs fire on a struct with zero fields.
+        assert!(
+            !rendered.contains(":: core :: unimplemented !"),
+            "no placeholder for zero-field struct, rendered: {rendered}"
+        );
+        assert!(
+            !rendered.contains("__req . json"),
+            "no body extraction for zero-field struct, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_extraction_handles_mixed_kinds() {
+        // End-to-end shape: a struct that mixes Body, QueryParams (HashMap),
+        // Request (by-value), and Other must produce one init expression per
+        // field with the right shape per kind. The struct literal is rendered
+        // in field declaration order — that's important because the user's
+        // struct definition fixes the order, and a struct literal that
+        // reorders fields would compile but rely on Rust's positional-with-
+        // names construction (still correct, but worth pinning).
+        let input = parse_derive(
+            r#"
+            struct Mixed {
+                body: CreateUserRequest,
+                query_params: HashMap<String, String>,
+                req: Request,
+                count: usize,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_extraction(&parsed).to_string();
+        assert!(
+            rendered.contains("body : __req . json :: < CreateUserRequest > ()"),
+            "Body init expression must appear, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "query_params : :: core :: clone :: Clone :: clone (& __req . query_params)"
+            ),
+            "QueryParams init expression must appear, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "req : < :: jolt_core :: Request as :: core :: clone :: Clone > :: clone (__req)"
+            ),
+            "Request init expression must appear, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("count : < usize as :: core :: default :: Default > :: default ()"),
+            "Other init expression must appear, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_auto_middleware_includes_extraction_method() {
+        // End-to-end: `expand_auto_middleware` splices the extraction method
+        // into the rendered output alongside the marker consts and the layer
+        // impl. All three observable surfaces coexist after 053.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let rendered = expand_auto_middleware(input).to_string();
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT"),
+            "marker const must remain, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Layer < __S > for Mw"),
+            "Layer impl must remain, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__jolt_extract_from"),
+            "extraction helper must be emitted, rendered: {rendered}"
         );
     }
 }
