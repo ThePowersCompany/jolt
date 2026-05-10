@@ -60,10 +60,28 @@
 //!    `&str` because it serializes the path into a `MigrationFile.path`
 //!    field whose API is `&str`-typed; this constructor has no such
 //!    constraint and benefits from the broader signature.
+//!
+//! 6. **`render` pre-checks template registration before delegating.** The
+//!    upstream [`handlebars::Handlebars::render`] surfaces an unregistered
+//!    template as a [`handlebars::RenderError`] whose
+//!    [`handlebars::RenderErrorReason`] is `TemplateNotFound`; callers who
+//!    want to map missing templates to a 404 (HTTP) or a fallback render
+//!    have to either string-match or `match` on the non-exhaustive upstream
+//!    enum. The dedicated [`TemplateRenderError::TemplateNotFound`] variant
+//!    front-loads that branch — [`TemplateEngine::render`] checks
+//!    [`handlebars::Handlebars::has_template`] first and short-circuits
+//!    without calling into the upstream renderer when the name is not
+//!    registered. The rest of the render-time failure modes (missing
+//!    variable in strict mode, helper failure, serde error, etc.) come
+//!    back wrapped in the catch-all [`TemplateRenderError::Render`]
+//!    variant, which exposes the upstream error via [`std::error::Error`]
+//!    so the JOLT-RS-109 closing-test bundle can pin specific failure
+//!    classes without re-implementing the wrapper.
 
 use std::path::Path;
 
 use handlebars::{DirectorySourceOptions, Handlebars};
+use serde::Serialize;
 
 /// Failure modes for [`TemplateEngine::new`].
 #[derive(Debug)]
@@ -102,6 +120,47 @@ impl From<std::io::Error> for TemplateInitError {
 impl From<handlebars::TemplateError> for TemplateInitError {
     fn from(e: handlebars::TemplateError) -> Self {
         TemplateInitError::Template(e)
+    }
+}
+
+/// Failure modes for [`TemplateEngine::render`].
+#[derive(Debug)]
+pub enum TemplateRenderError {
+    /// No template with the given name is registered with the engine.
+    /// Carries the unresolved name so callers can surface it (e.g. as a
+    /// 404 body) without re-deriving it from the request.
+    TemplateNotFound(String),
+    /// The upstream renderer rejected the template/data combination
+    /// (missing variable in strict mode, helper failure, serde error,
+    /// etc.). The wrapped [`handlebars::RenderError`] is preserved so
+    /// callers can downcast via [`std::error::Error::source`] to inspect
+    /// the upstream [`handlebars::RenderErrorReason`].
+    Render(handlebars::RenderError),
+}
+
+impl std::fmt::Display for TemplateRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateRenderError::TemplateNotFound(name) => {
+                write!(f, "template not found: {name}")
+            }
+            TemplateRenderError::Render(e) => write!(f, "template render error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TemplateRenderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TemplateRenderError::TemplateNotFound(_) => None,
+            TemplateRenderError::Render(e) => Some(e),
+        }
+    }
+}
+
+impl From<handlebars::RenderError> for TemplateRenderError {
+    fn from(e: handlebars::RenderError) -> Self {
+        TemplateRenderError::Render(e)
     }
 }
 
@@ -160,11 +219,31 @@ impl TemplateEngine {
     pub fn template_names(&self) -> Vec<String> {
         self.registry.get_templates().keys().cloned().collect()
     }
+
+    /// Render a registered template against the supplied serializable data
+    /// and return the produced string.
+    ///
+    /// Returns [`TemplateRenderError::TemplateNotFound`] if `template` is
+    /// not registered (per decision 6, this branch short-circuits before
+    /// the upstream renderer is called) and
+    /// [`TemplateRenderError::Render`] for any other render-time failure
+    /// surfaced by [`handlebars::Handlebars::render`] (missing variable in
+    /// strict mode, helper failure, serde error, etc.).
+    pub fn render<T: Serialize>(
+        &self,
+        template: &str,
+        data: &T,
+    ) -> Result<String, TemplateRenderError> {
+        if !self.registry.has_template(template) {
+            return Err(TemplateRenderError::TemplateNotFound(template.to_string()));
+        }
+        Ok(self.registry.render(template, data)?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TemplateEngine, TemplateInitError};
+    use super::{TemplateEngine, TemplateInitError, TemplateRenderError};
 
     /// Self-cleaning temp directory used by the [`TemplateEngine::new`]
     /// tests. Each instance lives in `std::env::temp_dir()` under a
@@ -415,5 +494,156 @@ mod tests {
         let err = TemplateInitError::from(io);
         assert!(format!("{err}").contains("nope"));
         assert!(err.source().is_some(), "Io variant should expose source");
+    }
+
+    /// Compile-time pin: `TemplateEngine::render` resolves to
+    /// `(&self, &str, &T: Serialize) -> Result<String, TemplateRenderError>`.
+    /// Exercises three concrete data types (struct via `serde_json::Value`,
+    /// owned `String` map, and a unit `()` for templates with no
+    /// substitutions) so a regression that narrowed the data parameter
+    /// (e.g. to `&serde_json::Value`) breaks the build.
+    #[test]
+    fn render_signature_pins() {
+        fn _pin_value(
+            engine: &TemplateEngine,
+            data: &serde_json::Value,
+        ) -> Result<String, TemplateRenderError> {
+            engine.render("page", data)
+        }
+        fn _pin_unit(engine: &TemplateEngine) -> Result<String, TemplateRenderError> {
+            engine.render("page", &())
+        }
+        fn _pin_owned(
+            engine: &TemplateEngine,
+            name: String,
+        ) -> Result<String, TemplateRenderError> {
+            #[derive(serde::Serialize)]
+            struct Owned {
+                name: String,
+            }
+            engine.render("page", &Owned { name })
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-107: render `hello.hbs` (which
+    /// registers as `hello`) with `{ "name": "World" }` and assert the
+    /// output is exactly `"Hello World"`. This is the reason the slice
+    /// exists — a regression that broke variable substitution or template
+    /// lookup would fail this test.
+    #[test]
+    fn render_returns_template_output_with_substituted_variables() {
+        let dir = TestDir::new("render-prd");
+        dir.write_file("hello.hbs", "Hello {{name}}");
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("hello", &serde_json::json!({ "name": "World" }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "Hello World");
+    }
+
+    /// Pins decision 6: rendering an unregistered name returns
+    /// [`TemplateRenderError::TemplateNotFound`] with the requested name
+    /// preserved verbatim, NOT a wrapped upstream error. Lets HTTP layers
+    /// branch on the variant without inspecting the upstream
+    /// [`handlebars::RenderErrorReason`].
+    #[test]
+    fn render_returns_template_not_found_for_unregistered_name() {
+        let dir = TestDir::new("render-missing");
+        dir.write_file("home.hbs", "home");
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let result = engine.render("absent", &serde_json::json!({}));
+
+        match result {
+            Err(TemplateRenderError::TemplateNotFound(name)) => assert_eq!(name, "absent"),
+            Err(other) => panic!("expected TemplateNotFound, got {other:?}"),
+            Ok(_) => panic!("expected error for unregistered template, got Ok"),
+        }
+    }
+
+    /// Nested templates are looked up by their canonical
+    /// forward-slash-joined name (matching the registry contract pinned in
+    /// `new_loads_nested_templates_with_path_prefixed_names`). Pins that
+    /// the render method does not strip, normalize, or otherwise rewrite
+    /// the supplied name before the registry lookup.
+    #[test]
+    fn render_resolves_nested_template_name_verbatim() {
+        let dir = TestDir::new("render-nested");
+        dir.write_file("users/profile.hbs", "user={{user}}");
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("users/profile", &serde_json::json!({ "user": "alice" }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "user=alice");
+    }
+
+    /// Default handlebars configuration is non-strict, so a missing
+    /// variable in the data renders as an empty string rather than an
+    /// error. Pins this behavior so callers can't accidentally rely on
+    /// strict-mode semantics — the JOLT-RS-109 closing-test bundle and
+    /// any future strict-mode toggle would have to update this test.
+    #[test]
+    fn render_lenient_for_missing_variable_in_default_mode() {
+        let dir = TestDir::new("render-lenient");
+        dir.write_file("greet.hbs", "Hello {{name}}!");
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("greet", &serde_json::json!({}))
+            .expect("render succeeds (non-strict default)");
+
+        assert_eq!(out, "Hello !");
+    }
+
+    /// Renders a template registered AFTER construction via
+    /// [`TemplateEngine::registry_mut`]. Pins that `render` reads from the
+    /// same registry the post-construction registration writes to (a
+    /// regression that cloned the registry into a separate render-time
+    /// registry would silently fail this test).
+    #[test]
+    fn render_resolves_template_registered_after_construction() {
+        let dir = TestDir::new("render-post-register");
+        let mut engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+        engine
+            .registry_mut()
+            .register_template_string("dynamic", "x={{x}}")
+            .expect("register dynamic template");
+
+        let out = engine
+            .render("dynamic", &serde_json::json!({ "x": 42 }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "x=42");
+    }
+
+    /// Pins the [`TemplateRenderError`] `Display` + `source` contract,
+    /// mirroring `template_init_error_io_variant_exposes_source` for the
+    /// init-side enum. The TemplateNotFound variant is sourceless (it
+    /// originates inside this crate, not from an upstream cause); the
+    /// Render variant exposes the wrapped [`handlebars::RenderError`] so
+    /// `anyhow`/`eyre`/`Box<dyn Error>` walks through the chain.
+    #[test]
+    fn template_render_error_variants_expose_correct_source() {
+        use std::error::Error;
+
+        let nf = TemplateRenderError::TemplateNotFound("missing".to_string());
+        assert!(format!("{nf}").contains("missing"));
+        assert!(
+            nf.source().is_none(),
+            "TemplateNotFound has no upstream source"
+        );
+
+        let upstream: handlebars::RenderError =
+            handlebars::RenderErrorReason::TemplateNotFound("x".to_string()).into();
+        let wrapped = TemplateRenderError::from(upstream);
+        assert!(format!("{wrapped}").contains("template render error"));
+        assert!(
+            wrapped.source().is_some(),
+            "Render variant exposes upstream source"
+        );
     }
 }
