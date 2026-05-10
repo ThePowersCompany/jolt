@@ -524,6 +524,66 @@
 //!     no-op (a single `Notice` in Postgres logs, no error). The
 //!     PRD wording "auto-create _migrations table if not exists"
 //!     captures this requirement directly.
+//!
+//! [`JoltDb::applied_migrations`] (JOLT-RS-099) is the read-back half
+//! of the migration apply pipeline. Returns a
+//! [`HashMap`](std::collections::HashMap) keyed by migration filename
+//! with the recorded SHA-256 checksum as the value, sourced from the
+//! `_migrations` bookkeeping table that [`JoltDb::connect`] auto-creates
+//! (JOLT-RS-098, decisions 34–36). The JOLT-RS-100 apply path consumes
+//! this map to decide which discovered [`MigrationFile`] values are
+//! already on-disk-vs-DB matches (skip) and which are new (apply);
+//! JOLT-RS-102 will layer the tamper-detection check (apply-set name
+//! present but checksum differs) on top of the same read-back.
+//!
+//! 37. **Read-back shape is `HashMap<String, String>` (name → checksum),
+//!     not `Vec<AppliedMigration { name, checksum, applied_at }>`
+//!     (JOLT-RS-099).** A typed struct would carry the `applied_at`
+//!     column straight through to callers, but no part of the apply
+//!     pipeline (JOLT-RS-100 apply, JOLT-RS-102 tamper check) reads
+//!     `applied_at` — the skip / tamper / apply decision is a pure
+//!     name → checksum comparison. Returning a `HashMap` makes the
+//!     load-bearing operation (`applied.get(&file.name)`) an O(1)
+//!     lookup straight out of the verb, where a `Vec<AppliedMigration>`
+//!     would force every caller into an O(n) linear search or a
+//!     post-call `into_iter().map(...).collect::<HashMap<_,_>>()` shim.
+//!     If JOLT-RS-101's "list applied migrations" verb needs the
+//!     richer row shape (e.g. for a human-readable applied-at column
+//!     in a `jolt migrate status` listing) it can introduce a sibling
+//!     `JoltDb::applied_migration_rows() -> Vec<AppliedMigration>`
+//!     without disturbing this contract. The `applied_at` column
+//!     stays in the schema (decision 35) for operator observability
+//!     and any future listing verb to read.
+//!
+//! 38. **Method on [`JoltDb`], not a free function taking `&PgPool`
+//!     (JOLT-RS-099).** Consistent with the rest of phase19–21's
+//!     read-side surface ([`Self::health_check`], [`Self::query_as`],
+//!     [`Self::transaction`], [`Self::listen`], [`Self::notify`]) —
+//!     every verb that consumes the pool is reached via a method on
+//!     `JoltDb`, never through a free function. Keeps the discoverable
+//!     API surface for the migration pipeline grouped on the same
+//!     receiver type (alongside the future JOLT-RS-100 `migrate` /
+//!     JOLT-RS-101 listing verbs), avoids forcing callers to thread
+//!     `db.pool()` separately, and preserves the "JoltDb owns the
+//!     pool" abstraction (decision 5) end-to-end.
+//!
+//! 39. **Skip-decision is a one-liner at the call site
+//!     (`applied.get(&f.name) == Some(&f.checksum)`), not a
+//!     `pending_migrations(files, applied) -> Vec<MigrationFile>`
+//!     helper (JOLT-RS-099).** The PRD-099 "skip migrations with
+//!     matching checksums" semantic is one option lookup + one equality
+//!     check — adding a helper would (a) duplicate the contract in two
+//!     places (the helper body + the documented invariant on
+//!     [`Self::applied_migrations`]) and (b) lock in a "skip vs apply"
+//!     binary that JOLT-RS-102 will need to split three ways (skip on
+//!     match, error on mismatch, apply on missing). Leaving the
+//!     decision at the call site lets the JOLT-RS-100 apply loop
+//!     express the three-way fork as a single `match` against
+//!     `applied.get(&f.name)` (`Some(c) if c == &f.checksum => skip`,
+//!     `Some(_) => tamper-error (102)`, `None => apply`) without an
+//!     intermediate helper to evolve in lock-step. The skip invariant
+//!     is documented on [`Self::applied_migrations`] and pinned by a
+//!     dedicated unit test.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -852,6 +912,50 @@ impl JoltDb {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Read the `_migrations` bookkeeping table and return a
+    /// [`HashMap`](std::collections::HashMap) keyed by migration filename
+    /// with the recorded SHA-256 checksum as the value (JOLT-RS-099).
+    ///
+    /// See module docs decisions 37–39 for the architectural contract:
+    /// `HashMap<String, String>` read-back shape (not a typed struct),
+    /// method on [`JoltDb`] (not a free function), and the skip-decision
+    /// semantic that the JOLT-RS-100 apply path layers on top.
+    ///
+    /// The skip invariant for the JOLT-RS-100 apply loop: a discovered
+    /// [`MigrationFile`] `f` is already applied (and should be skipped)
+    /// when `applied.get(&f.name) == Some(&f.checksum)`. A name present
+    /// with a *different* checksum is the JOLT-RS-102 tamper case
+    /// (handled when that slice lands). A name not present at all is a
+    /// new migration that JOLT-RS-100 will apply.
+    ///
+    /// Reads `name` and `checksum` only; the `applied_at` column is
+    /// intentionally not surfaced (decision 37). Returns the raw
+    /// [`sqlx::Error`] (decision 6) on any read failure (acquire
+    /// timeout, connection drop, `_migrations` missing because a caller
+    /// constructed a `JoltDb` bypassing [`Self::connect`], etc.).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let files = jolt_db::read_migration_files("./migrations")?;
+    /// let applied = db.applied_migrations().await?;
+    /// for f in &files {
+    ///     if applied.get(&f.name) == Some(&f.checksum) {
+    ///         continue; // already applied with matching checksum — skip
+    ///     }
+    ///     // apply f (JOLT-RS-100)
+    /// }
+    /// ```
+    pub async fn applied_migrations(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, checksum FROM _migrations")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
     }
 }
 
@@ -2080,5 +2184,182 @@ mod tests {
         let _db2 = JoltDb::connect(&cfg)
             .await
             .expect("second connect should be idempotent");
+    }
+
+    // ---- JOLT-RS-099: JoltDb::applied_migrations ----
+
+    /// Compile-time pin: `db.applied_migrations()` resolves to
+    /// `Result<HashMap<String, String>, sqlx::Error>` (decisions
+    /// 37, 38). The explicit return annotation forces the typecheck —
+    /// a regression that swaps in `Vec<AppliedMigration>`, wraps the
+    /// error in a custom enum, or moves the verb off of `JoltDb`
+    /// breaks this build pin without needing a live Postgres.
+    #[test]
+    fn applied_migrations_signature_returns_hash_map() {
+        async fn _pin(
+            db: &JoltDb,
+        ) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+            db.applied_migrations().await
+        }
+    }
+
+    /// Pure unit pin for the JOLT-RS-099 skip-decision invariant
+    /// (decision 39): a [`MigrationFile`] is considered already-applied
+    /// (and JOLT-RS-100 must skip it) iff
+    /// `applied.get(&f.name) == Some(&f.checksum)`. Demonstrates the
+    /// three call-site cases the apply loop will match against:
+    /// missing entry → apply, matching checksum → skip, differing
+    /// checksum → tamper (JOLT-RS-102's concern; pinned here as
+    /// "not equal" so the eventual three-way fork's middle arm
+    /// remains expressible without changing this verb).
+    #[test]
+    fn applied_migrations_skip_decision_compares_name_to_checksum() {
+        use std::collections::HashMap;
+        let f = MigrationFile {
+            name: String::from("001_init.sql"),
+            content: String::from("SELECT 1;"),
+            checksum: String::from(
+                "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+            ),
+        };
+
+        // Empty applied set: file is new → apply (skip-decision is false).
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_ne!(empty.get(&f.name), Some(&f.checksum));
+
+        // Applied set with matching checksum: skip-decision is true.
+        let mut matching = HashMap::new();
+        matching.insert(f.name.clone(), f.checksum.clone());
+        assert_eq!(matching.get(&f.name), Some(&f.checksum));
+
+        // Applied set with the same name but a different checksum:
+        // skip-decision is false (JOLT-RS-102 will surface this as a
+        // tamper error; here it must at least *not* be treated as a
+        // skip).
+        let mut tampered = HashMap::new();
+        tampered.insert(
+            f.name.clone(),
+            String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        );
+        assert_ne!(tampered.get(&f.name), Some(&f.checksum));
+    }
+
+    /// PRD-mandated verification for JOLT-RS-099 ("migration already
+    /// applied → skipped on next run"), env-gated on
+    /// `JOLT_TEST_DATABASE_URL` (same convention as 083/084/086/088/
+    /// 090/091/092/098).
+    ///
+    /// Flow: connect (auto-creates `_migrations`), truncate so the
+    /// test starts from a known-empty state, hand-insert two rows
+    /// representing previously-applied migrations, call
+    /// `applied_migrations()`, then assert the returned HashMap
+    /// matches the inserted set verbatim and that the skip-decision
+    /// invariant (decision 39) holds for both names: a freshly-
+    /// discovered [`MigrationFile`] whose name + checksum match an
+    /// entry in the map is recognized as already-applied. Also
+    /// exercises the empty-table edge case as a sibling check inside
+    /// the same test (single connect, two assertions) so the live-DB
+    /// fixture cost is amortized.
+    #[tokio::test]
+    async fn applied_migrations_round_trips_rows_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Known-empty starting state. TRUNCATE rather than DROP so the
+        // `_migrations` table itself (auto-created by `connect`) stays
+        // in place — the read-back verb requires the schema to exist.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+
+        // Empty-table case: no rows applied yet → empty HashMap. This
+        // is the "fresh DB" edge that JOLT-RS-100's apply loop will
+        // see on first invocation.
+        let empty = db
+            .applied_migrations()
+            .await
+            .expect("applied_migrations against empty _migrations should succeed");
+        assert!(
+            empty.is_empty(),
+            "expected empty HashMap from empty _migrations, got {empty:?}",
+        );
+
+        // Hand-insert two rows representing previously-applied
+        // migrations. Uses the same checksums the
+        // `read_migration_files_populates_checksum` and
+        // `sha256_hex_hashes_migration_body` tests pin against the
+        // `SELECT 1;` and `SELECT 2;` migration bodies — so the
+        // skip-decision assertion below lines up with the values
+        // `read_migration_files` would emit for the corresponding
+        // on-disk fixtures.
+        let init_checksum = sha256_hex(b"SELECT 1;");
+        let users_checksum = sha256_hex(b"SELECT 2;");
+        sqlx::query("INSERT INTO _migrations (name, checksum) VALUES ($1, $2), ($3, $4)")
+            .bind("001_init.sql")
+            .bind(&init_checksum)
+            .bind("002_users.sql")
+            .bind(&users_checksum)
+            .execute(db.pool())
+            .await
+            .expect("insert two _migrations rows");
+
+        let applied = db
+            .applied_migrations()
+            .await
+            .expect("applied_migrations after insert should succeed");
+
+        // Read-back shape: both rows come back keyed by name with the
+        // checksum as the value. Pins decision 37 (HashMap, not Vec).
+        assert_eq!(
+            applied.len(),
+            2,
+            "expected 2 entries from 2 inserted rows, got {applied:?}",
+        );
+        assert_eq!(applied.get("001_init.sql"), Some(&init_checksum));
+        assert_eq!(applied.get("002_users.sql"), Some(&users_checksum));
+
+        // Skip-decision pin (decision 39 + PRD-099 "skip migrations
+        // with matching checksums"): a discovered `MigrationFile`
+        // whose name + checksum match an entry is recognized as
+        // already-applied. This is the exact expression JOLT-RS-100's
+        // apply loop will `continue` on.
+        let init_file = MigrationFile {
+            name: String::from("001_init.sql"),
+            content: String::from("SELECT 1;"),
+            checksum: init_checksum.clone(),
+        };
+        let users_file = MigrationFile {
+            name: String::from("002_users.sql"),
+            content: String::from("SELECT 2;"),
+            checksum: users_checksum.clone(),
+        };
+        assert_eq!(applied.get(&init_file.name), Some(&init_file.checksum));
+        assert_eq!(applied.get(&users_file.name), Some(&users_file.checksum));
+
+        // A file that has not been applied yet: name missing from the
+        // HashMap entirely. This is the "apply" branch of JOLT-RS-100.
+        let new_file = MigrationFile {
+            name: String::from("003_brand_new.sql"),
+            content: String::from("SELECT 3;"),
+            checksum: sha256_hex(b"SELECT 3;"),
+        };
+        assert!(
+            !applied.contains_key(&new_file.name),
+            "expected None for a name not in _migrations, got {:?}",
+            applied.get(&new_file.name),
+        );
+
+        // Cleanup so successive test runs against the same fixture
+        // start from a known state.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
     }
 }
