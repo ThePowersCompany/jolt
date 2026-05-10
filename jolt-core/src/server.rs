@@ -18,6 +18,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 
 use axum::Router;
+use tower_http::trace::TraceLayer;
 
 use crate::endpoint::Endpoint;
 use crate::endpoint_registry::EndpointRegistry;
@@ -140,6 +141,24 @@ impl JoltServer {
         server.registry.build_router()
     }
 
+    /// Build the full serving stack: collect inventory endpoints, merge with
+    /// the user-supplied `extra_router`, and wrap the result in
+    /// [`TraceLayer::new_for_http`] so every served request emits a tower-http
+    /// trace span (JOLT-RS-068). Exposed publicly so tests can exercise the
+    /// exact stack `start` will serve without binding a TCP port.
+    ///
+    /// The TraceLayer is applied to the merged router (NOT to `extra_router`
+    /// and `inventory_router` separately) so each request produces ONE span,
+    /// not two stacked ones. Without a `tracing` subscriber installed, the
+    /// emitted events are no-ops; JOLT-RS-069 will configure the subscriber
+    /// + log format.
+    pub fn build_serving_router(self, extra_router: Router) -> Router {
+        let inventory_router = self.into_router();
+        extra_router
+            .merge(inventory_router)
+            .layer(TraceLayer::new_for_http())
+    }
+
     /// Bind the configured router on `0.0.0.0:port` and serve it until a
     /// shutdown signal arrives (SIGINT, plus SIGTERM on unix). Bind failures
     /// (port-in-use, EACCES on low ports) and signal-handler installation
@@ -152,17 +171,21 @@ impl JoltServer {
     /// route conflicts at the `merge` call, which is the right failure mode
     /// (a duplicate route is a wiring bug, not a runtime condition).
     ///
+    /// JOLT-RS-068: the merged router is wrapped in
+    /// [`TraceLayer::new_for_http`] via [`Self::build_serving_router`] before
+    /// being handed to `axum::serve`, so every served request emits a
+    /// tower-http trace span.
+    ///
     /// `self.threads` is currently advisory: the server runs on the caller's
     /// existing tokio runtime, so worker count is whatever that runtime was
     /// built with. A future runtime-build PRD item can wire `threads` through
     /// without changing this signature.
     pub async fn start(self, extra_router: Router) -> std::io::Result<()> {
         let port = self.port;
-        let inventory_router = self.into_router();
-        let merged = extra_router.merge(inventory_router);
+        let serving = self.build_serving_router(extra_router);
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, merged)
+        axum::serve(listener, serving)
             .with_graceful_shutdown(shutdown_signal())
             .await
     }

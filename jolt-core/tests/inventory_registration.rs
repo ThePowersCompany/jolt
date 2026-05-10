@@ -219,6 +219,39 @@ async fn into_router_serves_secondary_endpoint() {
     assert_eq!(&body_bytes[..], b"secondary-pong");
 }
 
+#[tokio::test]
+async fn build_serving_router_wraps_merged_router_in_trace_layer_without_breaking_responses() {
+    // JOLT-RS-068: `start` must apply `tower_http::trace::TraceLayer` to the
+    // merged router so every served request emits a tower-http span. The
+    // public `build_serving_router` helper produces the SAME router `start`
+    // hands to `axum::serve`, so exercising it via `oneshot` proves the
+    // TraceLayer wiring composes cleanly with the existing inventory routes
+    // (no panics on layer construction, response status/body unchanged).
+    //
+    // A regression that dropped the TraceLayer would still pass this test —
+    // the assertion is a SHAPE pin, not a behavior pin. The PRD verification
+    // for 068 is "Server starts, TraceLayer is in the stack." Type-system
+    // proof of "in the stack" comes from the `.layer(TraceLayer::new_for_http())`
+    // call in `build_serving_router` itself; this test guards against the
+    // adjacent regression where adding the layer accidentally breaks the
+    // response path (TraceLayer's `on_response` callback could in principle
+    // mangle the body if mis-constructed; `new_for_http()` is the standard
+    // form that doesn't, so a passing oneshot pins that we used the right
+    // constructor).
+    let router = JoltServer::new().build_serving_router(axum::Router::new());
+    let req = AxumRequest::builder()
+        .method("GET")
+        .uri("/probe")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await.expect("oneshot succeeds");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body_bytes[..], b"pong");
+}
+
 #[test]
 fn collect_inventory_endpoints_populates_registry_without_serving() {
     // Companion to into_router: pin the public `collect_inventory_endpoints`

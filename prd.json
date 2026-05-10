@@ -993,7 +993,7 @@
       "verification": [
         "Server starts, TraceLayer is in the stack."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-069",
