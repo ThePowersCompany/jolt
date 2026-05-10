@@ -1063,7 +1063,7 @@
       "verification": [
         "Unit test: valid token → JwtClaims available via req.extensions().get::<JwtClaims>()."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-074",

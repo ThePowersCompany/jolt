@@ -4173,4 +4173,82 @@ mod auth_jwt {
             "rejection must still produce 401 even without an upstream RequestExt"
         );
     }
+
+    #[tokio::test]
+    async fn valid_jwt_stashes_typed_claims_via_extension_key_jwtclaims() {
+        // PRD-mandated verification for JOLT-RS-073: "valid token → JwtClaims
+        // available via req.extensions().get::<JwtClaims>()". Pins the
+        // extension-key contract independently of the response-body echo
+        // covered by `valid_jwt_passes_through_and_inner_runs` (JOLT-RS-072):
+        // every field of JwtClaims (sub, exp, iat) must be retrievable from
+        // request extensions using the JwtClaims type as the key, with values
+        // preserved verbatim from the minted token. Downstream handlers and
+        // AutoMiddleware codegen (074+) depend on this contract.
+        let secret = b"jolt-rs-073-extension-key-contract-secret";
+        let minted_sub = "user-073-extension-key";
+        let minted_exp = now_secs() + 7200;
+        let minted_iat = now_secs();
+        let claims = JwtClaims {
+            sub: minted_sub.to_owned(),
+            exp: minted_exp,
+            iat: Some(minted_iat),
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+
+        // Inner service captures the stashed JwtClaims via the typed key and
+        // returns the field values through a side channel so the test can
+        // assert each field's exact value end-to-end. Using a side channel
+        // (rather than serializing through the response body) keeps the
+        // assertion focused on the extension-key contract itself.
+        let captured: Arc<std::sync::Mutex<Option<JwtClaims>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_for_inner = Arc::clone(&captured);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured_for_inner);
+            async move {
+                let claims = req
+                    .extensions()
+                    .get::<JwtClaims>()
+                    .expect(
+                        "AuthJwtLayer must stash JwtClaims into extensions \
+                         under the JwtClaims type key on a valid token",
+                    )
+                    .clone();
+                *captured.lock().unwrap() = Some(claims);
+                Ok::<Response, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token(&token, Arc::clone(&request_ext));
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let observed = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("inner service must have observed the stashed JwtClaims");
+        assert_eq!(
+            observed.sub, minted_sub,
+            "sub field must round-trip verbatim through the extension key"
+        );
+        assert_eq!(
+            observed.exp, minted_exp,
+            "exp field must round-trip verbatim through the extension key"
+        );
+        assert_eq!(
+            observed.iat,
+            Some(minted_iat),
+            "iat field (Option<usize>) must round-trip verbatim, preserving the Some discriminant"
+        );
+    }
 }
