@@ -461,7 +461,7 @@
       "verification": [
         "Unit test: sort [/\", \"/api/hello\", \"/api\"] \u2192 [\"/api/hello\", \"/api\", \"/\"].\""
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-031",

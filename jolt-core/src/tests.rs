@@ -925,6 +925,62 @@ mod endpoint_registry {
         let registry = EndpointRegistry::default();
         assert!(registry.is_empty());
     }
+
+    #[test]
+    fn sort_orders_paths_by_length_descending() {
+        // PRD-mandated verification for JOLT-RS-030: registering ["/", "/api/hello", "/api"]
+        // and calling sort yields ["/api/hello", "/api", "/"]. Longest-first matters
+        // because JOLT-RS-031's `build_router` will pick the first matching route, so
+        // `/api/hello` must be checked before its `/api` prefix.
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/api/hello",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/api",
+            method: Method::Get,
+        });
+        registry.sort();
+        let paths: Vec<&str> = registry.iter().map(Endpoint::path).collect();
+        assert_eq!(paths, vec!["/api/hello", "/api", "/"]);
+    }
+
+    #[test]
+    fn sort_is_stable_for_equal_length_paths() {
+        // Vec::sort_by_key is documented stable; this test pins that contract so
+        // a future swap to an unstable sort (e.g. sort_unstable_by_key) trips here
+        // rather than producing nondeterministic route order.
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/aaa",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/bbb",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/ccc",
+            method: Method::Get,
+        });
+        registry.sort();
+        let paths: Vec<&str> = registry.iter().map(Endpoint::path).collect();
+        assert_eq!(paths, vec!["/aaa", "/bbb", "/ccc"]);
+    }
+
+    #[test]
+    fn sort_on_empty_registry_is_a_noop() {
+        // Guards the empty-registry contract that JOLT-RS-031's build_router
+        // also relies on; calling sort on zero entries must not panic.
+        let mut registry = EndpointRegistry::new();
+        registry.sort();
+        assert!(registry.is_empty());
+    }
 }
 
 mod server {
