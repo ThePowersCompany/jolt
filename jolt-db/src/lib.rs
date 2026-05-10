@@ -271,6 +271,47 @@
 //!     reach for [`Self::listen_connection`] directly and call
 //!     `listener.listen_all(...)` themselves — that primitive remains
 //!     available exactly for this case.
+//!
+//! [`JoltDb::notify`] (JOLT-RS-092) is the write side of the LISTEN/NOTIFY
+//! pair. Issues a `SELECT pg_notify($1, $2)` through the regular pool so
+//! the channel name and payload are both bound parameters rather than
+//! interpolated into the SQL text. Symmetric with [`Self::listen`] in error
+//! shape (raw [`sqlx::Error`], decision 6) but asymmetric in connection
+//! source — `notify` does not need a dedicated connection and uses any
+//! pool-checked-out connection because `NOTIFY` is a one-shot write that
+//! commits and returns.
+//!
+//! 21. **`notify` issues `SELECT pg_notify($1, $2)`, not `NOTIFY <ch>,
+//!     '<payload>'` (JOLT-RS-092).** Postgres's bare `NOTIFY` statement
+//!     does not accept bound parameters for either the channel name (it
+//!     requires an identifier literal in the SQL text) or the payload (it
+//!     requires a string literal). Building the SQL via `format!` would
+//!     either need an allowlist of channel names or a hand-rolled identifier
+//!     quoter, both of which re-implement work the
+//!     [`pg_notify`](https://www.postgresql.org/docs/current/functions-info.html#FUNCTIONS-INFO-NOTIFY)
+//!     function already does correctly. `pg_notify(text, text)` accepts
+//!     both arguments as bound parameters, which lets jolt-db hand untrusted
+//!     channel/payload strings straight through sqlx's existing parameter-
+//!     encoding pipeline with zero injection surface. The semantic effect
+//!     is identical to a `NOTIFY` statement.
+//!
+//! 22. **`notify` runs through the regular pool, not the listener
+//!     connection (JOLT-RS-092).** `NOTIFY` is a fire-and-forget write —
+//!     the server queues the notification for delivery to LISTEN-ing
+//!     subscribers, the producing connection's role ends at commit. Using
+//!     the pool means the producer is just another query consumer
+//!     contending for pool slots, with no special connection lifecycle to
+//!     manage. The dedicated `PgListener` connection (decisions 16–17)
+//!     exists to *receive* notifications, which is the half that requires
+//!     a long-lived connection holding the LISTEN subscription open.
+//!
+//! 23. **Returns `Result<(), sqlx::Error>`; the row payload from
+//!     `pg_notify` is discarded (JOLT-RS-092).** `pg_notify` returns
+//!     `void` (formally a single-row, zero-column result), so there is
+//!     nothing meaningful to surface to the caller — success of the round
+//!     trip is the whole signal, mirroring [`Self::health_check`]'s shape
+//!     (decision 9). The `()` return keeps `notify` ergonomic for
+//!     fire-and-forget call sites: `db.notify("orders", &id).await?;`.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -540,6 +581,36 @@ impl JoltDb {
         let mut listener = self.listen_connection().await?;
         listener.listen(channel).await?;
         Ok(listener.into_stream())
+    }
+
+    /// Publish a notification to a Postgres `LISTEN` channel
+    /// (JOLT-RS-092).
+    ///
+    /// Issues `SELECT pg_notify($1, $2)` through the regular pool with
+    /// `channel` and `payload` bound as parameters (decision 21). The
+    /// channel name is propagated unmodified to `pg_notify`, which handles
+    /// quoting and identifier semantics; the payload is sent as an opaque
+    /// UTF-8 string. Subscribers via [`Self::listen`] (or
+    /// [`Self::listen_connection`]) receive the notification on the same
+    /// channel.
+    ///
+    /// Returns `Ok(())` on a successful round trip, or the raw
+    /// [`sqlx::Error`] on any failure (acquire timeout, connection drop,
+    /// etc.). The `pg_notify` row payload (`void`) is discarded
+    /// (decision 23).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// db.notify("orders", "ord_123").await?;
+    /// ```
+    pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(channel)
+            .bind(payload)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 
@@ -1255,5 +1326,81 @@ mod tests {
         db.health_check()
             .await
             .expect("pool still healthy after listen() + drop");
+    }
+
+    // ---- JOLT-RS-092: JoltDb::notify ----
+
+    /// Compile-time pin: `db.notify(&str, &str)` resolves to
+    /// `Result<(), sqlx::Error>` (decisions 21–23). The explicit return
+    /// annotation forces the typecheck — a regression that surfaces the
+    /// `pg_notify` row payload, wraps the error in a custom enum, or
+    /// changes the parameter shape would break this build pin without
+    /// ever needing a live Postgres.
+    #[test]
+    fn notify_signature_returns_unit_result() {
+        async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
+            db.notify("test_ch", "hello").await
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-092: "notify("test_ch",
+    /// "hello") succeeds." Env-gated on `JOLT_TEST_DATABASE_URL` (same
+    /// convention as 083/084/086/088/090/091): without a live Postgres
+    /// the test skips trivially so the default `cargo test -p jolt-db`
+    /// flow stays runnable.
+    ///
+    /// Calls `notify("_jolt_notify_smoke_ch", "hello")` and asserts the
+    /// `Result` is `Ok(())`. Notification delivery (i.e. that a
+    /// concurrent `LISTEN`-er actually receives this payload) is
+    /// JOLT-RS-093's closing-test slice; here we only verify the write
+    /// half round-trips. Pool health is checked afterward to pin
+    /// decision 22 (notify uses the regular pool, not a dedicated
+    /// connection — an accidental switch to a long-lived connection
+    /// would still pass this test individually, but the back-to-back
+    /// invocations below would saturate a pool whose `max_connections`
+    /// shrunk to a single listener slot).
+    #[tokio::test]
+    async fn notify_succeeds_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        db.notify("_jolt_notify_smoke_ch", "hello")
+            .await
+            .expect("notify(test_ch, hello) should succeed against live Postgres");
+
+        // Run a second notify back-to-back to confirm the pool is not
+        // serialized behind a single notify-owned connection (decision 22).
+        db.notify("_jolt_notify_smoke_ch", "world")
+            .await
+            .expect("second notify should succeed without contention");
+
+        db.health_check()
+            .await
+            .expect("pool still healthy after notify");
+    }
+
+    /// Decision 21 explicitly: the channel name and payload are bound
+    /// parameters, not interpolated SQL text. A payload containing a
+    /// single quote (which would terminate a string literal in raw
+    /// `NOTIFY ch, '...'` SQL) round-trips without error because sqlx
+    /// encodes the bind value through the wire protocol rather than
+    /// substituting it into the SQL string. Env-gated.
+    #[tokio::test]
+    async fn notify_handles_single_quote_payload_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // A payload that would SQL-inject a raw `NOTIFY ch, '<payload>'`
+        // form. With `pg_notify($1, $2)` it's just a string literal on
+        // the wire and round-trips cleanly.
+        db.notify("_jolt_notify_smoke_ch", "it's safe")
+            .await
+            .expect("single-quote payload should round-trip via parameter binding");
     }
 }
