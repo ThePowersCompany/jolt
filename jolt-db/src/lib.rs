@@ -45,6 +45,37 @@
 //!    field trivially `Copy`/`Debug`/`serde`-serializable for the eventual
 //!    config-from-env / config-from-file paths, and seconds are a coarse
 //!    enough unit for pool acquire that sub-second precision is not useful.
+//!
+//! [`JoltDb`] (JOLT-RS-083) is the runtime handle holding the
+//! [`sqlx::PgPool`](https://docs.rs/sqlx/latest/sqlx/struct.PgPool.html) that
+//! every downstream phase19/20/21 slice consumes. Construction goes through
+//! [`JoltDb::connect`], which builds a
+//! [`sqlx::postgres::PgPoolOptions`](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html)
+//! from the [`DbConfig`] knobs and `.connect()`s to Postgres. Architectural
+//! decisions pinned here for JOLT-RS-084/085 and onward to build on:
+//!
+//! 5. **`JoltDb` owns the `PgPool` by value, not behind an `Arc`.**
+//!    [`sqlx::PgPool`](https://docs.rs/sqlx/latest/sqlx/struct.PgPool.html) is
+//!    already a cheap-to-clone handle that internally wraps an `Arc<...>`,
+//!    so wrapping it again in `Arc<PgPool>` would be redundant. Callers that
+//!    need shared ownership of the `JoltDb` itself can wrap the outer struct
+//!    in `Arc<JoltDb>` (the eventual `JoltServer` integration will own one
+//!    `Arc<JoltDb>` and clone the handle into request extensions).
+//!
+//! 6. **`connect` returns `Result<Self, sqlx::Error>` (the raw sqlx error).**
+//!    A bespoke error enum would force callers to convert between two error
+//!    shapes for trivial reasons (sqlx already produces a rich error with
+//!    `Display` + `source()` for chained reporting); the connect call has
+//!    exactly one failure mode (sqlx couldn't open the pool), so wrapping it
+//!    adds noise. Future query helpers (JOLT-RS-086 onward) will likely
+//!    return `sqlx::Error` for the same reason.
+//!
+//! 7. **Connect runs `lazy_connect` semantics via `PgPoolOptions::connect`,
+//!    not `connect_lazy`.** `connect` actually opens at least one TCP
+//!    connection before returning, which surfaces auth / unreachable-server
+//!    errors at startup rather than on the first query — matching the
+//!    "fail-fast on misconfiguration" contract documented for
+//!    [`DbConfig`]'s empty-default `database_url`.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -98,9 +129,51 @@ impl Default for DbConfig {
     }
 }
 
+/// Runtime handle around a [`sqlx::PgPool`] consumed by every downstream
+/// phase19/20/21 slice (JOLT-RS-083). See module docs decisions 5–7 for
+/// the ownership shape, error contract, and connect semantics.
+#[derive(Debug, Clone)]
+pub struct JoltDb {
+    // Read by the env-gated `connect_returns_ok_when_test_db_available`
+    // test and by callers via the `pool()` getter that JOLT-RS-084 will
+    // add. The lib-build dead-code lint doesn't count cfg(test) usage, so
+    // the allow stays until 084 lands the public accessor.
+    #[allow(dead_code)]
+    pool: sqlx::PgPool,
+}
+
+impl JoltDb {
+    /// Build a pool from `config` and return the owning [`JoltDb`].
+    ///
+    /// Maps the three [`DbConfig`] knobs onto
+    /// [`sqlx::postgres::PgPoolOptions`]:
+    /// - `max_connections` → [`PgPoolOptions::max_connections`].
+    /// - `acquire_timeout_secs` → [`PgPoolOptions::acquire_timeout`] via
+    ///   [`std::time::Duration::from_secs`].
+    /// - `database_url` → the URL handed to [`PgPoolOptions::connect`].
+    ///
+    /// `connect` opens at least one TCP connection before returning so
+    /// auth / unreachable-server errors surface at startup rather than at
+    /// first-query time (decision 7).
+    ///
+    /// [`PgPoolOptions::max_connections`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.max_connections
+    /// [`PgPoolOptions::acquire_timeout`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.acquire_timeout
+    /// [`PgPoolOptions::connect`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgPoolOptions.html#method.connect
+    pub async fn connect(config: &DbConfig) -> Result<Self, sqlx::Error> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(
+                config.acquire_timeout_secs,
+            ))
+            .connect(&config.database_url)
+            .await?;
+        Ok(Self { pool })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::DbConfig;
+    use super::{DbConfig, JoltDb};
 
     #[test]
     fn default_pins_max_connections_to_10() {
@@ -182,5 +255,70 @@ mod tests {
         assert_eq!(copy.database_url, cfg.database_url);
         assert_eq!(copy.max_connections, cfg.max_connections);
         assert_eq!(copy.acquire_timeout_secs, cfg.acquire_timeout_secs);
+    }
+
+    // ---- JOLT-RS-083: JoltDb::connect ----
+
+    /// Unreachable-host URL produces an `Err` from `connect` rather than
+    /// hanging or panicking. Pins decision 7 ("fail-fast on
+    /// misconfiguration"): the connect call performs at least one real TCP
+    /// dial before returning so the error surfaces at startup.
+    ///
+    /// Uses `127.0.0.1:1` (port 1 reserved + not listening) plus a 1-second
+    /// acquire timeout so the test fails fast in CI sandboxes that have
+    /// no Postgres available. The assertion only checks `is_err()` because
+    /// the exact `sqlx::Error` variant (`Io` vs `PoolTimedOut`) depends on
+    /// platform-specific TCP refusal timing.
+    #[tokio::test]
+    async fn connect_returns_err_on_unreachable_server() {
+        let cfg = DbConfig {
+            database_url: "postgres://nouser:nopw@127.0.0.1:1/nodb".into(),
+            max_connections: 1,
+            acquire_timeout_secs: 1,
+        };
+        let result = JoltDb::connect(&cfg).await;
+        assert!(
+            result.is_err(),
+            "expected Err from connect to unreachable server, got Ok",
+        );
+    }
+
+    /// Bogus URL scheme (`not-a-real-url`) trips sqlx's URL parser before
+    /// any TCP dial happens. Confirms `connect` propagates the parse error
+    /// as `sqlx::Error` rather than panicking.
+    #[tokio::test]
+    async fn connect_returns_err_on_malformed_url() {
+        let cfg = DbConfig::new("not-a-real-url");
+        let result = JoltDb::connect(&cfg).await;
+        assert!(
+            result.is_err(),
+            "expected Err from connect with malformed URL, got Ok",
+        );
+    }
+
+    /// Success-path test gated on the `JOLT_TEST_DATABASE_URL` env var.
+    ///
+    /// Without the env var set the test passes trivially so the default
+    /// `cargo test -p jolt-db` flow does not require a running Postgres.
+    /// With the env var set (e.g. `JOLT_TEST_DATABASE_URL=postgres://...
+    /// cargo test -p jolt-db`) the test exercises the PRD-mandated
+    /// "JoltDb::connect() returns Ok" verification.
+    #[tokio::test]
+    async fn connect_returns_ok_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            // No test DB configured — skip. The error-path tests above
+            // exercise the rest of the connect logic.
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg)
+            .await
+            .expect("expected Ok from JoltDb::connect against JOLT_TEST_DATABASE_URL");
+        // Pool is reachable: a trivial SELECT 1 should round-trip.
+        let one: (i32,) = sqlx::query_as("SELECT 1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SELECT 1 against the connected pool failed");
+        assert_eq!(one.0, 1);
     }
 }

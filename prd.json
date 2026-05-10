@@ -1203,7 +1203,7 @@
       "verification": [
         "Unit test (requires PG): JoltDb::connect() returns Ok."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-084",
