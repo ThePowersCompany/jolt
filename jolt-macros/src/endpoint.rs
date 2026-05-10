@@ -4,9 +4,9 @@
 //! - JOLT-RS-038: parse the path string literal from the attribute tokens. (landed)
 //! - JOLT-RS-039: scan the impl block for `#[get]`/`#[post]`/`#[put]`/
 //!   `#[patch]`/`#[delete]` methods, collect their signatures. (landed)
-//! - JOLT-RS-040 (this iteration): validate handler signatures — first arg is
-//!   `&self`, return type is `Response<T>` or `Result<Response<T>, E>`.
-//! - JOLT-RS-041: emit the (Method, path) -> handler match.
+//! - JOLT-RS-040: validate handler signatures — first arg is `&self`, return
+//!   type is `Response<T>` or `Result<Response<T>, E>`. (landed)
+//! - JOLT-RS-041 (this iteration): emit the (Method, path) -> handler match.
 //!
 //! The parsing entry points are split out from `lib.rs` so they can be
 //! unit-tested against a `proc_macro2::TokenStream` / parsed `syn::ItemImpl`
@@ -17,6 +17,8 @@
 //! their own proc-macro attributes. JOLT-RS-041 will strip them from the
 //! re-emitted impl so rustc never sees them.
 
+use proc_macro2::Ident;
+use quote::{format_ident, quote};
 use syn::{
     parse2, Attribute, FnArg, GenericArgument, ImplItem, ItemImpl, LitStr, Meta, PathArguments,
     ReturnType, Signature, Type,
@@ -43,9 +45,9 @@ pub(crate) fn parse_endpoint_attr(
 /// HTTP verb tagged on a method via a magic-marker attribute. Mirrors
 /// `jolt_core::Method` but lives in the macro crate to avoid a cyclic dep
 /// (jolt-core depends on jolt-macros at the workspace level once macros are
-/// re-exported). Codegen in JOLT-RS-041 will emit `::jolt_core::Method::Get`
-/// etc. from this enum via [`HttpMethod::as_jolt_core_variant_ident`] (added
-/// when 041 lands).
+/// re-exported). Codegen via [`generate_dispatch_match`] emits
+/// `::jolt_core::Method::<variant>` paths using
+/// [`HttpMethod::as_jolt_core_variant_ident`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // variants are constructed via `from_attr_name`; tests read them.
 pub(crate) enum HttpMethod {
@@ -62,7 +64,7 @@ impl HttpMethod {
     /// other identifier — including verbs we don't currently route (`head`,
     /// `options`) which are handled by jolt-core's auto-OPTIONS / Allow-header
     /// machinery rather than by user-defined endpoints.
-    #[allow(dead_code)] // tests consume it; lib.rs wires it in once JOLT-RS-041 lands.
+    #[allow(dead_code)] // tests consume it; lib.rs wires it in once a later phase08+ item lands.
     fn from_attr_name(name: &str) -> Option<Self> {
         match name {
             "get" => Some(Self::Get),
@@ -71,6 +73,21 @@ impl HttpMethod {
             "patch" => Some(Self::Patch),
             "delete" => Some(Self::Delete),
             _ => None,
+        }
+    }
+
+    /// Identifier for the matching variant in `::jolt_core::Method`, suitable
+    /// for splicing into a `quote!` path like `::jolt_core::Method::#ident`.
+    /// The five user-routable verbs map 1:1 onto jolt-core's enum variants
+    /// (`Method::Get`, `Method::Post`, ...); HEAD/OPTIONS live on jolt-core's
+    /// enum but are framework-handled, so this enum has no variants for them.
+    fn as_jolt_core_variant_ident(self) -> Ident {
+        match self {
+            Self::Get => format_ident!("Get"),
+            Self::Post => format_ident!("Post"),
+            Self::Put => format_ident!("Put"),
+            Self::Patch => format_ident!("Patch"),
+            Self::Delete => format_ident!("Delete"),
         }
     }
 }
@@ -291,6 +308,55 @@ fn last_path_segment(ty: &Type) -> Option<&syn::PathSegment> {
     match ty {
         Type::Path(tp) => tp.path.segments.last(),
         _ => None,
+    }
+}
+
+/// Emit a dispatch `match` expression with one arm per discovered method,
+/// keyed on `(::jolt_core::Method, path)` and resolving to the handler's
+/// fn-path on the endpoint type.
+///
+/// The emitted shape is:
+///
+/// ```ignore
+/// match (__method, __path) {
+///     (::jolt_core::Method::Get,  "/api/test") => Self::list,
+///     (::jolt_core::Method::Post, "/api/test") => Self::create,
+///     _ => unreachable!("..."),
+/// }
+/// ```
+///
+/// The wildcard arm is intentional: this dispatch is invoked from the
+/// router AFTER it has already matched the path + method against the
+/// registry, so the catch-all must be unreachable in well-formed code.
+/// Emitting it explicitly keeps the match exhaustive and gives a
+/// span-pointing diagnostic if a future bug ever does fall through.
+///
+/// Match scrutinee idents (`__method`, `__path`) are leading-double-
+/// underscore-prefixed so callers introducing those bindings via the
+/// surrounding generated code don't collide with user-defined names.
+///
+/// JOLT-RS-042 will wire this into the proc-macro entry point alongside
+/// inventory-style registration; JOLT-RS-043 will adapt the
+/// `Self::<handler>` references into tower-compatible async fns.
+#[allow(dead_code)] // tests consume it; lib.rs wires it in once JOLT-RS-042/043 land.
+pub(crate) fn generate_dispatch_match(
+    path: &LitStr,
+    methods: &[DiscoveredMethod],
+) -> proc_macro2::TokenStream {
+    let arms = methods.iter().map(|m| {
+        let variant = m.http_method.as_jolt_core_variant_ident();
+        let fn_ident = &m.sig.ident;
+        quote! {
+            (::jolt_core::Method::#variant, #path) => Self::#fn_ident,
+        }
+    });
+    quote! {
+        match (__method, __path) {
+            #(#arms)*
+            _ => ::core::unreachable!(
+                "endpoint dispatch fell through to catch-all; the router must only invoke this with a matched (method, path) pair"
+            ),
+        }
     }
 }
 
@@ -712,6 +778,128 @@ mod tests {
         assert!(
             err.to_string().contains("Response<T>"),
             "diagnostic should name Response<T>, got: {err}"
+        );
+    }
+
+    // ----- JOLT-RS-041: generate_dispatch_match -----
+
+    fn parse_path_lit(src: &str) -> LitStr {
+        syn::parse_str::<LitStr>(src).expect("test input parses as LitStr")
+    }
+
+    fn parse_match(tokens: proc_macro2::TokenStream) -> syn::ExprMatch {
+        syn::parse2::<syn::ExprMatch>(tokens)
+            .expect("generated tokens parse as a match expression")
+    }
+
+    #[test]
+    fn generates_two_arms_for_get_and_post() {
+        // PRD-mandated verification: two methods (get + post) -> generated code
+        // has two match arms.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn list(&self) -> Response<()> { todo!() }
+                #[post] fn create(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = parse_path_lit(r#""/api/test""#);
+        let parsed = parse_match(generate_dispatch_match(&path, &methods));
+
+        // 2 explicit arms (Get, Post) + 1 wildcard catch-all.
+        assert_eq!(parsed.arms.len(), 3);
+        // First two arms are the discovered methods; the third is the wildcard.
+        // Pinned via pattern shape: a tuple pattern for the discovered arms,
+        // a `_` pattern for the catch-all.
+        assert!(matches!(parsed.arms[0].pat, syn::Pat::Tuple(_)));
+        assert!(matches!(parsed.arms[1].pat, syn::Pat::Tuple(_)));
+        assert!(matches!(parsed.arms[2].pat, syn::Pat::Wild(_)));
+    }
+
+    #[test]
+    fn arms_reference_jolt_core_method_variants_and_handler_fn_names() {
+        // Pin the arm-body shape: each arm pattern names the right
+        // ::jolt_core::Method variant and path literal, and resolves to the
+        // handler fn via Self::<ident>. A regression that emitted the wrong
+        // variant name (e.g. all arms as Method::Get) or that reused the same
+        // handler fn for every arm would fail this test.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn list(&self) -> Response<()> { todo!() }
+                #[delete] fn destroy(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = parse_path_lit(r#""/items""#);
+        let tokens = generate_dispatch_match(&path, &methods);
+        let rendered = tokens.to_string();
+
+        // Variant idents on the LHS pattern.
+        assert!(
+            rendered.contains(":: jolt_core :: Method :: Get"),
+            "missing Method::Get variant; rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: Method :: Delete"),
+            "missing Method::Delete variant; rendered: {rendered}"
+        );
+        // Path literal in the LHS pattern (quoted; tokens render with spaces).
+        assert!(
+            rendered.contains(r#""/items""#),
+            "missing path literal; rendered: {rendered}"
+        );
+        // Handler fn refs on the RHS.
+        assert!(
+            rendered.contains("Self :: list"),
+            "missing Self::list handler ref; rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("Self :: destroy"),
+            "missing Self::destroy handler ref; rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn empty_methods_emits_only_catch_all_arm() {
+        // An impl with no verb-tagged methods (e.g. helpers only) still
+        // generates a syntactically-valid match — just the wildcard arm.
+        // This pins that the generator doesn't depend on at-least-one-arm and
+        // that the wildcard's unreachable! body always emits.
+        let path = parse_path_lit(r#""/empty""#);
+        let parsed = parse_match(generate_dispatch_match(&path, &[]));
+        assert_eq!(parsed.arms.len(), 1);
+        assert!(matches!(parsed.arms[0].pat, syn::Pat::Wild(_)));
+    }
+
+    #[test]
+    fn arms_share_the_same_path_literal_across_all_methods() {
+        // All methods on a single #[endpoint] share the path attribute. A
+        // regression that re-stringified the path per arm and dropped a leading
+        // slash, or that emitted the path-ident name instead of its literal
+        // value, would fail this test.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn a(&self) -> Response<()> { todo!() }
+                #[post] fn b(&self) -> Response<()> { todo!() }
+                #[put] fn c(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = parse_path_lit(r#""/users/:id""#);
+        let rendered = generate_dispatch_match(&path, &methods).to_string();
+        // Path literal (with token-spacing) must appear exactly three times —
+        // once per discovered method's arm pattern.
+        let needle = r#""/users/:id""#;
+        let count = rendered.matches(needle).count();
+        assert_eq!(
+            count, 3,
+            "path literal must appear once per arm, got {count}; rendered: {rendered}"
         );
     }
 }
