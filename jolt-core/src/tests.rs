@@ -981,6 +981,171 @@ mod endpoint_registry {
         registry.sort();
         assert!(registry.is_empty());
     }
+
+    /// JOLT-RS-031 verification: build_router from two endpoints produces an
+    /// axum Router whose routes dispatch to the matching endpoint handler.
+    /// Driven via `tower::ServiceExt::oneshot` so the test stays fully
+    /// in-process — no TCP bind, no signal handling.
+    mod build_router {
+        use crate::{Endpoint, EndpointFuture, EndpointRegistry, Method, Request};
+        use axum::body::{to_bytes, Body};
+        use axum::http::{Request as AxumRequest, StatusCode};
+        use tower::ServiceExt;
+
+        struct EchoEndpoint {
+            path: &'static str,
+            method: Method,
+            body: &'static str,
+        }
+
+        impl Endpoint for EchoEndpoint {
+            fn path(&self) -> &str {
+                self.path
+            }
+
+            fn method(&self) -> Method {
+                self.method
+            }
+
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let body = self.body;
+                Box::pin(async move {
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(body))
+                        .unwrap()
+                })
+            }
+        }
+
+        struct CapturingEndpoint;
+
+        impl Endpoint for CapturingEndpoint {
+            fn path(&self) -> &str {
+                "/capture"
+            }
+
+            fn method(&self) -> Method {
+                Method::Post
+            }
+
+            fn handler(&self, req: Request) -> EndpointFuture {
+                let body = format!(
+                    "method={} path={} q_n={} body_len={} cookie={}",
+                    req.method,
+                    req.path,
+                    req.query("n").unwrap_or("?"),
+                    req.body.len(),
+                    req.cookie("sid").map(|c| c.value.as_str()).unwrap_or("?"),
+                );
+                Box::pin(async move {
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(body))
+                        .unwrap()
+                })
+            }
+        }
+
+        async fn body_string(resp: axum::response::Response) -> String {
+            let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn empty_registry_yields_router_that_404s() {
+            let registry = EndpointRegistry::new();
+            let router = registry.build_router();
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/anything")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn two_endpoints_each_dispatch_correctly() {
+            // PRD-mandated verification for JOLT-RS-031: two endpoints, two
+            // working routes. Distinct method+path pairs prove dispatch is
+            // keyed on both, not just path.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/foo",
+                method: Method::Get,
+                body: "FOO",
+            });
+            registry.register(EchoEndpoint {
+                path: "/bar",
+                method: Method::Post,
+                body: "BAR",
+            });
+            let router = registry.build_router();
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/foo")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "FOO");
+
+            let req = AxumRequest::builder()
+                .method("POST")
+                .uri("/bar")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "BAR");
+        }
+
+        #[tokio::test]
+        async fn wrong_method_for_registered_path_is_405() {
+            // axum's MethodRouter answers 405 (not 404) when the path matches
+            // but the verb doesn't. Locking in that contract here so a future
+            // build_router refactor can't silently downgrade it to a 404.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/only-get",
+                method: Method::Get,
+                body: "ok",
+            });
+            let router = registry.build_router();
+            let req = AxumRequest::builder()
+                .method("POST")
+                .uri("/only-get")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn handler_sees_method_path_query_body_and_cookie() {
+            // Locks in the cross-phase glue: the axum→Jolt request conversion
+            // populates method/path/query_params/body/cookies before invoking
+            // the handler. If a future refactor of build_jolt_request drops
+            // any of these, this single test trips.
+            let mut registry = EndpointRegistry::new();
+            registry.register(CapturingEndpoint);
+            let router = registry.build_router();
+            let req = AxumRequest::builder()
+                .method("POST")
+                .uri("/capture?n=42")
+                .header("Cookie", "sid=abc123")
+                .body(Body::from("hello"))
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                body_string(resp).await,
+                "method=POST path=/capture q_n=42 body_len=5 cookie=abc123"
+            );
+        }
+    }
 }
 
 mod server {
