@@ -50,7 +50,8 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - 047 (landed): classifies `body`-named fields as `FieldKind::Body`,
 /// - 048 (landed): classifies `QueryParams<T>` (any name) and `query_params:
 ///   HashMap<String, String>` as `FieldKind::QueryParams`,
-/// - 049 detects request-injection fields (`&Request` / `Request`),
+/// - 049 (landed): classifies `Request` and `&Request` (any name, with or
+///   without lifetime) as `FieldKind::Request`,
 /// - 050 detects struct-level `#[cors]` attributes,
 /// - 051-053 generate the `tower::Layer` impl + extraction code in `call()`.
 ///

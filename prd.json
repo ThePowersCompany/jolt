@@ -727,7 +727,7 @@
       "verification": [
         "Unit test: field req: &Request \u2192 detected as request injection."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-050",

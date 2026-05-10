@@ -9,17 +9,23 @@
 //!   body-candidate rule fires when `field.ident == "body"` per the spec; the
 //!   field's type is captured verbatim so the body-extraction codegen in 053
 //!   can name `T` in `__req.json::<T>()`.
-//! - JOLT-RS-048 (this iteration): mark query-extraction fields. Two rules,
-//!   evaluated in this order: (a) any field whose type's last path segment is
-//!   `QueryParams` is [`FieldKind::QueryParams`] regardless of name (covers
-//!   `QueryParams<T>` and `crate::api::QueryParams<T>`); (b) a field NAMED
-//!   `query_params` AND typed `HashMap<String, String>` (last path segment
-//!   `HashMap` with two `String` generic args, covering bare `HashMap` and
-//!   `std::collections::HashMap` variants) is also [`FieldKind::QueryParams`].
-//!   The type-based rule runs before the name-based body rule so a hypothetical
-//!   `body: QueryParams<T>` is QueryParams, not Body — pinning the precedence
-//!   explicitly so 049/050 can extend without ambiguity.
-//! - JOLT-RS-049 will mark request-injection fields (`&Request` or `Request`).
+//! - JOLT-RS-048: mark query-extraction fields. Two rules, evaluated in this
+//!   order: (a) any field whose type's last path segment is `QueryParams` is
+//!   [`FieldKind::QueryParams`] regardless of name (covers `QueryParams<T>` and
+//!   `crate::api::QueryParams<T>`); (b) a field NAMED `query_params` AND typed
+//!   `HashMap<String, String>` (last path segment `HashMap` with two `String`
+//!   generic args, covering bare `HashMap` and `std::collections::HashMap`
+//!   variants) is also [`FieldKind::QueryParams`].
+//! - JOLT-RS-049 (this iteration): mark request-injection fields. Type-based
+//!   rule, regardless of name: any field whose type is `Request` or `&Request`
+//!   (with or without an explicit lifetime) is [`FieldKind::Request`]. Mutable
+//!   references (`&mut Request`) are NOT matched — middleware injection is the
+//!   shared-reference shape per the spec, and excluding mut refs keeps the
+//!   surface narrow. Path qualification on the inner type is allowed
+//!   (`crate::Request`, `&::jolt_core::Request`) via last-path-segment
+//!   matching. The Request rule lives between QueryParams and the body-name
+//!   rule so a hypothetical `body: &Request` classifies as Request, pinning
+//!   type-before-name precedence consistently with 048's QueryParams rule.
 //! - JOLT-RS-050 will detect the `#[cors]` struct-level attribute.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
@@ -68,24 +74,27 @@ pub(crate) struct AutoMiddlewareField {
 /// 1. Type's last path segment is `QueryParams` → [`FieldKind::QueryParams`]
 ///    (regardless of field name; covers `QueryParams<T>` and path-qualified
 ///    forms like `crate::api::QueryParams<T>`).
-/// 2. Field NAMED `query_params` AND typed `HashMap<String, String>` (last
+/// 2. Type is `Request` or shared `&Request` (with or without lifetime) →
+///    [`FieldKind::Request`] (regardless of field name; covers `Request`,
+///    `&Request`, `&'a Request`, and path-qualified forms like `&crate::Request`).
+///    Mutable refs (`&mut Request`) are NOT matched.
+/// 3. Field NAMED `query_params` AND typed `HashMap<String, String>` (last
 ///    path segment is `HashMap` with two `String` generic args) →
 ///    [`FieldKind::QueryParams`].
-/// 3. Field NAMED `body` → [`FieldKind::Body`].
-/// 4. Otherwise → [`FieldKind::Other`].
+/// 4. Field NAMED `body` → [`FieldKind::Body`].
+/// 5. Otherwise → [`FieldKind::Other`].
 ///
 /// Type-before-name precedence is intentional: a `body: QueryParams<T>` is
-/// classified as QueryParams (the type makes the name nonsensical for body
-/// extraction, since `QueryParams` is a framework type with extraction
-/// semantics, not a user payload shape). The body-name rule is otherwise the
-/// catch-all for "this is a body, full stop" without needing to inspect T.
+/// classified as QueryParams, and a `body: &Request` is Request — in both
+/// cases the type names a framework extraction shape, so the name's framework
+/// meaning is overridden. The body-name rule is otherwise the catch-all for
+/// "this is a body, full stop" without needing to inspect T.
 ///
-/// 049 will add `Request` (matching `req` by name and `Request` / `&Request`
-/// by type) on top; the `Other` catch-all stays terminal — after phase10
-/// closes, an `Other` field is one the user added that doesn't trigger any
-/// framework extraction, and codegen treats it as `Default::default()`
-/// per-request (the same default-construction contract used by `#[endpoint]`
-/// wrappers; see JOLT-RS-043's progress notes).
+/// The `Other` catch-all is terminal: a field that isn't QueryParams, Request,
+/// or body-named is one the user added that doesn't trigger any framework
+/// extraction, and codegen treats it as `Default::default()` per-request (the
+/// same default-construction contract used by `#[endpoint]` wrappers; see
+/// JOLT-RS-043's progress notes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FieldKind {
     /// Body-candidate. The spec triggers JSON body parsing when a field named
@@ -98,10 +107,17 @@ pub(crate) enum FieldKind {
     /// 053 will emit the appropriate `__req.query_params::<T>()` (for the
     /// typed shape) or a raw-map copy (for the HashMap shape).
     QueryParams,
-    /// Catch-all for fields with no framework-special meaning. 049 will narrow
-    /// this further by adding a `Request` variant. After phase10 closes, an
-    /// `Other` field is one the user added that doesn't trigger any framework
-    /// extraction — codegen treats it as `Default::default()` per-request.
+    /// Request injection. The spec triggers per-request reference injection
+    /// when a field is typed `Request` or `&Request` (any name, any path
+    /// qualification, with or without lifetime); codegen in 053 will pass the
+    /// active `&Request` (cloned by value if the user wrote bare `Request`)
+    /// into the constructed middleware. Mutable refs (`&mut Request`) are not
+    /// matched — middleware injection is the shared-reference shape.
+    Request,
+    /// Catch-all for fields with no framework-special meaning. After phase10
+    /// closes, an `Other` field is one the user added that doesn't trigger any
+    /// framework extraction — codegen treats it as `Default::default()`
+    /// per-request.
     Other,
 }
 
@@ -172,6 +188,9 @@ fn classify_field(ident: &Ident, ty: &Type) -> FieldKind {
     if type_path_ends_with(ty, "QueryParams") {
         return FieldKind::QueryParams;
     }
+    if is_request_type(ty) {
+        return FieldKind::Request;
+    }
     if ident == "query_params" && is_hashmap_string_string(ty) {
         return FieldKind::QueryParams;
     }
@@ -185,7 +204,7 @@ fn classify_field(ident: &Ident, ty: &Type) -> FieldKind {
 ///
 /// Used by 048 to spot `QueryParams<T>` (and `crate::api::QueryParams<T>`,
 /// `::framework::QueryParams<T>`, etc.) without coupling to a specific module
-/// path. 049 will reuse the same shape to spot `Request` / `&Request`.
+/// path. 049 reuses this for the inner-type check inside [`is_request_type`].
 fn type_path_ends_with(ty: &Type, name: &str) -> bool {
     let Type::Path(tp) = ty else {
         return false;
@@ -194,6 +213,27 @@ fn type_path_ends_with(ty: &Type, name: &str) -> bool {
         .segments
         .last()
         .is_some_and(|seg| seg.ident == name)
+}
+
+/// True iff `ty` is `Request` or a shared reference to `Request`.
+///
+/// Accepted shapes: bare `Request`, path-qualified `crate::Request`,
+/// `&Request`, `&'a Request`, `&::jolt_core::Request`. Rejected shapes:
+/// `&mut Request` (mutability disqualifies — middleware injection is the
+/// shared-reference shape per the spec), `Option<Request>` (last path segment
+/// is `Option`), `Vec<Request>`, etc.
+///
+/// Path qualification is matched on the LAST path segment via
+/// [`type_path_ends_with`], so a user who imports `Request` under a different
+/// crate path or a re-export still gets the Request kind without coupling to
+/// jolt_core's specific module layout.
+fn is_request_type(ty: &Type) -> bool {
+    let inner = match ty {
+        Type::Path(_) => ty,
+        Type::Reference(r) if r.mutability.is_none() => r.elem.as_ref(),
+        _ => return false,
+    };
+    type_path_ends_with(inner, "Request")
 }
 
 /// True iff `ty` is `HashMap<String, String>` — match on the last path segment
@@ -593,14 +633,16 @@ mod tests {
     }
 
     #[test]
-    fn body_field_classification_does_not_depend_on_type() {
-        // Detection is name-based: even if the user writes `body: Request`
-        // (where `Request` is the framework type 049 will detect), 047 still
-        // marks it as Body because the field is NAMED `body`. 048/049 are
-        // free to add a precedence rule later (e.g. a Request-typed `body`
-        // field is treated as Request, not Body) — but that's their call,
-        // not 047's. Pinning the name-only behavior so a future change is
-        // explicit.
+    fn request_type_takes_precedence_over_body_name() {
+        // Precedence pin: a `body: Request` is Request, NOT Body. The
+        // type-based Request rule runs before the name-based body rule in
+        // `classify_field`. Parallels 048's `query_params_type_takes_precedence_over_body_name`.
+        // Replaces the earlier `body_field_classification_does_not_depend_on_type`
+        // test (047 era), where the same input classified as Body before 049
+        // added the type-based Request rule. The reversal is intentional:
+        // calling a `Request`-typed field `body` is almost certainly a typo,
+        // and the type-first rule produces correct injection rather than a
+        // body-extraction call that would fail to compile downstream.
         let input = parse_derive(
             r#"
             struct WithRequestNamedBody {
@@ -609,7 +651,7 @@ mod tests {
             "#,
         );
         let parsed = parse_auto_middleware_input(input).expect("parses");
-        assert_eq!(parsed.fields[0].kind, FieldKind::Body);
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
     }
 
     #[test]
@@ -791,10 +833,12 @@ mod tests {
     }
 
     #[test]
-    fn classifies_all_three_kinds_in_mixed_struct() {
+    fn classifies_all_four_kinds_in_mixed_struct() {
         // End-to-end shape: a struct that mixes body, query_params (typed),
-        // headers (HashMap but wrong name), req (049's territory), and a
-        // primitive must produce the right kinds in field order.
+        // headers (HashMap but wrong name), req (Request type), and a
+        // primitive must produce the right kinds in field order. Updated
+        // from 048's `classifies_all_three_kinds_in_mixed_struct` now that
+        // 049's Request rule narrows the `req: Request` field.
         let input = parse_derive(
             r#"
             struct Mixed {
@@ -814,9 +858,186 @@ mod tests {
                 FieldKind::Body,
                 FieldKind::QueryParams,
                 FieldKind::Other, // headers: HashMap rule requires query_params name
-                FieldKind::Other, // req: 049 will narrow to Request
+                FieldKind::Request,
                 FieldKind::Other,
             ]
         );
+    }
+
+    #[test]
+    fn parses_request_reference_field_as_request_kind() {
+        // PRD-mandated verification: "field req: &Request → detected as
+        // request injection." The detection rule is type-based — the field's
+        // name is irrelevant when the type matches, so `req: &Request` and
+        // `whatever: &Request` both classify as Request. The captured type is
+        // preserved verbatim so the layer codegen in 053 can splice it back
+        // into the per-request injection call.
+        let input = parse_derive(
+            r#"
+            struct WithReq {
+                req: &Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 1);
+        assert_eq!(parsed.fields[0].ident, "req");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
+        let ty = &parsed.fields[0].ty;
+        let ty_tokens = quote::quote!(#ty).to_string();
+        assert!(
+            ty_tokens.contains("Request"),
+            "request field type must round-trip for codegen in 053, got: {ty_tokens}"
+        );
+    }
+
+    #[test]
+    fn parses_bare_request_type_as_request_kind() {
+        // The PRD lists both `&Request` and `Request` as request-injection
+        // shapes. Bare `Request` (by-value) classifies the same way; codegen
+        // in 053 will handle the by-value vs by-reference shape distinction.
+        let input = parse_derive(
+            r#"
+            struct WithReq {
+                req: Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
+    }
+
+    #[test]
+    fn parses_request_reference_with_lifetime_as_request_kind() {
+        // `&'a Request` with an explicit lifetime is the most common shape in
+        // user-facing middleware (the lifetime ties the borrow to the
+        // request's lifetime). Still classifies as Request — the lifetime
+        // annotation lives on the reference node, not the inner type, so
+        // last-path-segment matching on the elem still hits `Request`.
+        let input = parse_derive(
+            r#"
+            struct WithReq<'a> {
+                req: &'a Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
+    }
+
+    #[test]
+    fn parses_path_qualified_request_as_request_kind() {
+        // Path qualification on the inner type — `&::jolt_core::Request`,
+        // `crate::Request`, `&framework::request::Request`. The
+        // last-path-segment rule via `type_path_ends_with` covers these
+        // uniformly. Pinned because users in larger codebases will namespace
+        // the import.
+        let bare = parse_derive(
+            r#"
+            struct Mw {
+                req: ::jolt_core::Request,
+            }
+            "#,
+        );
+        let by_ref = parse_derive(
+            r#"
+            struct Mw {
+                req: &crate::Request,
+            }
+            "#,
+        );
+        let bare_parsed = parse_auto_middleware_input(bare).expect("parses");
+        let by_ref_parsed = parse_auto_middleware_input(by_ref).expect("parses");
+        assert_eq!(bare_parsed.fields[0].kind, FieldKind::Request);
+        assert_eq!(by_ref_parsed.fields[0].kind, FieldKind::Request);
+    }
+
+    #[test]
+    fn request_classification_does_not_depend_on_field_name() {
+        // Field-name irrelevant when the type matches — parallel to the
+        // QueryParams behavior pinned by 048. A field NAMED `whatever` typed
+        // `&Request` still classifies as Request, ensuring the codegen in 053
+        // picks up request injection regardless of the user's chosen name.
+        let input = parse_derive(
+            r#"
+            struct Mw<'a> {
+                whatever: &'a Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
+    }
+
+    #[test]
+    fn mut_request_reference_classifies_as_other() {
+        // `&mut Request` is intentionally NOT matched. Middleware injection
+        // per the spec is shared-reference (`&Request`), and excluding mut
+        // refs keeps the surface narrow. A user who writes `&mut Request`
+        // falls through to Other; if they meant request injection, the codegen
+        // in 053 would be unable to construct a mut ref out of the shared-ref
+        // contract anyway. Pinning this so a future relaxation is explicit.
+        let input = parse_derive(
+            r#"
+            struct Mw<'a> {
+                req: &'a mut Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn option_request_classifies_as_other() {
+        // `Option<Request>` has last path segment `Option`, not `Request` —
+        // the wrapping changes the framework-meaning. The user wants
+        // `None`-when-absent semantics, which doesn't map onto the
+        // inject-the-active-request contract. Falls through to Other; codegen
+        // treats it as `Default::default()`. Pinned because the existing
+        // integration test in `auto_middleware_derive.rs` uses this shape.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                req: Option<Request>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn unit_struct_has_no_request_field() {
+        // Parallel to `unit_struct_has_no_body_field` and
+        // `unit_struct_has_no_query_params_field`: the Request-filter
+        // iterator on a unit struct yields zero fields, so 053's codegen
+        // emits zero injection calls. Pinned because the layer codegen will
+        // use `parsed.fields.iter().filter(|f| f.kind == Request)`.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let req_count = parsed
+            .fields
+            .iter()
+            .filter(|f| f.kind == FieldKind::Request)
+            .count();
+        assert_eq!(req_count, 0);
+    }
+
+    #[test]
+    fn request_reference_takes_precedence_over_body_name() {
+        // Precedence pin: a `body: &Request` is Request, NOT Body. The
+        // type-based Request rule runs before the name-based body rule in
+        // `classify_field`. Pairs with `request_type_takes_precedence_over_body_name`
+        // for the by-reference shape.
+        let input = parse_derive(
+            r#"
+            struct Mw<'a> {
+                body: &'a Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Request);
     }
 }
