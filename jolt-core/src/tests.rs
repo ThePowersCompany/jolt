@@ -196,8 +196,19 @@ mod status_code {
 
 mod request {
     use crate::{Cookie, Method, Request};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue};
     use std::collections::HashMap;
+
+    fn empty_request() -> Request {
+        Request {
+            method: Method::Get,
+            path: "/".to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Vec::new(),
+            cookies: Vec::new(),
+        }
+    }
 
     #[test]
     fn struct_literal_construction_reaches_every_field() {
@@ -221,5 +232,34 @@ mod request {
         assert_eq!(req.cookies.len(), 1);
         assert_eq!(req.cookies[0].name, "sid");
         assert_eq!(req.cookies[0].value, "abc");
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        let mut req = empty_request();
+        req.headers.insert(
+            HeaderName::from_static("x-test"),
+            HeaderValue::from_static("value"),
+        );
+
+        assert_eq!(req.header("x-test"), Some("value"));
+        assert_eq!(req.header("X-Test"), Some("value"));
+        assert_eq!(req.header("X-TEST"), Some("value"));
+    }
+
+    #[test]
+    fn header_returns_none_for_missing_name() {
+        let req = empty_request();
+        assert_eq!(req.header("x-missing"), None);
+    }
+
+    #[test]
+    fn header_returns_none_for_non_visible_ascii_value() {
+        let mut req = empty_request();
+        req.headers.insert(
+            HeaderName::from_static("x-binary"),
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert_eq!(req.header("x-binary"), None);
     }
 }
