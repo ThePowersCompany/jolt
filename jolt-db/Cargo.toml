@@ -17,3 +17,11 @@ tokio = { workspace = true }
 # test `.next()` to drive the stream.
 tokio-stream = { workspace = true }
 sha2 = { workspace = true }
+# JOLT-RS-104: the `jolt-db` CLI (`src/main.rs`) needs subcommand parsing
+# (`jolt-db migrate new <name>`) and a UTC timestamp for the filename
+# (`YYYYMMDDHHMMSS_<name>.sql`). `clap` (feature `derive`) covers the
+# subcommand layer; `chrono` matches the rest of the workspace's
+# already-pulled `chrono` (with `serde` — unused here but harmless) so we
+# stay on a single time crate.
+clap = { workspace = true }
+chrono = { workspace = true }

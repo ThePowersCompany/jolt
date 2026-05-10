@@ -805,6 +805,91 @@
 //!     [`MigrationError`]'s existing variants) so JOLT-RS-102's
 //!     `From<io::Error>` / `From<sqlx::Error>` impls (decision 46)
 //!     and `source()` chain (decision 45) carry through unchanged.
+//!
+//! JOLT-RS-104 opens phase24's CLI slice: the `jolt-db` binary
+//! (`src/main.rs`) exposes a [`clap`]-driven subcommand surface whose
+//! first verb is `migrate new <name>` — scaffolds a new empty migration
+//! file at `migrations/YYYYMMDDHHMMSS_<name>.sql`. The shared logic is
+//! exposed via the public [`create_migration_file`] function on the
+//! library so that JOLT-RS-105's "CLI creates correct filename" test
+//! can exercise it without spawning a subprocess.
+//!
+//! 49. **CLI is `src/main.rs` (auto-discovered binary named after the
+//!     package), library function does the work (JOLT-RS-104).** The
+//!     PRD mandates the binary name `jolt-db` and Cargo's default
+//!     target inference creates exactly that binary from `src/main.rs`
+//!     when the package name is `jolt-db` — no `[[bin]]` entry is
+//!     needed and the lib + bin coexist. The actual file creation
+//!     (timestamp computation, filename assembly, collision check,
+//!     write) lives in the library as [`create_migration_file`] so
+//!     the JOLT-RS-105 closing tests can call it directly. The binary
+//!     is a thin clap layer over the library call —
+//!     `clap::Parser::parse() -> create_migration_file(dir, &name,
+//!     Utc::now())` — matching the same library-first pattern the rest
+//!     of `jolt-db`'s verbs use (the `migrate` apply verb is on
+//!     `JoltDb`, not a binary; this CLI scaffolding verb is on the
+//!     filesystem, not the DB, so it's a free function rather than a
+//!     method). Subcommand shape is nested: top-level `migrate` group
+//!     with a `new <name>` action, leaving room for JOLT-RS-100-style
+//!     `migrate apply` and other verbs later without breaking the
+//!     established CLI shape.
+//!
+//! 50. **Timestamp is `chrono::Utc::now().format("%Y%m%d%H%M%S")`
+//!     (JOLT-RS-104).** UTC (not local time) so the same migration
+//!     file generated on two operators' machines in different time
+//!     zones still sorts correctly by filename — the lexicographic
+//!     sort decision from JOLT-RS-094 (decision 26) requires the
+//!     timestamp prefix to be a strictly monotonic numeric string for
+//!     correctness, and UTC is the only timezone that guarantees that
+//!     across collaborators. The `%Y%m%d%H%M%S` format gives a
+//!     14-character fixed-width prefix that lexicographically sorts
+//!     identically to chronologically (zero-padded month/day/hour/
+//!     minute/second). The `now` value is threaded as a parameter on
+//!     [`create_migration_file`] (not called inside the function) so
+//!     the unit tests can pin a deterministic timestamp without
+//!     mocking the clock — the binary supplies `chrono::Utc::now()` at
+//!     the call site.
+//!
+//! 51. **Placeholder body is `"-- migration: <name>\n"` (JOLT-RS-104).**
+//!     One-line SQL comment naming the migration. jolt-db is
+//!     forward-only (decision 48), so an `-- up` / `-- down` template
+//!     would mislead operators into expecting reversibility we
+//!     deliberately don't support. A bare empty file would parse
+//!     cleanly through `read_migration_files` (decision 24 captures
+//!     content verbatim) but offers no human-readable hint of which
+//!     migration the file is — the one-line comment gives operators
+//!     a label they'll immediately recognize when grepping a stale
+//!     migrations directory. Trailing newline matches POSIX file
+//!     convention (most editors will auto-add one anyway, but the
+//!     binary should produce a well-formed file on first write).
+//!
+//! 52. **Filename collision returns `Err(io::ErrorKind::AlreadyExists)`,
+//!     does not overwrite (JOLT-RS-104).** Two `migrate new <name>`
+//!     calls in the same second produce identical timestamps and
+//!     therefore identical filenames. Overwriting would silently lose
+//!     the first migration's body (whatever the operator typed into
+//!     it after creation); erroring is the safe default. The check
+//!     uses `OpenOptions::new().write(true).create_new(true)` — an
+//!     atomic create-or-fail at the filesystem layer that closes the
+//!     check-then-write race a `Path::exists()` + `fs::write` pair
+//!     would leave open. Same operator can re-run after the second
+//!     elapses (the timestamp will differ) or supply a more specific
+//!     name to disambiguate.
+//!
+//! 53. **Name validation rejects path separators and the empty string
+//!     (JOLT-RS-104).** A name like `"../etc/passwd"` would otherwise
+//!     escape the `migrations/` directory (the constructed filename
+//!     is `migrations/<timestamp>_<name>.sql`, and `<name>` is
+//!     substituted verbatim). The validation runs before
+//!     `OpenOptions::create_new` so the error path surfaces a
+//!     dedicated `io::ErrorKind::InvalidInput` rather than a generic
+//!     filesystem failure further down the stack. Restricted set: no
+//!     `/`, no `\`, no empty string. Other characters (spaces, dots,
+//!     hyphens, mixed case) are operator-controlled stylistic choices
+//!     and pass through unchanged — jolt-db doesn't normalize the
+//!     name beyond the separator guard, matching the
+//!     filesystem-passthrough convention `read_migration_files` uses
+//!     for the discovery side.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -1591,11 +1676,86 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Scaffold a new migration file in `dir` (JOLT-RS-104). The `jolt-db
+/// migrate new <name>` CLI is a thin wrapper around this function.
+///
+/// Builds `<dir>/<YYYYMMDDHHMMSS>_<name>.sql` from `now` (formatted UTC,
+/// decision 50), writes the `"-- migration: <name>\n"` placeholder body
+/// (decision 51), and returns the path that was written. Creates `dir`
+/// (and any missing parent components) if it does not yet exist so the
+/// first `migrate new` against a fresh project succeeds without a
+/// separate `mkdir`.
+///
+/// # Errors
+///
+/// * [`std::io::ErrorKind::InvalidInput`] if `name` is empty or contains
+///   a path separator (`/` or `\`) — decision 53.
+/// * [`std::io::ErrorKind::AlreadyExists`] if a file at the constructed
+///   path already exists. Use a more specific `name` or wait one second
+///   for the timestamp to roll over — decision 52.
+/// * Any other [`std::io::Error`] surfaced from creating `dir` or
+///   writing the file (propagated as-is).
+///
+/// # Example
+///
+/// ```ignore
+/// let path = jolt_db::create_migration_file(
+///     "./migrations",
+///     "add_users",
+///     chrono::Utc::now(),
+/// )?;
+/// println!("created {}", path.display());
+/// ```
+pub fn create_migration_file(
+    dir: &str,
+    name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<std::path::PathBuf> {
+    // Decision 53: reject empty names and path separators before
+    // touching the filesystem so the failure surfaces as a dedicated
+    // `InvalidInput` rather than a downstream filesystem error.
+    if name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "migration name cannot be empty",
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "migration name cannot contain path separators",
+        ));
+    }
+
+    // Decision 50: UTC timestamp, fixed-width `%Y%m%d%H%M%S` so the
+    // 14-character prefix sorts lexicographically == chronologically.
+    let timestamp = now.format("%Y%m%d%H%M%S").to_string();
+    let filename = format!("{timestamp}_{name}.sql");
+    let dir_path = std::path::Path::new(dir);
+    std::fs::create_dir_all(dir_path)?;
+    let path = dir_path.join(&filename);
+
+    // Decision 52: atomic create-or-fail. `create_new(true)` returns
+    // `ErrorKind::AlreadyExists` if the path exists, closing the
+    // check-then-write race a `Path::exists` + `fs::write` pair would
+    // leave open.
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    // Decision 51: one-line SQL comment naming the migration, trailing
+    // newline. Forward-only (decision 48) so no `-- up` / `-- down`
+    // template.
+    writeln!(file, "-- migration: {name}")?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DbConfig, JoltDb, MIGRATIONS_TABLE_DDL, MigrationError, MigrationFile, TypedQuery,
-        read_migration_files, sha256_hex,
+        create_migration_file, read_migration_files, sha256_hex,
     };
 
     #[test]
@@ -3544,5 +3704,157 @@ mod tests {
             .execute(db.pool())
             .await
             .expect("truncate _migrations (teardown)");
+    }
+
+    // ---- JOLT-RS-104: `create_migration_file` (CLI scaffolding) ----
+
+    /// Compile-time pin: `create_migration_file(dir: &str, name: &str,
+    /// now: DateTime<Utc>) -> std::io::Result<PathBuf>` (decisions 49,
+    /// 50). The explicit return annotation catches a regression that
+    /// switches the `now` parameter to `Local`-time, narrows the
+    /// return to `()` (the binary doesn't need the path but the
+    /// library does for JOLT-RS-105's filename test), or wraps the
+    /// return in a foreign error type.
+    #[test]
+    fn create_migration_file_signature_pins() {
+        fn _pin(
+            dir: &str,
+            name: &str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> std::io::Result<std::path::PathBuf> {
+            create_migration_file(dir, name, now)
+        }
+    }
+
+    /// PRD-104 mandated filename shape: `<YYYYMMDDHHMMSS>_<name>.sql`.
+    /// Pins decision 50's `%Y%m%d%H%M%S` UTC format — a regression
+    /// that drops the leading zero on a single-digit month, swaps the
+    /// component order, or formats in local time would produce a
+    /// different filename and fail this assertion.
+    #[test]
+    fn create_migration_file_builds_timestamped_filename() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-name");
+        // The PRD's verification example uses 2026-05-10 12:00:00 UTC.
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path =
+            create_migration_file(dir.path_str(), "add_users", now).expect("create migration");
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("UTF-8 filename");
+        assert_eq!(filename, "20260510120000_add_users.sql");
+        assert_eq!(path.parent(), Some(dir.path.as_path()));
+    }
+
+    /// Decision 51: placeholder body is the single line
+    /// `"-- migration: <name>\n"`. A regression that drops the comment,
+    /// writes an `-- up` / `-- down` template, or omits the trailing
+    /// newline fails this assertion.
+    #[test]
+    fn create_migration_file_writes_placeholder_body() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-body");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path = create_migration_file(dir.path_str(), "add_users", now).expect("create");
+        let body = std::fs::read_to_string(&path).expect("read placeholder body");
+        assert_eq!(body, "-- migration: add_users\n");
+    }
+
+    /// Decision 52: a second call with the same timestamp and name
+    /// returns `ErrorKind::AlreadyExists`, does not overwrite the
+    /// first file. Pins the `OpenOptions::create_new(true)` choice —
+    /// a regression that uses `fs::write` (truncate-and-write) would
+    /// silently overwrite and this test would fail.
+    #[test]
+    fn create_migration_file_errors_on_collision_without_overwriting() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-collision");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path =
+            create_migration_file(dir.path_str(), "add_users", now).expect("first create");
+        // Mutate the first file's body so we can verify it survives.
+        std::fs::write(&path, "-- operator edits\n").expect("rewrite first body");
+
+        let err = create_migration_file(dir.path_str(), "add_users", now)
+            .expect_err("second create with identical timestamp must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // The first file's body is untouched.
+        let body = std::fs::read_to_string(&path).expect("re-read first body");
+        assert_eq!(body, "-- operator edits\n");
+    }
+
+    /// Decision 53: empty name and names containing path separators
+    /// surface as `ErrorKind::InvalidInput` *before* any filesystem
+    /// touch. A regression that drops the validation would either
+    /// write an unintended file (path-traversal via `../`) or
+    /// fail later with a generic `Os` error.
+    #[test]
+    fn create_migration_file_rejects_invalid_names() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-validate");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let empty = create_migration_file(dir.path_str(), "", now)
+            .expect_err("empty name should be rejected");
+        assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
+
+        let slash = create_migration_file(dir.path_str(), "../escape", now)
+            .expect_err("forward-slash name should be rejected");
+        assert_eq!(slash.kind(), std::io::ErrorKind::InvalidInput);
+
+        let backslash = create_migration_file(dir.path_str(), "win\\path", now)
+            .expect_err("backslash name should be rejected");
+        assert_eq!(backslash.kind(), std::io::ErrorKind::InvalidInput);
+
+        // No files were created (the validation runs before any
+        // filesystem write). Read the directory back: should be empty.
+        let entries: Vec<_> = std::fs::read_dir(&dir.path)
+            .expect("read dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect entries");
+        assert!(
+            entries.is_empty(),
+            "validation must reject before touching disk; found {entries:?}",
+        );
+    }
+
+    /// `create_migration_file` creates the migrations directory if it
+    /// doesn't yet exist (operator's first `migrate new` against a
+    /// fresh repo). Uses a deliberately not-yet-created subdirectory
+    /// under the test fixture so cleanup still works via TestDir's
+    /// recursive remove.
+    #[test]
+    fn create_migration_file_creates_missing_directory() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-mkdir");
+        let nested = dir.path.join("nested").join("migrations");
+        let nested_str = nested.to_str().expect("UTF-8 path");
+        assert!(!nested.exists(), "fixture: nested dir not created yet");
+
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+        let path =
+            create_migration_file(nested_str, "init", now).expect("should mkdir-p and create");
+        assert!(path.exists());
+        assert_eq!(path.parent(), Some(nested.as_path()));
     }
 }

@@ -1497,7 +1497,7 @@
       "verification": [
         "Manual: cargo run -p jolt-db -- migrate new add_users \u2192 creates migrations/20260510120000_add_users.sql."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-105",
