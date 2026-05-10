@@ -2171,7 +2171,8 @@ mod cors {
     use axum::extract::Request as AxumRequest;
     use axum::http::header::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
-        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE,
+        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
+        ORIGIN,
     };
     use axum::http::{Method as HttpMethod, StatusCode};
     use axum::response::Response;
@@ -2217,9 +2218,14 @@ mod cors {
         // here because both sides hold clones of the same Arc.
         let ext = Arc::new(RequestExt::new());
 
+        // The `Origin` header is required for the JOLT-RS-058 matching helper
+        // to echo the configured origin back. Without it (or a wildcard
+        // config), Allow-Origin is omitted — that case is covered by the
+        // sibling no-match test rather than this verification path.
         let mut req = AxumRequest::builder()
             .method(HttpMethod::OPTIONS)
             .uri("/api/test")
+            .header(ORIGIN, "https://example.com")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut().insert(Arc::clone(&ext));
@@ -2290,9 +2296,12 @@ mod cors {
         let svc = layer.layer(inner);
 
         let ext = Arc::new(RequestExt::new());
+        // JOLT-RS-058 matching: include `Origin` so the configured origin is
+        // echoed back. Without it, Allow-Origin would be omitted.
         let mut req = AxumRequest::builder()
             .method(HttpMethod::GET)
             .uri("/api/test")
+            .header(ORIGIN, "https://example.com")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut().insert(Arc::clone(&ext));
@@ -2310,7 +2319,7 @@ mod cors {
         );
         assert_eq!(
             headers
-                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .get(ACCESS_CONTROL_EXPOSE_HEADERS)
                 .and_then(|v| v.to_str().ok()),
             Some("x-request-id, x-trace-id"),
         );
@@ -2404,10 +2413,175 @@ mod cors {
         );
         assert_eq!(
             headers
-                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .get(ACCESS_CONTROL_EXPOSE_HEADERS)
                 .and_then(|v| v.to_str().ok()),
             Some("x-from-handler"),
             "layer must not overwrite inner-set Access-Control-Expose-Headers",
+        );
+    }
+
+    // -- JOLT-RS-058: shared origin-matching helper coverage. ---------------
+    //
+    // The four tests below pin the contract for `select_allowed_origin`,
+    // shared by both the OPTIONS preflight and the non-OPTIONS injection:
+    // wildcard always emits "*", a specific configured origin echoes the
+    // request's `Origin` header back when it matches, a non-matching origin
+    // suppresses the header entirely, and the preflight emits the configured
+    // method list verbatim.
+
+    #[tokio::test]
+    async fn wildcard_origin_emits_star_regardless_of_request_origin() {
+        // `allow_origins = vec!["*"]` is the wildcard shape. The matching
+        // helper short-circuits before the Origin-header lookup and emits
+        // a literal `*` — works whether or not the request advertises an
+        // Origin (browsers always send one, but tests don't have to).
+        let config = CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            max_age: 0,
+            expose_headers: vec![],
+        };
+        let layer = CorsLayer::new(config);
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            Ok::<Response, Infallible>(Response::new(Body::from("ok")))
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .header(ORIGIN, "https://anywhere.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "wildcard config must emit `*` for Access-Control-Allow-Origin",
+        );
+    }
+
+    #[tokio::test]
+    async fn specific_origin_match_echoes_request_origin() {
+        // Multi-origin allow-list with the request's Origin landing on the
+        // SECOND entry — proves the matching helper does an actual lookup,
+        // not the prior first-entry simplification. The echoed value must be
+        // the request's Origin, not the first configured entry.
+        let config = CorsConfig {
+            allow_origins: vec![
+                "https://a.example.com".to_string(),
+                "https://b.example.com".to_string(),
+            ],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            max_age: 0,
+            expose_headers: vec![],
+        };
+        let layer = CorsLayer::new(config);
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            Ok::<Response, Infallible>(Response::new(Body::from("ok")))
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .header(ORIGIN, "https://b.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://b.example.com"),
+            "matched origin must be echoed back, not the first config entry",
+        );
+    }
+
+    #[tokio::test]
+    async fn no_origin_match_omits_allow_origin_header() {
+        // The request advertises an Origin that is NOT in the allow-list
+        // (and the config does not contain `*`). The helper must return
+        // None so neither branch emits Access-Control-Allow-Origin —
+        // refusing a CORS grant is the spec-correct response, NOT echoing
+        // the unauthorized origin or falling back to a configured default.
+        let config = CorsConfig {
+            allow_origins: vec!["https://allowed.example.com".to_string()],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            max_age: 0,
+            expose_headers: vec![],
+        };
+        let layer = CorsLayer::new(config);
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            Ok::<Response, Infallible>(Response::new(Body::from("ok")))
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .header(ORIGIN, "https://attacker.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert!(
+            resp.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "non-matching origin must NOT receive Access-Control-Allow-Origin",
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_emits_correct_allow_methods_header() {
+        // OPTIONS preflight with a configured method list must produce
+        // `Access-Control-Allow-Methods` joined with ", " in the order
+        // the methods appear in `allow_methods`. The wildcard origin keeps
+        // matching out of the way so this test focuses on the methods header.
+        let config = CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            allow_methods: vec![Method::Get, Method::Post, Method::Delete],
+            allow_headers: vec![],
+            max_age: 0,
+            expose_headers: vec![],
+        };
+        let layer = CorsLayer::new(config);
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            panic!("inner service must NOT be called for OPTIONS preflight");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::OPTIONS)
+            .uri("/api/test")
+            .header(ORIGIN, "https://example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get(ACCESS_CONTROL_ALLOW_METHODS)
+                .and_then(|v| v.to_str().ok()),
+            Some("GET, POST, DELETE"),
+            "preflight Access-Control-Allow-Methods must list configured methods in order",
         );
     }
 }

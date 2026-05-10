@@ -11,12 +11,20 @@
 //! - `Access-Control-Max-Age`
 //!
 //! Non-`OPTIONS` requests are delegated to the inner service; on the way back,
-//! [`Access-Control-Allow-Origin`] (first entry of `allow_origins`, mirroring
-//! the preflight rule from JOLT-RS-056) and [`Access-Control-Expose-Headers`]
-//! (joined `allow_origins` whitelist) are injected onto the inner's response
-//! when the matching config field is non-empty (JOLT-RS-057). Existing values
-//! on the response are not overwritten — if the inner service has already set
-//! either header, the layer leaves it alone.
+//! [`Access-Control-Allow-Origin`] (resolved via [`select_allowed_origin`]) and
+//! [`Access-Control-Expose-Headers`] (joined `expose_headers` whitelist) are
+//! injected onto the inner's response when the matching config field is
+//! non-empty (JOLT-RS-057). Existing values on the response are not overwritten
+//! — if the inner service has already set either header, the layer leaves it
+//! alone.
+//!
+//! Allow-Origin selection (JOLT-RS-058) follows the standard CORS matching
+//! rule and is shared by both the preflight and non-preflight branches:
+//! 1. If `allow_origins` contains `"*"` → emit `*`.
+//! 2. Else if the request carries an `Origin` header AND that origin appears
+//!    in `allow_origins` → echo it.
+//! 3. Otherwise → no `Access-Control-Allow-Origin` header is emitted (the
+//!    request's origin is not granted CORS access).
 //!
 //! [`Access-Control-Allow-Origin`]: axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN
 //! [`Access-Control-Expose-Headers`]: axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS
@@ -46,7 +54,7 @@ use axum::body::Body;
 use axum::extract::Request as AxumRequest;
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
+    ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, ORIGIN,
 };
 use axum::http::{HeaderValue, Method as HttpMethod, StatusCode};
 use axum::response::Response;
@@ -126,8 +134,14 @@ where
             }
         };
 
+        // Resolve Allow-Origin once, BEFORE branching, so both the preflight
+        // and non-preflight paths consume the same matching result. Computing
+        // here also avoids borrowing `req` later in the non-OPTIONS branch
+        // (which moves `req` into `inner.call`).
+        let allowed_origin = select_allowed_origin(&self.config, &req);
+
         if req.method() == HttpMethod::OPTIONS {
-            let response = build_preflight_response(&self.config);
+            let response = build_preflight_response(&self.config, allowed_origin);
             request_ext.mark_finished();
             return Box::pin(async move { Ok(response) });
         }
@@ -142,10 +156,40 @@ where
         let config = self.config.clone();
         Box::pin(async move {
             let mut response = inner.call(req).await?;
-            inject_response_cors_headers(&config, &mut response);
+            inject_response_cors_headers(&config, allowed_origin, &mut response);
             Ok(response)
         })
     }
+}
+
+/// Resolve the `Access-Control-Allow-Origin` value for a request given a
+/// [`CorsConfig`] (JOLT-RS-058). Shared by both the preflight short-circuit
+/// (`build_preflight_response`) and the non-preflight injection
+/// (`inject_response_cors_headers`) so a single matching rule governs both
+/// paths.
+///
+/// Logic, in spec order:
+/// 1. If `allow_origins` contains the wildcard `"*"`, return `"*"` —
+///    spec-correct shape that grants any origin access without echoing.
+/// 2. Else if the request carries an `Origin` header AND that origin appears
+///    verbatim in `allow_origins`, return the echoed origin.
+/// 3. Otherwise, return `None` so neither branch emits the header.
+///
+/// `HeaderValue::from_str` cannot fail on either an ASCII `*` literal or on a
+/// header value already vetted by the framework, but the result is checked
+/// anyway to keep the helper total and panic-free.
+fn select_allowed_origin(config: &CorsConfig, req: &AxumRequest) -> Option<HeaderValue> {
+    if config.allow_origins.iter().any(|o| o == "*") {
+        return HeaderValue::from_str("*").ok();
+    }
+
+    let origin_header = req.headers().get(ORIGIN)?;
+    let origin_str = origin_header.to_str().ok()?;
+    if config.allow_origins.iter().any(|o| o == origin_str) {
+        return HeaderValue::from_str(origin_str).ok();
+    }
+
+    None
 }
 
 /// Inject `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers`
@@ -154,21 +198,19 @@ where
 /// is empty (matching the OPTIONS branch's empty-default contract from
 /// JOLT-RS-056). If the inner service has already set either header, the
 /// existing value is preserved — the layer is additive, not authoritative.
-fn inject_response_cors_headers(config: &CorsConfig, response: &mut Response) {
+///
+/// `allowed_origin` is precomputed by [`select_allowed_origin`] and passed in
+/// so the matching rule lives in one place (JOLT-RS-058).
+fn inject_response_cors_headers(
+    config: &CorsConfig,
+    allowed_origin: Option<HeaderValue>,
+    response: &mut Response,
+) {
     let headers = response.headers_mut();
 
-    // `Access-Control-Allow-Origin` mirrors the preflight first-entry rule
-    // (JOLT-RS-056). Per-request `Origin`-header matching against multiple
-    // configured origins is JOLT-RS-058's territory and will replace this
-    // simplification with a shared helper used by both the OPTIONS and
-    // non-OPTIONS branches. For now: empty config → no header; one or more
-    // origins → emit the first, which handles the common single-origin and
-    // `vec!["*"]` wildcard shapes.
     if !headers.contains_key(ACCESS_CONTROL_ALLOW_ORIGIN) {
-        if let Some(origin) = config.allow_origins.first() {
-            if let Ok(value) = HeaderValue::from_str(origin) {
-                headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
-            }
+        if let Some(value) = allowed_origin {
+            headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
         }
     }
 
@@ -189,18 +231,14 @@ fn inject_response_cors_headers(config: &CorsConfig, response: &mut Response) {
 /// so the [`CorsConfig::default`] empty/restrictive shape produces a bare 204
 /// without granting any CORS access — matching the "default never opens up
 /// CORS" contract pinned by JOLT-RS-055.
-fn build_preflight_response(config: &CorsConfig) -> Response {
+///
+/// `allowed_origin` is precomputed by [`select_allowed_origin`] and passed in
+/// so the matching rule lives in one place (JOLT-RS-058).
+fn build_preflight_response(config: &CorsConfig, allowed_origin: Option<HeaderValue>) -> Response {
     let mut builder = Response::builder().status(StatusCode::NO_CONTENT);
 
-    // `Access-Control-Allow-Origin` carries a single value per the spec; if
-    // multiple origins are configured, request-Origin matching (JOLT-RS-058)
-    // will pick the right one. For 056 we surface the first configured entry
-    // — `vec!["*"]` becomes a literal `*`, a single specific origin echoes
-    // back as itself. Empty config => no header.
-    if let Some(origin) = config.allow_origins.first() {
-        if let Ok(value) = HeaderValue::from_str(origin) {
-            builder = builder.header(ACCESS_CONTROL_ALLOW_ORIGIN, value);
-        }
+    if let Some(value) = allowed_origin {
+        builder = builder.header(ACCESS_CONTROL_ALLOW_ORIGIN, value);
     }
 
     if !config.allow_methods.is_empty() {
