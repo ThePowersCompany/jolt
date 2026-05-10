@@ -45,14 +45,23 @@
 //!    stashing a `BufferedBody(Bytes)` extension and teaching
 //!    `build_jolt_request` to consume it.
 //!
-//! 4. **Parse failure is silent in 059.** The layer attempts the parse, and
-//!    on `Err` simply does not insert into extensions. The downstream
-//!    AutoMiddleware codegen's `.expect(...)` panics today on the same
-//!    failure (see the `JOLT-RS-062 will replace this panic` note in
-//!    `jolt-macros::auto_middleware::field_init_expr`). JOLT-RS-060 will move
-//!    the failure-rejection contract into THIS layer (return 400 + mark
-//!    finished), at which point the codegen's `.expect` becomes unreachable
-//!    in the wired-server path.
+//! 4. **Parse failure short-circuits with a `400 Bad Request`** carrying a
+//!    `text/plain` body of `"Invalid JSON: <serde error>"` (JOLT-RS-060).
+//!    The layer also flips
+//!    [`RequestExt::mark_finished`](crate::RequestExt::mark_finished) on the
+//!    request's existing [`Arc<RequestExt>`](crate::RequestExt) (or freshly
+//!    injects one if no upstream layer has) so any composed observers see the
+//!    same finished-flag contract Router relies on for its own short-circuit
+//!    path. Because the layer returns the 400 directly from `call()`, the
+//!    inner service is never invoked on a failed parse; the `mark_finished`
+//!    flip is a pure observability signal — it does NOT round-trip through
+//!    Router's stash/take dance.
+//!
+//!    The downstream AutoMiddleware codegen's `.expect(...)` (see the
+//!    `JOLT-RS-062 will replace this panic` note in
+//!    `jolt-macros::auto_middleware::field_init_expr`) is therefore unreachable
+//!    in the wired-server path: malformed bodies are rejected by THIS layer
+//!    before they ever reach the macro-emitted extraction.
 //!
 //! 5. **Body cap mirrors [`build_jolt_request`].** The `u32::MAX` ceiling is
 //!    a safety valve, not policy — the same temporary cap that Router uses.
@@ -65,13 +74,18 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Request as AxumRequest;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use serde::de::DeserializeOwned;
 use tower::{Layer, Service};
+
+use crate::request_ext::RequestExt;
 
 /// `tower::Layer` that buffers the request body and attempts to deserialize
 /// it as `T`. See module docs for the architectural contract (extension
@@ -132,10 +146,12 @@ impl<S, T> Layer<S> for ParseBodyLayer<T> {
 /// Inner-service wrapper produced by [`ParseBodyLayer::layer`]. Buffers the
 /// request body and inserts a parsed `T` into request extensions on success.
 ///
-/// On parse failure (JOLT-RS-059 contract): the layer leaves the request's
-/// extensions untouched and delegates to the inner service. JOLT-RS-060 will
-/// replace the failure branch with a `400 Bad Request` short-circuit; the
-/// service shape pinned here makes that change additive.
+/// On parse failure (JOLT-RS-060): the layer short-circuits with a
+/// `400 Bad Request` carrying `"Invalid JSON: <serde error>"` as a `text/plain`
+/// body, and flips
+/// [`RequestExt::mark_finished`](crate::RequestExt::mark_finished) so any
+/// composed observers see the same finished-flag contract Router relies on.
+/// The inner service is NOT invoked when the parse fails.
 pub struct ParseBodyService<S, T> {
     inner: S,
     _marker: PhantomData<fn() -> T>,
@@ -181,23 +197,70 @@ where
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
         Box::pin(async move {
-            let (parts, body) = req.into_parts();
+            let (mut parts, body) = req.into_parts();
             let bytes = buffer_body(body).await;
 
-            // Restore the buffered bytes as a fresh Body BEFORE attempting
-            // the parse. Even on parse failure we want the inner service to
-            // receive a fully-formed request — that keeps the silent-failure
-            // contract (point 4 in module docs) compatible with downstream
-            // body re-readers (build_jolt_request).
+            // Mirror Router/CorsService's preserve-or-inject contract for
+            // `Arc<RequestExt>`: reuse an upstream-supplied ext so a flipped
+            // `finished` latch is observable to whoever holds the same Arc;
+            // inject a fresh one when no upstream layer has so the
+            // mark-finished call on the failure branch is always sound.
+            let request_ext: Arc<RequestExt> = match parts.extensions.get::<Arc<RequestExt>>() {
+                Some(existing) => Arc::clone(existing),
+                None => {
+                    let fresh = Arc::new(RequestExt::new());
+                    parts.extensions.insert(Arc::clone(&fresh));
+                    fresh
+                }
+            };
+
+            // Restore the buffered bytes as a fresh Body. On the success
+            // branch the inner service's downstream body re-readers (notably
+            // `build_jolt_request`) keep working; on the failure branch we
+            // never reach the inner service at all, but rebuilding the
+            // request keeps the parts/body shape consistent with the
+            // success path (and avoids a second branch on `req.into_parts`).
             let mut req = AxumRequest::from_parts(parts, Body::from(bytes.clone()));
 
-            if let Ok(parsed) = serde_json::from_slice::<T>(&bytes) {
-                req.extensions_mut().insert(parsed);
+            match serde_json::from_slice::<T>(&bytes) {
+                Ok(parsed) => {
+                    req.extensions_mut().insert(parsed);
+                    inner.call(req).await
+                }
+                Err(err) => {
+                    // JOLT-RS-060: short-circuit with 400 + mark_finished.
+                    // The 400 is returned directly from `call` (not stashed
+                    // via `RequestExt::set_response`) because ParseBodyLayer
+                    // sits OUTSIDE Router in the typical wiring — Router's
+                    // stash/take dance fires only when the registry walk
+                    // sees `is_finished()`, which won't happen if the
+                    // request never reaches Router. An OUTER layer (e.g.
+                    // CorsLayer wrapping ParseBodyService) still sees the
+                    // returned 400 as the inner-call result and can layer
+                    // its own decoration onto it.
+                    request_ext.mark_finished();
+                    Ok(bad_request_for_parse_error(&err))
+                }
             }
-
-            inner.call(req).await
         })
     }
+}
+
+/// Build the `400 Bad Request` response surfaced when `serde_json::from_slice`
+/// rejects the buffered body bytes (JOLT-RS-060). The body is `text/plain` to
+/// match the format of the framework's other ad-hoc error responses (Router's
+/// 404/405 paths), and carries `"Invalid JSON: <serde error>"` so the caller
+/// gets actionable detail without the layer needing to know what shape `T` is.
+fn bad_request_for_parse_error(err: &serde_json::Error) -> Response {
+    let body = format!("Invalid JSON: {err}");
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(Body::from(body))
+        .expect("400 response builder always succeeds with static headers + owned body")
 }
 
 /// Drain an axum [`Body`] into [`Bytes`] under the same `u32::MAX` cap that

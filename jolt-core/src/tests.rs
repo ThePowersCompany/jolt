@@ -2604,8 +2604,8 @@ mod parse_body {
     //!    extensions channel — a regression that 060+ would have a hard time
     //!    catching.
     //!
-    //! Parse-failure rejection (400 + mark_finished) is JOLT-RS-060's contract
-    //! and lives in its own module when that item lands.
+    //! Parse-failure rejection (400 + mark_finished) lands in JOLT-RS-060's
+    //! sibling test below: `invalid_json_body_short_circuits_with_400_and_marks_finished`.
 
     use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
@@ -2617,6 +2617,7 @@ mod parse_body {
     use serde::Deserialize;
     use tower::{Layer, ServiceExt};
 
+    use crate::request_ext::RequestExt;
     use crate::ParseBodyLayer;
 
     #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -2680,6 +2681,74 @@ mod parse_body {
         assert_eq!(
             restored, payload,
             "layer must restore the buffered body bytes onto the request before delegating",
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_json_body_short_circuits_with_400_and_marks_finished() {
+        // JOLT-RS-060: malformed JSON must produce a 400 with an "Invalid
+        // JSON: ..." text/plain body, AND the layer must flip the request's
+        // RequestExt finished latch. The inner service is structurally
+        // forbidden from running by handing it a panicking service_fn — any
+        // delegation past the failure branch causes an unrelated test crash
+        // rather than a silent contract regression.
+        let inner = tower::service_fn(|_: AxumRequest| async move {
+            panic!("ParseBodyService must short-circuit on parse failure and never call inner");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let layer = ParseBodyLayer::<TestBody>::new();
+        let svc = layer.layer(inner);
+
+        // Pre-inject an Arc<RequestExt> so the test can observe the
+        // finished-flag flip after the layer runs (the alternative — letting
+        // the layer inject a fresh ext — would leave the test with no
+        // handle on the same Arc).
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/test")
+            .header("content-type", "application/json")
+            .body(Body::from(&b"{not valid json"[..]))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid JSON must surface 400 Bad Request",
+        );
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("400 response must carry a Content-Type")
+            .to_str()
+            .expect("Content-Type must be ASCII");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "400 body is text/plain; got {content_type}",
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), u32::MAX as usize)
+            .await
+            .unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("400 body is UTF-8");
+        assert!(
+            body_text.starts_with("Invalid JSON: "),
+            "400 body must be prefixed with 'Invalid JSON: '; got {body_text:?}",
+        );
+        assert!(
+            body_text.len() > "Invalid JSON: ".len(),
+            "400 body must include the underlying serde error detail; got {body_text:?}",
+        );
+
+        assert!(
+            request_ext.is_finished(),
+            "ParseBodyService must flip RequestExt::mark_finished on parse failure",
+        );
+        assert!(
+            request_ext.take_response().is_none(),
+            "the 400 is returned directly from call(), not stashed in RequestExt",
         );
     }
 }
