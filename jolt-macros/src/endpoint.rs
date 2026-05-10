@@ -9,14 +9,19 @@
 //! - JOLT-RS-041: emit the (Method, path) -> handler match. (landed)
 //!
 //! Phase09 ladder:
-//! - JOLT-RS-042 (this iteration): wire the parsing + codegen pipeline into
-//!   the proc-macro entry point and emit one `inventory::submit!` block per
-//!   discovered method, registering a [`jolt_core::RegisteredEndpoint`] so
+//! - JOLT-RS-042: wire the parsing + codegen pipeline into the proc-macro
+//!   entry point and emit one `inventory::submit!` block per discovered
+//!   method, registering a [`jolt_core::RegisteredEndpoint`] so
 //!   `JoltServer::start` (JOLT-RS-044) can collect them via
-//!   `inventory::iter::<RegisteredEndpoint>()`.
-//! - JOLT-RS-043: generate the per-endpoint handler wrapper (axum-compatible
-//!   async fn). The dispatch match emitted by [`generate_dispatch_match`] is
-//!   the seed for that wrapper.
+//!   `inventory::iter::<RegisteredEndpoint>()`. (landed)
+//! - JOLT-RS-043 (this iteration): emit one `__jolt_handler_<name>` axum-
+//!   compatible async wrapper per discovered method via
+//!   [`generate_handler_wrappers`]. Each wrapper takes a `::jolt_core::Request`,
+//!   constructs `Self` via `Default::default`, calls the user method, and
+//!   bridges the return type to `axum::response::Response` through axum's
+//!   [`IntoResponse`] trait. JOLT-RS-044 will extend
+//!   [`crate::registered_endpoint::RegisteredEndpoint`] with a
+//!   `handler: fn(Request) -> EndpointFuture` field pointing at these wrappers.
 //!
 //! The parsing entry points are split out from `lib.rs` so they can be
 //! unit-tested against a `proc_macro2::TokenStream` / parsed `syn::ItemImpl`
@@ -372,15 +377,103 @@ fn generate_inventory_submits(
     quote! { #(#submits)* }
 }
 
+/// Emit one `__jolt_handler_<name>` associated fn per discovered method on the
+/// endpoint type. Each wrapper takes a `::jolt_core::Request`, constructs a
+/// `Self` instance via `Default::default`, invokes the user's `&self` method,
+/// and bridges the return value to an `axum::response::Response` via axum's
+/// [`IntoResponse`] trait.
+///
+/// Wrapper signature:
+///
+/// ```ignore
+/// #[doc(hidden)]
+/// pub fn __jolt_handler_<name>(__req: ::jolt_core::Request) -> ::jolt_core::EndpointFuture {
+///     ::std::boxed::Box::pin(async move {
+///         let _ = __req; // consumed by JOLT-RS-046+ auto-middleware extraction
+///         let __endpoint = <Self as ::core::default::Default>::default();
+///         let __result = Self::<name>(&__endpoint);
+///         <_ as ::axum::response::IntoResponse>::into_response(__result)
+///     })
+/// }
+/// ```
+///
+/// Decisions pinned here:
+///
+/// 1. **Per-request `Default::default()` construction.** The progress notes
+///    for JOLT-RS-042 flagged the construct-`Self` problem as non-trivial.
+///    Default is the simplest forward-compatible choice: it works for unit
+///    structs (`#[derive(Default)]`), for structs whose fields all have
+///    sensible defaults, and lets future PRDs swap to a state-injected
+///    constructor without changing the wrapper's external signature. The
+///    `Self: Default` bound is enforced by rustc on the generated code; users
+///    get a "the trait `Default` is not implemented for `MyEndpoint`" error
+///    at the wrapper site if they forget to derive it.
+/// 2. **Wrappers are emitted as a SECOND `impl <SelfTy>` block.** Adding the
+///    wrappers to the user's own impl block would mean re-parsing and
+///    splicing `ImplItem::Fn` entries into `item.items`, which fights with
+///    [`strip_verb_attrs`]'s in-place mutation. A separate impl block is
+///    cleaner: it composes via Rust's "multiple inherent impls per type" rule,
+///    keeps the user's impl block lossless except for the verb-attr strip,
+///    and gives wrappers a stable name-spaced location for 044's
+///    `RegisteredEndpoint.handler` to point at via `Self::__jolt_handler_<name>`.
+/// 3. **`__req` is bound but unused.** Until JOLT-RS-046 (auto-middleware)
+///    lands, the user's method takes `&self` only — there is no body/query
+///    extraction to feed the request into. Binding `__req` and immediately
+///    `let _ = __req;` keeps the wrapper signature stable for 044's fn-pointer
+///    and avoids a `unused_variable` warning. When auto-middleware lands, the
+///    `let _ = __req;` line is replaced with field extraction.
+/// 4. **Return-shape bridging via `axum::response::IntoResponse`** (not
+///    `Into<axum::response::Response>`). axum has a blanket `impl IntoResponse
+///    for Result<T: IntoResponse, E: IntoResponse>`, so emitting
+///    `IntoResponse::into_response(__result)` covers both `Response<T>` and
+///    `Result<Response<T>, E>` shapes uniformly. `Response<T>` itself
+///    implements `IntoResponse` via the impl in `jolt-core/src/response.rs`
+///    that piggybacks on the existing `From<Response<T>>` conversions.
+///
+/// Wrappers are `#[doc(hidden)]` because they are macro-internal — no user
+/// should call `MyEndpoint::__jolt_handler_xxx` directly. JOLT-RS-044 will
+/// reach into them via inventory iteration.
+fn generate_handler_wrappers(
+    self_ty: &Type,
+    methods: &[DiscoveredMethod],
+) -> proc_macro2::TokenStream {
+    if methods.is_empty() {
+        return proc_macro2::TokenStream::new();
+    }
+    let wrappers = methods.iter().map(|m| {
+        let user_fn = &m.sig.ident;
+        let wrapper_name = format_ident!("__jolt_handler_{}", user_fn);
+        quote! {
+            #[doc(hidden)]
+            pub fn #wrapper_name(__req: ::jolt_core::Request) -> ::jolt_core::EndpointFuture {
+                ::std::boxed::Box::pin(async move {
+                    let _ = __req;
+                    let __endpoint: Self = <Self as ::core::default::Default>::default();
+                    let __result = Self::#user_fn(&__endpoint);
+                    <_ as ::axum::response::IntoResponse>::into_response(__result)
+                })
+            }
+        }
+    });
+    quote! {
+        #[automatically_derived]
+        impl #self_ty {
+            #(#wrappers)*
+        }
+    }
+}
+
 /// Top-level driver invoked by the proc-macro entry point in `lib.rs`. Parses
 /// the attribute and impl block, runs the phase08 scan + validate passes,
-/// strips magic-marker verb attributes from the re-emitted impl, and appends
-/// one `inventory::submit!` block per discovered method.
+/// strips magic-marker verb attributes from the re-emitted impl, appends
+/// one `inventory::submit!` block per discovered method, and emits a sibling
+/// impl block holding one `__jolt_handler_<name>` wrapper per method
+/// (JOLT-RS-043).
 ///
-/// Returns the combined token stream (re-emitted impl + submits). On failure
-/// returns the original `item` tokens plus a `compile_error!` so the user
-/// gets a single targeted diagnostic — the same shape JOLT-RS-038 used for
-/// attribute-parse failures.
+/// Returns the combined token stream (re-emitted impl + submits + wrappers).
+/// On failure returns the original `item` tokens plus a `compile_error!` so
+/// the user gets a single targeted diagnostic — the same shape JOLT-RS-038
+/// used for attribute-parse failures.
 pub(crate) fn expand_endpoint(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
@@ -410,11 +503,14 @@ pub(crate) fn expand_endpoint(
         let err_tokens = err.to_compile_error();
         return quote! { #item #err_tokens };
     }
+    let self_ty = (*impl_block.self_ty).clone();
     strip_verb_attrs(&mut impl_block);
     let submits = generate_inventory_submits(&attr_parsed.path, &methods);
+    let wrappers = generate_handler_wrappers(&self_ty, &methods);
     quote! {
         #impl_block
         #submits
+        #wrappers
     }
 }
 
@@ -1218,6 +1314,158 @@ mod tests {
         assert!(
             rendered.contains("compile_error"),
             "expected compile_error! for non-impl item, rendered: {rendered}"
+        );
+    }
+
+    // ----- JOLT-RS-043: generate_handler_wrappers -----
+
+    fn parse_self_ty(src: &str) -> Type {
+        syn::parse_str::<Type>(src).expect("test input parses as Type")
+    }
+
+    #[test]
+    fn generate_handler_wrappers_emits_one_fn_per_method() {
+        // Two discovered methods → two wrappers in the emitted impl block.
+        // Wrapper names follow the `__jolt_handler_<user_fn>` pattern so that
+        // JOLT-RS-044's inventory record can reference them via
+        // `Self::__jolt_handler_ping` / `Self::__jolt_handler_record`.
+        let item = parse_impl(
+            r#"
+            impl Probe {
+                #[get] fn ping(&self) -> Response<()> { todo!() }
+                #[post] fn record(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = parse_self_ty("Probe");
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+
+        // One pub fn per method, named `__jolt_handler_<user_fn>`.
+        assert!(
+            rendered.contains("__jolt_handler_ping"),
+            "expected __jolt_handler_ping wrapper, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__jolt_handler_record"),
+            "expected __jolt_handler_record wrapper, rendered: {rendered}"
+        );
+        // Each wrapper takes a Request and returns an EndpointFuture.
+        let req_count = rendered.matches(":: jolt_core :: Request").count();
+        assert_eq!(
+            req_count, 2,
+            "each wrapper takes one Request, so the path must appear twice; rendered: {rendered}"
+        );
+        let fut_count = rendered.matches(":: jolt_core :: EndpointFuture").count();
+        assert_eq!(
+            fut_count, 2,
+            "each wrapper returns one EndpointFuture, so the path must appear twice; rendered: {rendered}"
+        );
+        // Bodies use IntoResponse::into_response to bridge to axum.
+        let into_resp_count = rendered
+            .matches(":: axum :: response :: IntoResponse")
+            .count();
+        assert_eq!(
+            into_resp_count, 2,
+            "each wrapper bridges via IntoResponse, rendered: {rendered}"
+        );
+        // Bodies invoke the user method via Self::<ident>(&self).
+        assert!(
+            rendered.contains("Self :: ping"),
+            "wrapper must invoke user fn via Self::ping, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("Self :: record"),
+            "wrapper must invoke user fn via Self::record, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generate_handler_wrappers_constructs_self_via_default() {
+        // Pin the construct-Self decision: wrapper uses `<Self as Default>::default()`
+        // to instantiate the endpoint per request. A regression that switched to
+        // `Self::new()`, a static, or a thread-local would fail this test.
+        let item = parse_impl(
+            r#"
+            impl Probe {
+                #[get] fn ping(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = parse_self_ty("Probe");
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+        assert!(
+            rendered.contains(":: core :: default :: Default"),
+            "wrapper must construct Self via Default::default; rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generate_handler_wrappers_empty_methods_emits_nothing() {
+        // No verb-tagged methods → no wrapper impl block. The user's own impl
+        // block is emitted unchanged by expand_endpoint; this helper only
+        // contributes the wrappers, which collapse to empty when there are
+        // none. (Matches the same shape as `generate_inventory_submits`.)
+        let self_ty = parse_self_ty("Empty");
+        let rendered = generate_handler_wrappers(&self_ty, &[]).to_string();
+        assert_eq!(rendered, "", "empty methods must emit zero wrappers");
+    }
+
+    #[test]
+    fn generate_handler_wrappers_threads_self_ty_through_impl_block() {
+        // `self_ty` is read from the original `ItemImpl::self_ty`. Pin that
+        // it appears verbatim in the generated `impl <SelfTy> { ... }` block,
+        // including for path-style types (e.g. `crate::api::User`). A
+        // regression that hard-coded `Self` at the top level (instead of
+        // splicing `self_ty`) would fail this test.
+        let item = parse_impl(
+            r#"
+            impl crate::api::User {
+                #[get] fn fetch(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = (*item.self_ty).clone();
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+        assert!(
+            rendered.contains("impl crate :: api :: User"),
+            "self_ty must appear in the emitted impl block, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_endpoint_emits_handler_wrapper_alongside_submits() {
+        // End-to-end shape of the 043 driver path: parsing + scan + validate
+        // succeed, then BOTH the inventory submit AND the handler wrapper are
+        // emitted. The integration test in jolt-core/tests/inventory_registration.rs
+        // exercises the same shape through cargo's compile pipeline; this unit
+        // test is the fast-feedback parse-check for regressions.
+        let attr = proc_macro2::TokenStream::from_str(r#""/users""#).unwrap();
+        let item = proc_macro2::TokenStream::from_str(
+            r#"
+            impl Users {
+                #[get] fn list(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        )
+        .unwrap();
+        let rendered = expand_endpoint(attr, item).to_string();
+        // Inventory submit (042 contract) is still emitted.
+        assert!(
+            rendered.contains(":: jolt_core :: inventory :: submit"),
+            "expected inventory::submit!, rendered: {rendered}"
+        );
+        // Handler wrapper (043 contract) is emitted alongside.
+        assert!(
+            rendered.contains("__jolt_handler_list"),
+            "expected __jolt_handler_list wrapper, rendered: {rendered}"
+        );
+        // The wrapper's impl block targets the user's self_ty (`Users`).
+        assert!(
+            rendered.contains("impl Users"),
+            "wrapper impl block must target Users, rendered: {rendered}"
         );
     }
 }

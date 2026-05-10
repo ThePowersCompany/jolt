@@ -643,7 +643,7 @@
       "verification": [
         "Handler wrapper compiles and can be called with a Request."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-044",

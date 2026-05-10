@@ -3,6 +3,7 @@
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue};
+use axum::response::IntoResponse;
 use serde::Serialize;
 
 use crate::status::StatusCode;
@@ -115,5 +116,26 @@ impl<'a> From<Response<&'a str>> for axum::response::Response {
             Body::from(body.to_string()),
             HeaderValue::from_static("text/plain; charset=utf-8"),
         )
+    }
+}
+
+// Bridge `Response<T>` to axum's `IntoResponse` trait so the JOLT-RS-043
+// handler-wrapper codegen can emit `IntoResponse::into_response(__result)`
+// uniformly for both `Response<T>` and `Result<Response<T>, E>` returns. axum
+// provides a blanket `impl<T, E> IntoResponse for Result<T, E>` when both arms
+// are `IntoResponse`, so this single impl unlocks both shapes the macro
+// already validates (per JOLT-RS-040).
+//
+// The `where Response<T>: Into<axum::response::Response>` bound means the impl
+// is conditional on the matching `From` impl above existing for the concrete
+// `T` (currently: `T: JsonBody`, `T = String`, `T = &str`). A user trying to
+// return `Response<UnknownType>` gets a clear "trait bound not satisfied" error
+// at the macro-generated wrapper site rather than a parse-time failure.
+impl<T> IntoResponse for Response<T>
+where
+    Response<T>: Into<axum::response::Response>,
+{
+    fn into_response(self) -> axum::response::Response {
+        self.into()
     }
 }
