@@ -584,6 +584,100 @@
 //!     intermediate helper to evolve in lock-step. The skip invariant
 //!     is documented on [`Self::applied_migrations`] and pinned by a
 //!     dedicated unit test.
+//!
+//! [`JoltDb::migrate`] (JOLT-RS-100) is the apply half of the phase23
+//! migration pipeline: discovers files via [`read_migration_files`],
+//! reads the already-applied set via [`Self::applied_migrations`], and
+//! for every discovered file not present in that set executes the SQL
+//! body and records a new `_migrations` row inside a single
+//! transaction. Returns the count of newly applied migrations.
+//!
+//! 40. **One transaction per migration, not one transaction for all
+//!     (JOLT-RS-100).** Each migration's SQL body + the corresponding
+//!     `INSERT INTO _migrations` row commit together as a single unit;
+//!     a partial-apply failure halts the chain at the failing migration
+//!     with every prior migration's body durably committed. Matches
+//!     [`sqlx::migrate!`]'s own behavior and what production migration
+//!     runners do — one-tx-for-all would force a rollback of every
+//!     successfully-applied earlier migration in a chain whenever a
+//!     later one fails, which is rarely what an operator wants
+//!     (especially when the schema change cascades into application-
+//!     level data writes that have already completed against the
+//!     earlier schema). The `_migrations` bookkeeping insert is inside
+//!     the same transaction as the body so the bookkeeping row is only
+//!     visible after the body's effects are durably committed; a body
+//!     failure rolls back both halves and the next run re-attempts.
+//!     The transaction is opened inline via `self.pool.begin().await?`
+//!     rather than through [`Self::transaction`]'s closure wrapper:
+//!     the closure shape forces two `&mut **tx` reborrows (body
+//!     execute + bookkeeping insert) through a `&mut Transaction`
+//!     reference, which trips sqlx's `Executor` higher-ranked trait
+//!     bound on `&'c mut PgConnection`. With an owned `Transaction`
+//!     here both `.execute(&mut *tx)` reborrows resolve to `&mut
+//!     PgConnection` cleanly. The atomicity contract is identical to
+//!     [`Self::transaction`]: explicit `commit` on success, drop on
+//!     early return rolls back at the sqlx layer.
+//!
+//! 41. **Body SQL goes through [`sqlx::raw_sql`], not
+//!     [`sqlx::query`] (JOLT-RS-100).** Migration files routinely
+//!     contain multiple semicolon-separated statements (e.g. `CREATE
+//!     TABLE foo (...); CREATE INDEX foo_idx ON foo(...);`) and may
+//!     use Postgres dollar-quoted bodies for stored functions.
+//!     [`sqlx::raw_sql`] sends the body via the simple query protocol
+//!     so multi-statement bodies execute in one round trip;
+//!     [`sqlx::query`] uses the extended/prepared protocol which
+//!     rejects multi-statement strings. Bound parameters are not
+//!     supported (and not needed — migration bodies are author-
+//!     controlled source files, not user input). Failures surface as
+//!     the raw [`sqlx::Error`], rolled back by the surrounding
+//!     transaction.
+//!
+//! 42. **Signature is `migrate(dir: &str) -> Result<usize, sqlx::Error>`
+//!     returning the count of newly applied migrations; filesystem
+//!     errors from [`read_migration_files`] are mapped through
+//!     [`sqlx::Error::Io`] (JOLT-RS-100).** Returning the count lets
+//!     callers log "N migrations applied" without re-reading the
+//!     table; callers who want the names can call
+//!     [`Self::applied_migrations`] before-and-after for the diff. The
+//!     [`sqlx::Error::Io`] mapping is a one-line bridge from the
+//!     filesystem layer (decision 25) into the rest of jolt-db's
+//!     unified [`sqlx::Error`] error surface (decision 6) — every
+//!     other phase19–23 verb already returns [`sqlx::Error`], so a
+//!     bespoke `MigrationError` enum at this slice would force
+//!     callers into two error shapes for the apply pipeline. Decision
+//!     25 explicitly forecasted this re-wrap; JOLT-RS-102 (phase24)
+//!     will introduce a dedicated `MigrationError` enum when the
+//!     pipeline grows the tamper/removed failure modes that need
+//!     pattern-matching on dedicated variants.
+//!
+//! 43. **The Some(_) skip arm of decision 39's three-way fork is
+//!     collapsed into the skip branch for the JOLT-RS-100 slice; the
+//!     tamper-detection split lands in JOLT-RS-102 (JOLT-RS-100).**
+//!     Decision 39 forecast a three-way fork (skip-on-match /
+//!     tamper-on-mismatch / apply-on-missing), but the
+//!     tamper-on-mismatch variant requires the `MigrationError` enum
+//!     that JOLT-RS-102 introduces. For JOLT-RS-100 the apply loop
+//!     skips on *any* presence in the applied set (matching the
+//!     PRD-100 "apply new migrations" wording), so a mismatched
+//!     checksum is currently treated as already-applied. JOLT-RS-102
+//!     will replace the `Some(_)` arm with the error path without
+//!     touching the rest of the loop. The schema's lack of a
+//!     `UNIQUE(name)` constraint on `_migrations` (decision 35 picks
+//!     `id SERIAL PRIMARY KEY` for ordering, not `name UNIQUE`) means
+//!     the collapsed skip is also the safer default — if a future
+//!     caller bypasses this verb and inserts a duplicate `name`
+//!     manually, the read-back still has a deterministic skip
+//!     semantic.
+//!
+//! 44. **`sqlx::Error::Io` wraps the [`std::io::Error`] from
+//!     [`read_migration_files`] verbatim via `.map_err(sqlx::Error::
+//!     Io)` (JOLT-RS-100).** Constructing a fresh `sqlx::Error::Io`
+//!     instead of re-wrapping would lose the underlying `io::Error`
+//!     kind / message and force callers into a bespoke string
+//!     comparison to diagnose "directory missing" vs "permission
+//!     denied". The variant accepts the original `io::Error` by
+//!     value, so a single `.map_err(sqlx::Error::Io)` preserves the
+//!     full diagnostic chain (`sqlx::Error::source() -> &io::Error`).
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -956,6 +1050,82 @@ impl JoltDb {
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Discover migration files in `dir`, apply every one not yet
+    /// recorded in `_migrations`, and return the count of newly applied
+    /// migrations (JOLT-RS-100).
+    ///
+    /// See module docs decisions 40–44 for the architectural contract:
+    /// one transaction per migration, body executed via
+    /// [`sqlx::raw_sql`] (multi-statement bodies supported), filesystem
+    /// errors re-wrapped through [`sqlx::Error::Io`], and the
+    /// three-way-fork skip semantic (collapsed to "skip on any
+    /// presence" until JOLT-RS-102 lands the tamper-detection arm).
+    ///
+    /// Composes the three primitives already in place:
+    /// 1. [`read_migration_files`] (JOLT-RS-094/096) for discovery
+    ///    sorted lexicographically by filename and pre-hashed.
+    /// 2. [`Self::applied_migrations`] (JOLT-RS-099) for the
+    ///    name → checksum read-back used by the skip-decision.
+    /// 3. [`Self::transaction`] (JOLT-RS-088) for the per-migration
+    ///    body + bookkeeping atomicity boundary.
+    ///
+    /// For each discovered [`MigrationFile`] in lex-sorted order:
+    /// - If the name is already in the applied set, skip it.
+    /// - Otherwise, open a transaction, execute the file's `content`
+    ///   via [`sqlx::raw_sql`], `INSERT INTO _migrations (name,
+    ///   checksum) VALUES ($1, $2)`, and commit. The bookkeeping row's
+    ///   `id` and `applied_at` come from the column defaults
+    ///   (decision 35).
+    ///
+    /// Errors propagate as the raw [`sqlx::Error`]: filesystem
+    /// failures from discovery are wrapped via [`sqlx::Error::Io`]
+    /// (decision 44), migration-body and bookkeeping failures surface
+    /// the sqlx error from the failing statement directly (rolled
+    /// back by the surrounding per-migration transaction).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let applied = db.migrate("./migrations").await?;
+    /// println!("applied {applied} new migrations");
+    /// ```
+    pub async fn migrate(&self, dir: &str) -> Result<usize, sqlx::Error> {
+        let files = read_migration_files(dir).map_err(sqlx::Error::Io)?;
+        let applied = self.applied_migrations().await?;
+        let mut count = 0_usize;
+        for file in &files {
+            // Decision 43: skip on any presence in the applied set.
+            // JOLT-RS-102 will split this into the three-way fork
+            // (Some(c) if c == &checksum => skip, Some(_) => tamper,
+            // None => apply); for now both Some arms collapse to skip.
+            if applied.contains_key(&file.name) {
+                continue;
+            }
+            // Per-migration transaction (decision 40). We open the
+            // transaction inline via `self.pool.begin()` rather than
+            // going through `Self::transaction`'s `&mut Transaction`
+            // closure shape, because that shape forces two
+            // `&mut **tx` reborrows (body execute + bookkeeping
+            // insert) through a `&mut Transaction` reference, which
+            // trips sqlx's `Executor` HRTB. With an owned
+            // `Transaction` here both `.execute(&mut *tx)` reborrows
+            // resolve to `&mut PgConnection` cleanly. The atomicity
+            // contract is the same: explicit `commit` on success;
+            // drop on early return (the `?`s on each execute) rolls
+            // back at the sqlx layer.
+            let mut tx = self.pool.begin().await?;
+            sqlx::raw_sql(&file.content).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO _migrations (name, checksum) VALUES ($1, $2)")
+                .bind(&file.name)
+                .bind(&file.checksum)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
 
@@ -2357,6 +2527,191 @@ mod tests {
 
         // Cleanup so successive test runs against the same fixture
         // start from a known state.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
+    }
+
+    // ---- JOLT-RS-100: JoltDb::migrate ----
+
+    /// Compile-time pin: `db.migrate(dir: &str)` resolves to
+    /// `Result<usize, sqlx::Error>` (decision 42). The explicit return
+    /// annotation forces the typecheck — a regression that switches the
+    /// count type to `i64` / `u32`, wraps the error in a bespoke
+    /// `MigrationError`, or changes the parameter to `&Path` /
+    /// `impl AsRef<Path>` breaks this build pin without needing a live
+    /// Postgres.
+    #[test]
+    fn migrate_signature_pins() {
+        async fn _pin(db: &JoltDb, dir: &str) -> Result<usize, sqlx::Error> {
+            db.migrate(dir).await
+        }
+    }
+
+    /// Filesystem errors from discovery surface as `sqlx::Error::Io`
+    /// (decision 44). A non-existent directory triggers
+    /// [`read_migration_files`]'s `read_dir` to fail with
+    /// `io::ErrorKind::NotFound`; the migrate verb re-wraps that
+    /// `io::Error` via `.map_err(sqlx::Error::Io)` without modifying
+    /// the underlying kind / message, so a regression that constructs
+    /// a fresh `io::Error` (losing the kind) or returns the FS error
+    /// through a non-Io variant fails this pin. Does not need a live
+    /// Postgres because the directory-read failure happens before any
+    /// DB round trip.
+    #[tokio::test]
+    async fn migrate_returns_io_error_for_missing_directory() {
+        // Use the unreachable-server connect_lazy fixture so we have a
+        // `JoltDb` to call `migrate` on without requiring live Postgres.
+        // The directory failure short-circuits before any pool query
+        // runs.
+        let pool_options = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1));
+        let pool = pool_options
+            .connect_lazy("postgres://nouser:nopw@127.0.0.1:1/nodb")
+            .expect("connect_lazy accepts well-formed URL");
+        let db = JoltDb { pool };
+
+        let missing = format!(
+            "/tmp/jolt-db-100-missing-{}-{}",
+            std::process::id(),
+            "definitely-not-there",
+        );
+        let err = db
+            .migrate(&missing)
+            .await
+            .expect_err("migrate against missing directory should error");
+        match err {
+            sqlx::Error::Io(io_err) => {
+                assert_eq!(
+                    io_err.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "expected NotFound from missing directory, got {io_err:?}",
+                );
+            }
+            other => panic!("expected sqlx::Error::Io for FS failure, got {other:?}"),
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-100: "empty DB with 2
+    /// migrations → both applied in order, both rows in _migrations."
+    /// Env-gated on `JOLT_TEST_DATABASE_URL` (same convention as the
+    /// rest of the live-DB tests in this module).
+    ///
+    /// Flow:
+    /// 1. TRUNCATE `_migrations` + DROP the migration target table for
+    ///    a known-empty starting state.
+    /// 2. Write two migration files into a temp directory:
+    ///    - `001_create.sql` creates the target table.
+    ///    - `002_insert.sql` inserts one row into it.
+    ///    The order dependency is load-bearing — if migrate ran 002
+    ///    before 001 (regression in the lex-sort or the per-tx commit
+    ///    chain) the insert would fail because the table wouldn't
+    ///    exist yet.
+    /// 3. Call `db.migrate(dir)` and assert it returns `Ok(2)`.
+    /// 4. Verify the target table now has the expected row (proves the
+    ///    body actually ran, not just the bookkeeping insert).
+    /// 5. Verify `_migrations` holds both rows in ascending `id` order
+    ///    matching the lex-sorted filename order (pins decision 35 +
+    ///    decision 40 + the "in filename order" PRD wording).
+    /// 6. Re-run `db.migrate(dir)` against the same fixture and assert
+    ///    it returns `Ok(0)` — idempotency / skip semantic for the
+    ///    already-applied case (decision 43).
+    /// 7. Truncate + drop on teardown so successive runs start clean.
+    #[tokio::test]
+    async fn migrate_applies_two_migrations_in_order_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Fresh-state setup. TRUNCATE the bookkeeping table and drop
+        // the per-test target table so this run can be the one to
+        // create them.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_test_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (setup)");
+
+        let dir = TestDir::new("apply");
+        dir.write_file(
+            "001_create.sql",
+            "CREATE TABLE _jolt_migrate_test_target (id INT);",
+        );
+        // The 002 insert depends on 001's CREATE — running out of
+        // order makes 002 fail with "relation does not exist", which
+        // would fail the `Ok(2)` assertion below. This is how we pin
+        // the in-filename-order contract without a separate test.
+        dir.write_file(
+            "002_insert.sql",
+            "INSERT INTO _jolt_migrate_test_target (id) VALUES (42);",
+        );
+
+        let applied = db
+            .migrate(dir.path_str())
+            .await
+            .expect("first migrate against two-file fixture should succeed");
+        assert_eq!(applied, 2, "expected 2 newly-applied migrations");
+
+        // Body actually ran: the inserted row is visible in the target
+        // table after migrate returns.
+        let row: (i32,) = sqlx::query_as("SELECT id FROM _jolt_migrate_test_target")
+            .fetch_one(db.pool())
+            .await
+            .expect("target table should hold the inserted row");
+        assert_eq!(row.0, 42);
+
+        // Bookkeeping rows present in ascending id order matching the
+        // lex-sorted filename order — pins decision 40's per-migration
+        // commit chain and decision 35's `SERIAL` ordering.
+        let bookkeeping: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, checksum FROM _migrations ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("read _migrations after migrate");
+        assert_eq!(
+            bookkeeping
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["001_create.sql", "002_insert.sql"],
+            "expected the two migrations recorded in filename order",
+        );
+        // Checksums match the file bodies (round-trip through
+        // sha256_hex matches what `read_migration_files` recorded).
+        assert_eq!(
+            bookkeeping[0].1,
+            sha256_hex(b"CREATE TABLE _jolt_migrate_test_target (id INT);"),
+        );
+        assert_eq!(
+            bookkeeping[1].1,
+            sha256_hex(b"INSERT INTO _jolt_migrate_test_target (id) VALUES (42);"),
+        );
+
+        // Idempotency: a second migrate against the same dir is a
+        // no-op because both files are already in `_migrations`
+        // (decision 43's skip-on-presence semantic).
+        let applied_again = db
+            .migrate(dir.path_str())
+            .await
+            .expect("second migrate should succeed");
+        assert_eq!(
+            applied_again, 0,
+            "expected 0 newly-applied on idempotent re-run",
+        );
+
+        // Teardown — leave the fixture clean for parallel reruns.
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_test_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (teardown)");
         sqlx::query("TRUNCATE TABLE _migrations")
             .execute(db.pool())
             .await
