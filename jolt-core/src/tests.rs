@@ -409,4 +409,50 @@ mod response {
         assert!(res.headers.is_empty());
         let _: () = res.body;
     }
+
+    #[tokio::test]
+    async fn into_axum_response_serializes_json_with_content_type_and_status() {
+        use axum::http::header::CONTENT_TYPE;
+        use serde_json::json;
+
+        let jolt_response = Response::new(StatusCode::Ok, json!({"hello": "world"}));
+        let axum_response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(axum_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum_response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let body_bytes = axum::body::to_bytes(axum_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body_bytes[..], br#"{"hello":"world"}"#);
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_forwards_custom_headers() {
+        use axum::http::header::CONTENT_TYPE;
+        use axum::http::{HeaderName, HeaderValue};
+
+        let mut jolt_response = Response::new(StatusCode::Created, 7u32);
+        jolt_response.headers.insert(
+            HeaderName::from_static("x-trace-id"),
+            HeaderValue::from_static("abc-123"),
+        );
+        let axum_response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(axum_response.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            axum_response
+                .headers()
+                .get(HeaderName::from_static("x-trace-id"))
+                .unwrap(),
+            "abc-123"
+        );
+        assert_eq!(
+            axum_response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
 }
