@@ -1998,6 +1998,154 @@ mod router {
         }
 
         #[tokio::test]
+        async fn full_middleware_chain_propagates_auth_rejection_back_through_outer_layer() {
+            // PRD-mandated verification for JOLT-RS-080: "Integration test:
+            // full middleware chain, auth rejects → 401 returned, handler body
+            // never executed."
+            //
+            // Stack (outer → inner): `CorsLayer → AuthBearerLayer →
+            // Router(registry)`. Request is GET /protected with an Origin
+            // header but NO Authorization header. Production flow:
+            //   1. CorsLayer.call: GET (not OPTIONS), no upstream-finished →
+            //      delegates to inner via the post-response injection path.
+            //   2. AuthBearerLayer.call: no Authorization header → returns
+            //      `401 Unauthorized` directly (with `WWW-Authenticate: Bearer`
+            //      + "Missing Authorization header" body), flips
+            //      `mark_finished` on the shared `Arc<RequestExt>`, and does
+            //      NOT delegate to inner.
+            //   3. Router is never invoked. The 401 propagates UP through
+            //      CorsLayer's async block, where
+            //      `inject_response_cors_headers` adds `Access-Control-Allow-
+            //      Origin` on the way back per JOLT-RS-057's non-OPTIONS
+            //      contract.
+            //   4. The handler's `invoked` AtomicBool stays false across the
+            //      whole chain.
+            //
+            // Distinct from the sibling
+            // `finished_flag_short_circuits_handler_when_set_by_outer_tower_layer`
+            // (JOLT-RS-079): that test uses a FAKE FinishingLayer that flips
+            // the latch and DELEGATES to inner, exercising Router's
+            // stash/take-on-finished path. THIS test uses the REAL
+            // AuthBearerLayer, whose rejection branch returns the 401 DIRECTLY
+            // without delegating to inner — so Router is never invoked at all.
+            // Together the two tests pin both ladders of the early-termination
+            // contract:
+            //   - 079: Router-side stash-take on finished latch (layer flips
+            //     latch then delegates → Router takes stash).
+            //   - 080: layer-side direct return without delegation (layer
+            //     returns its own response, propagates up through outer
+            //     layers, never touches Router).
+            //
+            // The OUTER CorsLayer is load-bearing for the propagation
+            // assertion: a regression that swallowed the inner response (or
+            // replaced it with an unrelated default) would surface as a
+            // missing WWW-Authenticate header, a missing 401 body, or — for
+            // CorsLayer's own contract — a 401 without `Access-Control-Allow-
+            // Origin`. All three are asserted below.
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            use axum::http::header::{
+                ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN, WWW_AUTHENTICATE,
+            };
+            use tower::ServiceBuilder;
+
+            use crate::{AuthBearerLayer, CorsConfig, CorsLayer};
+
+            struct TrackingEndpoint {
+                invoked: Arc<AtomicBool>,
+            }
+
+            impl Endpoint for TrackingEndpoint {
+                fn path(&self) -> &str {
+                    "/protected"
+                }
+
+                fn method(&self) -> Method {
+                    Method::Get
+                }
+
+                fn handler(&self, _req: Request) -> EndpointFuture {
+                    let invoked = Arc::clone(&self.invoked);
+                    Box::pin(async move {
+                        invoked.store(true, Ordering::Relaxed);
+                        axum::response::Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::from("handler-should-never-run"))
+                            .unwrap()
+                    })
+                }
+            }
+
+            let invoked = Arc::new(AtomicBool::new(false));
+            let mut registry = EndpointRegistry::new();
+            registry.register(TrackingEndpoint {
+                invoked: Arc::clone(&invoked),
+            });
+            let router = Router::new(registry);
+
+            // Permissive "*" config so the outer CorsLayer has something to
+            // inject on the way back. A restrictive default would skip the
+            // injection, which would mask the propagation assertion.
+            let cors = CorsLayer::new(CorsConfig {
+                allow_origins: vec!["*".to_string()],
+                ..Default::default()
+            });
+
+            // ServiceBuilder layer ordering: first `.layer()` is outermost.
+            // CorsLayer wraps AuthBearerLayer wraps Router. Inbound:
+            // Cors → Auth → Router. Outbound: Router → Auth → Cors → caller.
+            let svc = ServiceBuilder::new()
+                .layer(cors)
+                .layer(AuthBearerLayer::new())
+                .service(router);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/protected")
+                // Origin header pins CorsLayer's `*`-injection branch on the
+                // response side — without it, the outer layer's wildcard
+                // emission still fires (the `select_allowed_origin` rule
+                // returns `*` regardless of request Origin), but including the
+                // header keeps the test's intent clear: a real cross-origin
+                // request that auth rejects.
+                .header(ORIGIN, "https://example.com")
+                // DELIBERATELY no Authorization header — AuthBearerLayer's
+                // MissingHeader rejection branch fires.
+                .body(Body::empty())
+                .unwrap();
+            let resp = svc.oneshot(req).await.unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "AuthBearerLayer's 401 must propagate up through the outer CorsLayer unchanged"
+            );
+            assert_eq!(
+                resp.headers()
+                    .get(WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer"),
+                "WWW-Authenticate header from AuthBearerLayer must survive propagation through the outer CorsLayer"
+            );
+            assert_eq!(
+                resp.headers()
+                    .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .and_then(|v| v.to_str().ok()),
+                Some("*"),
+                "CorsLayer's response-side ACAO injection must run on the propagated 401, not just on 2xx from the handler"
+            );
+            let body = body_string(resp).await;
+            assert_eq!(
+                body, "Missing Authorization header",
+                "AuthBearerLayer's 401 body must survive propagation unchanged — the outer CorsLayer must not swallow or replace it"
+            );
+            assert!(
+                !invoked.load(Ordering::Relaxed),
+                "Router's handler must NEVER be invoked when an upstream auth layer rejects the request"
+            );
+        }
+
+        #[tokio::test]
         async fn longest_path_wins_when_multiple_registered() {
             // `from_registry` calls `sort()` internally so longer paths match
             // first. This test pins that contract: register `/api` first and
