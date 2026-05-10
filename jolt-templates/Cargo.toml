@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-handlebars = { workspace = true }
+# `dir_source` enables `Handlebars::register_templates_directory` and the
+# `DirectorySourceOptions` struct that `TemplateEngine::new` (JOLT-RS-106)
+# relies on. The feature is OFF by default upstream (handlebars 6 default
+# features = []) and pulls in `walkdir` as a transitive dep.
+handlebars = { workspace = true, features = ["dir_source"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
