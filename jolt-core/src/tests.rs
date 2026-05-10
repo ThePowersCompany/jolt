@@ -794,3 +794,14 @@ mod request_ext_extensions {
         assert!(outside_handle.is_finished());
     }
 }
+
+mod server {
+    use crate::JoltServer;
+
+    #[test]
+    fn new_uses_default_port_8080() {
+        // PRD-mandated verification for JOLT-RS-023: defaults include port=8080.
+        let server = JoltServer::new();
+        assert_eq!(server.port, 8080);
+    }
+}

@@ -654,3 +654,39 @@ Notes for next iterations:
 - JOLT-RS-026 (priority 26): `endpoint<E: Endpoint>(self) -> Self` requires the `Endpoint` trait, which is JOLT-RS-028's deliverable. Do 026 AFTER 028 unless a stub trait gets introduced earlier. Re-ordering note: phase05 (022..027) and phase06 (028..032) interleave at the trait surface — be alert to this when picking the next item. The strict priority order (lower-priority-first) may hit a compile error at 026 if 028 isn't in yet; if so, JOLT-RS-028 is the dependency to pull forward, not 026 to defer.
 - The stub structs are CURRENTLY non-constructible from outside the crate via field syntax (no fields), but constructible via the unit-struct expression `CorsConfig` (just the name). This is intentional — when CORS/TLS land, fields get added and `pub` callers transition from `CorsConfig` to `CorsConfig { origins: vec![...], ... }`. If a builder method like `cors(CorsConfig)` ships in 024 before fields are added, the test `JoltServer::new().cors(CorsConfig)` will compile and work — useful for exercising the builder shape without needing real CORS semantics yet.
 - No new workspace dependencies were added. Cargo.lock is unchanged. The next iteration should preserve this discipline: add deps only when an item explicitly needs one, not in advance.
+
+## 2026-05-10 — JOLT-RS-023: JoltServer::new() with sensible defaults
+
+PRD item: JOLT-RS-023 (priority 23, phase05-server-builder) — Implement JoltServer::new() → Self with sensible defaults (port 8080, threads = num_cpus).
+
+Verification:
+- `cargo test -p jolt-core -- tests::server` → 1/1 passed (`new_uses_default_port_8080`); 0 failed; 65 filtered out; finished in 0.00s.
+- `cargo check --workspace` → all 5 crates check clean in 0.37s; no regressions.
+- `cargo test -p jolt-core --lib` → 66 passed total (up from 65); 0 failed.
+
+Note on harness instructions: same as JOLT-RS-007..022 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Used `std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1)` per JOLT-RS-022's recommendation. No new workspace dependency (the alternative was the `num_cpus` crate). std-only since Rust 1.59. The `unwrap_or(1)` fallback covers the rare platforms where the call returns `Err`; a single-threaded fallback is the safest possible default — guarantees forward progress without claiming parallelism that isn't there.
+- Did NOT add `impl Default for JoltServer`. Two reasons: (a) JOLT-RS-022's progress note explicitly flagged this — `JoltServer::new()` is the construction story for this type, not Default; (b) clippy's `new_without_default` lint would fire here, but clippy isn't part of the verification gate (no `clippy` invocation in any progress entry, no `[lints]` table in Cargo.toml). If clippy enforcement lands later, derive Default with `Default::default() -> Self::new()` then.
+- Did NOT make the threads computation a const or a separate `default_threads()` helper. It's three lines and used in exactly one place. A helper would just hide the std call behind a name and force a future reader to chase the indirection. If JOLT-RS-024's `threads(usize)` builder ends up wanting "reset to default" semantics, factor at that point.
+- Did NOT cache the available_parallelism result. The cost is a single syscall on construction; `JoltServer::new()` is called once per server lifetime. Caching would be premature.
+- `pub fn new() -> Self` (not `&self` arg, no Result return). The PRD signature is unambiguous. `available_parallelism()` returning Err doesn't propagate up; we choose the fallback inline because the caller has no recovery action — the server should still start with a single thread rather than refusing to construct.
+- Added one test only: `new_uses_default_port_8080` — the PRD-mandated verification. Did NOT add tests for `threads > 0` or `cors_config.is_none() / tls_config.is_none()`. Rationale: JOLT-RS-027 ("Write server builder unit tests: defaults, builder chain, port binding conflict handling") is the dedicated tests slice for phase05. Adding more default-coverage tests here would steal scope from 027 and leave it under-defined. The PRD verification uses singular ("Unit test:" not "Unit tests:") which reinforces the minimal-slice interpretation.
+- Test lives in a new `mod server` submodule of `tests.rs`, sibling to `request_ext_extensions`. Matches the existing per-type-family test module convention (`method`, `status_code`, `request`, `response`, `request_ext`). The filter `cargo test -p jolt-core -- tests::server` will widen cleanly when 027 adds more tests.
+- Module-level docstring on `server.rs` updated: removed "Defaults" from the list of subsequent PRD items (they've now landed); kept the rest. Anchors the next agent so they don't re-derive what's done.
+- `use std::num::NonZeroUsize;` is at module scope rather than function scope. Matches the file's other top-level imports (when more arrive). Single-use imports as `use std::num::NonZeroUsize;` rather than fully-qualified paths inline keeps the body of `new()` readable.
+
+Files changed:
+- jolt-core/src/server.rs — added `use std::num::NonZeroUsize;`, `impl JoltServer { pub fn new() -> Self { ... } }`, and updated the module docstring to reflect that defaults have landed.
+- jolt-core/src/tests.rs — added `mod server` with one test (`new_uses_default_port_8080`).
+- prd.json — JOLT-RS-023 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-024 (priority 24): builder methods `port(u16) -> Self`, `threads(usize) -> Self`, `cors(CorsConfig) -> Self`. Standard chained-builder pattern: each takes `mut self`, mutates a field, returns `self`. Note again the asymmetry called out in JOLT-RS-022 notes: `cors_config: Option<CorsConfig>` field but the method is `cors(CorsConfig)` — the method wraps the arg in `Some(...)`. PRD doesn't list a `tls(...)` builder; resist the symmetry temptation — TLS lands in Phase 6 and adding it speculatively now is premature.
+- JOLT-RS-024's verification test should chain `.port(3000).threads(4)` from `JoltServer::new()` and assert both fields are set. Reuses the `mod server` module added here.
+- For JOLT-RS-024, decide between `mut self` (consumes-and-returns) vs `&mut self` (returns Self by clone). The `mut self` pattern is canonical Rust builders (e.g., axum's `Router`, hyper's request builders). Recommend `mut self` — no Clone needed, single ownership flows linearly through the chain.
+- The `available_parallelism().unwrap_or(1)` fallback means in CI sandboxes that strip /proc/cpuinfo, the server defaults to 1 worker. If that's ever load-bearing for a test, override explicitly via `.threads(N)` from JOLT-RS-024 — don't add a second-tier fallback like a hardcoded `4`.
+- JOLT-RS-024's `threads(usize)` accepts any usize including 0. PRD doesn't say "non-zero" — leave it permissive at this stage. If 0 turns out to be a foot-gun (some tokio runtime configs reject it), validate at `start()` time in JOLT-RS-025 rather than poisoning the builder, since the builder-vs-start error surface is what callers will hit.
+- Clippy's `new_without_default` lint is suppressed-by-absence (no clippy gate), but if a future PRD adds `cargo clippy --workspace -- -D warnings` to verification, JOLT-RS-023 is the place where Default needs to land. Add `impl Default for JoltServer { fn default() -> Self { Self::new() } }` then; the existing `new_uses_default_port_8080` test still locks in the contract.
+- JOLT-RS-026 still depends on the `Endpoint` trait from JOLT-RS-028 (called out in JOLT-RS-022 notes). When 026 is up next in priority order, expect a compile error against `E: Endpoint` and pull 028 forward — don't defer 026.
