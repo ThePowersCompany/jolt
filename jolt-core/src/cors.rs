@@ -10,9 +10,16 @@
 //! - `Access-Control-Allow-Headers`
 //! - `Access-Control-Max-Age`
 //!
-//! Non-`OPTIONS` requests pass through to the inner service unmodified — the
-//! origin/expose-headers injection on actual responses is JOLT-RS-057's
-//! territory and lives in this module too once it lands.
+//! Non-`OPTIONS` requests are delegated to the inner service; on the way back,
+//! [`Access-Control-Allow-Origin`] (first entry of `allow_origins`, mirroring
+//! the preflight rule from JOLT-RS-056) and [`Access-Control-Expose-Headers`]
+//! (joined `allow_origins` whitelist) are injected onto the inner's response
+//! when the matching config field is non-empty (JOLT-RS-057). Existing values
+//! on the response are not overwritten — if the inner service has already set
+//! either header, the layer leaves it alone.
+//!
+//! [`Access-Control-Allow-Origin`]: axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN
+//! [`Access-Control-Expose-Headers`]: axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS
 //!
 //! On a preflight short-circuit, the layer also flips
 //! [`RequestExt::mark_finished`](crate::RequestExt::mark_finished) on the
@@ -39,7 +46,7 @@ use axum::body::Body;
 use axum::extract::Request as AxumRequest;
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_MAX_AGE,
+    ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
 };
 use axum::http::{HeaderValue, Method as HttpMethod, StatusCode};
 use axum::response::Response;
@@ -132,7 +139,48 @@ where
         // their next call.
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
-        Box::pin(async move { inner.call(req).await })
+        let config = self.config.clone();
+        Box::pin(async move {
+            let mut response = inner.call(req).await?;
+            inject_response_cors_headers(&config, &mut response);
+            Ok(response)
+        })
+    }
+}
+
+/// Inject `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers`
+/// onto a non-preflight response per JOLT-RS-057. Mutates the response in
+/// place; both headers are skipped when the corresponding `CorsConfig` field
+/// is empty (matching the OPTIONS branch's empty-default contract from
+/// JOLT-RS-056). If the inner service has already set either header, the
+/// existing value is preserved — the layer is additive, not authoritative.
+fn inject_response_cors_headers(config: &CorsConfig, response: &mut Response) {
+    let headers = response.headers_mut();
+
+    // `Access-Control-Allow-Origin` mirrors the preflight first-entry rule
+    // (JOLT-RS-056). Per-request `Origin`-header matching against multiple
+    // configured origins is JOLT-RS-058's territory and will replace this
+    // simplification with a shared helper used by both the OPTIONS and
+    // non-OPTIONS branches. For now: empty config → no header; one or more
+    // origins → emit the first, which handles the common single-origin and
+    // `vec!["*"]` wildcard shapes.
+    if !headers.contains_key(ACCESS_CONTROL_ALLOW_ORIGIN) {
+        if let Some(origin) = config.allow_origins.first() {
+            if let Ok(value) = HeaderValue::from_str(origin) {
+                headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+            }
+        }
+    }
+
+    // `Access-Control-Expose-Headers` is a comma-joined whitelist of response
+    // header names a browser-side script may read across the CORS boundary.
+    // Empty config → no header (preserves the JOLT-RS-055 restrictive-default
+    // contract; absence means the browser falls back to the safe-header set).
+    if !headers.contains_key(ACCESS_CONTROL_EXPOSE_HEADERS) && !config.expose_headers.is_empty() {
+        let joined = config.expose_headers.join(", ");
+        if let Ok(value) = HeaderValue::from_str(&joined) {
+            headers.insert(ACCESS_CONTROL_EXPOSE_HEADERS, value);
+        }
     }
 }
 

@@ -37,17 +37,23 @@ use crate::registered_endpoint::RegisteredEndpoint;
 /// - `allow_headers` → `Access-Control-Allow-Headers`.
 /// - `max_age` → `Access-Control-Max-Age` (seconds the browser may cache the
 ///   preflight). `u32` covers RFC 6454's effective range without sign concerns.
+/// - `expose_headers` → `Access-Control-Expose-Headers` (JOLT-RS-057). Names
+///   of response headers a browser-side script may read across the CORS
+///   boundary. Empty `Vec` means no header is emitted (the browser falls back
+///   to its `Access-Control-Expose-Headers` whitelist of safe headers).
 ///
 /// [`Default`] returns an empty/restrictive config: no origins, no methods,
-/// no headers, `max_age = 0`. Callers who want permissive behavior must set
-/// the fields explicitly — defaults intentionally do NOT enable CORS for any
-/// origin, mirroring how a server with no CORS layer at all would respond.
+/// no headers, `max_age = 0`, no exposed headers. Callers who want permissive
+/// behavior must set the fields explicitly — defaults intentionally do NOT
+/// enable CORS for any origin, mirroring how a server with no CORS layer at
+/// all would respond.
 #[derive(Debug, Clone, Default)]
 pub struct CorsConfig {
     pub allow_origins: Vec<String>,
     pub allow_methods: Vec<Method>,
     pub allow_headers: Vec<String>,
     pub max_age: u32,
+    pub expose_headers: Vec<String>,
 }
 
 #[derive(Debug)]

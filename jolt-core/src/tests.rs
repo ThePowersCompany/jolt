@@ -2057,13 +2057,16 @@ mod server {
     fn cors_config_default_is_empty_and_restrictive() {
         // PRD-mandated verification for JOLT-RS-055: "Struct compiles with
         // defaults." `CorsConfig::default()` must yield an empty config — no
-        // origins, no methods, no headers, max_age = 0 — so a server that
-        // wires it in without further configuration grants no CORS access.
+        // origins, no methods, no headers, max_age = 0, no exposed headers —
+        // so a server that wires it in without further configuration grants
+        // no CORS access. JOLT-RS-057 added `expose_headers`; default remains
+        // restrictive.
         let cfg = CorsConfig::default();
         assert!(cfg.allow_origins.is_empty());
         assert!(cfg.allow_methods.is_empty());
         assert!(cfg.allow_headers.is_empty());
         assert_eq!(cfg.max_age, 0);
+        assert!(cfg.expose_headers.is_empty());
     }
 
     #[test]
@@ -2076,11 +2079,13 @@ mod server {
             allow_methods: vec![Method::Get, Method::Post],
             allow_headers: vec!["content-type".to_string()],
             max_age: 600,
+            expose_headers: vec!["x-request-id".to_string()],
         };
         assert_eq!(cfg.allow_origins, vec!["https://example.com".to_string()]);
         assert_eq!(cfg.allow_methods, vec![Method::Get, Method::Post]);
         assert_eq!(cfg.allow_headers, vec!["content-type".to_string()]);
         assert_eq!(cfg.max_age, 600);
+        assert_eq!(cfg.expose_headers, vec!["x-request-id".to_string()]);
     }
 
     #[test]
@@ -2188,6 +2193,11 @@ mod cors {
             allow_methods: vec![Method::Get, Method::Post, Method::Options],
             allow_headers: vec!["content-type".to_string(), "authorization".to_string()],
             max_age: 600,
+            // JOLT-RS-057's `expose_headers` field. Empty here so the OPTIONS
+            // preflight assertions stay focused on the four headers the 056
+            // verification mandates; non-OPTIONS expose-header injection is
+            // covered by sibling tests in this module.
+            expose_headers: vec![],
         };
         let layer = CorsLayer::new(config);
         // `service_fn` produces a service whose Future is a Send + 'static
@@ -2247,6 +2257,157 @@ mod cors {
         assert!(
             ext.is_finished(),
             "CorsLayer must mark RequestExt finished on OPTIONS short-circuit"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_options_response_gets_allow_origin_and_expose_headers_injected() {
+        // PRD-mandated verification for JOLT-RS-057: "Unit test: GET /api/test
+        // → response includes CORS origin header." Extends the verification to
+        // also cover the parenthetical "(and optionally Access-Control-
+        // Expose-Headers)" by configuring `expose_headers` and asserting the
+        // injection. The inner service returns a 200 with a body; the layer
+        // must NOT short-circuit, must NOT mark finished (that's the OPTIONS
+        // contract, not the non-OPTIONS one), and must mutate the response's
+        // headers in place to add the two CORS response headers.
+        let config = CorsConfig {
+            allow_origins: vec!["https://example.com".to_string()],
+            allow_methods: vec![Method::Get, Method::Post],
+            allow_headers: vec!["content-type".to_string()],
+            max_age: 600,
+            expose_headers: vec!["x-request-id".to_string(), "x-trace-id".to_string()],
+        };
+        let layer = CorsLayer::new(config);
+
+        // Inner service returns a 200 with a body; presence of the body bytes
+        // in the final response confirms the layer did not consume or replace
+        // the inner's output, only added headers.
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            let mut resp = Response::new(Body::from("hello"));
+            *resp.status_mut() = StatusCode::OK;
+            Ok::<Response, Infallible>(resp)
+        });
+        let svc = layer.layer(inner);
+
+        let ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://example.com"),
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .and_then(|v| v.to_str().ok()),
+            Some("x-request-id, x-trace-id"),
+        );
+        // OPTIONS short-circuit semantics must not leak into the non-OPTIONS
+        // path: the layer should pass through, not mark finished.
+        assert!(
+            !ext.is_finished(),
+            "CorsLayer must NOT mark RequestExt finished on non-OPTIONS requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_options_response_skips_headers_when_config_is_empty() {
+        // Empty CorsConfig (the JOLT-RS-055 restrictive default) must produce
+        // a non-OPTIONS response with NO CORS headers added — matches the
+        // empty-default contract and the OPTIONS branch's behavior. Without
+        // this guarantee a server that wires CorsLayer with the default
+        // config would still leak CORS headers, defeating the spec's
+        // "permissive-only-on-explicit-config" stance.
+        let layer = CorsLayer::new(CorsConfig::default());
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            Ok::<Response, Infallible>(Response::new(Body::from("hello")))
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert!(headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+        assert!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn non_options_response_preserves_inner_set_cors_headers() {
+        // If the inner service has already set `Access-Control-Allow-Origin`
+        // (for instance, a per-route handler that wants origin-specific
+        // policy), the layer must NOT overwrite it. The layer is additive —
+        // it fills in the field when nothing else has, but it doesn't claim
+        // exclusive ownership of the header. Same contract for
+        // `Access-Control-Expose-Headers`.
+        let config = CorsConfig {
+            allow_origins: vec!["https://from-config.example.com".to_string()],
+            allow_methods: vec![],
+            allow_headers: vec![],
+            max_age: 0,
+            expose_headers: vec!["x-from-config".to_string()],
+        };
+        let layer = CorsLayer::new(config);
+
+        let inner = tower::service_fn(|_req: AxumRequest| async move {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut().insert(
+                ACCESS_CONTROL_ALLOW_ORIGIN,
+                axum::http::HeaderValue::from_static("https://from-handler.example.com"),
+            );
+            resp.headers_mut().insert(
+                axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                axum::http::HeaderValue::from_static("x-from-handler"),
+            );
+            Ok::<Response, Infallible>(resp)
+        });
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://from-handler.example.com"),
+            "layer must not overwrite inner-set Access-Control-Allow-Origin",
+        );
+        assert_eq!(
+            headers
+                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .and_then(|v| v.to_str().ok()),
+            Some("x-from-handler"),
+            "layer must not overwrite inner-set Access-Control-Expose-Headers",
         );
     }
 }
