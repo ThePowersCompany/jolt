@@ -111,7 +111,7 @@
       "verification": [
         "cargo check -p jolt-utils succeeds."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-006",

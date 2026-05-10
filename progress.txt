@@ -86,3 +86,22 @@ Notes for next iterations:
 - JOLT-RS-006 (jolt-templates): add handlebars, serde, serde_json. Same pattern.
 - After 005 + 006 land, phase00 closes and phase01 (Method/StatusCode in jolt-core) begins — that's where real module code starts.
 
+## 2026-05-10 — JOLT-RS-005: jolt-utils crate deps + stub lib.rs
+
+PRD item: JOLT-RS-005 (priority 5, phase00-workspace-scaffold) — Add deps to jolt-utils/Cargo.toml (jsonwebtoken, pbkdf2, sha2, rand, uuid, chrono, serde, serde_json) and stub lib.rs.
+
+Verification: `cargo check -p jolt-utils` → succeeds (compiled clean in 7.72s; resolved jsonwebtoken 9.3.1, pbkdf2 0.12.2, sha2 0.10.9, rand 0.8.6, uuid 1.23.1, chrono 0.4.44, serde 1.0.228, serde_json 1.0.149).
+
+Key decisions:
+- All eight deps via { workspace = true } — same thin-shim pattern as jolt-core/jolt-macros/jolt-db. Workspace pin already declares the right features (uuid v4/v7/serde, chrono serde, serde derive), so no per-crate feature additions.
+- lib.rs is a single crate-level doc comment listing intended responsibilities (password hashing, JWT, UUID/time, serde glue) so the next reader knows what modules will land here. No `pub mod` declarations yet.
+- Did NOT add base64, hex, or hmac directly — pbkdf2 + jsonwebtoken pull in what's needed transitively, and adding them now would invite version-skew bugs once real modules need them.
+
+Files changed:
+- jolt-utils/Cargo.toml (added [dependencies] block)
+- jolt-utils/src/lib.rs (added crate-level doc string; was 0 bytes)
+- prd.json — JOLT-RS-005 passes: true
+
+Notes for next iterations:
+- JOLT-RS-006 (jolt-templates): add handlebars, serde, serde_json — all in workspace.dependencies. Same thin-shim pattern + doc-only lib.rs. Last item before phase00 closes.
+- After 006, phase01 begins (JOLT-RS-007: Method enum in jolt-core/src/method.rs with Display + FromStr).
