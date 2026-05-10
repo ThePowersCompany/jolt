@@ -30,6 +30,12 @@
 //!   user enums with hand-rolled (or `#[derive(strum::EnumString)]`-style)
 //!   string-to-variant maps can wire in.
 //!
+//! [`extract_vec`] (JOLT-RS-066) splits the value on commas and parses each
+//! element as `T: FromStr`. Element-level failures surface as the new
+//! [`QueryExtractError::InvalidElement`] variant which carries the failing
+//! position so a caller debugging `?ids=1,abc,3` can read off `index 1` from
+//! the 400 body without guessing.
+//!
 //! Architectural decisions pinned here for JOLT-RS-064..067 to build on:
 //!
 //! 1. **Layer carries no type parameter; output is always
@@ -230,6 +236,22 @@ pub enum QueryExtractError {
         /// (e.g., `ParseIntError::Display`).
         message: String,
     },
+    /// One element of a comma-separated list value (e.g., `?ids=1,abc,3`)
+    /// failed to parse (JOLT-RS-066). Distinct from [`Invalid`](Self::Invalid)
+    /// so the failing element's zero-based position is preserved verbatim
+    /// rather than being smuggled through the message text — the
+    /// [`AutoMiddleware`](crate::AutoMiddleware) codegen and any future
+    /// custom-renderer can branch on the variant directly.
+    InvalidElement {
+        /// The key whose value contained the failing element.
+        key: String,
+        /// Zero-based index of the element that failed.
+        index: usize,
+        /// The raw element string that was rejected.
+        value: String,
+        /// Human-readable detail from the underlying parser.
+        message: String,
+    },
 }
 
 impl fmt::Display for QueryExtractError {
@@ -246,6 +268,17 @@ impl fmt::Display for QueryExtractError {
                 write!(
                     f,
                     "Invalid query parameter '{key}'='{value}': {message}",
+                )
+            }
+            Self::InvalidElement {
+                key,
+                index,
+                value,
+                message,
+            } => {
+                write!(
+                    f,
+                    "Invalid query parameter '{key}' element [{index}]='{value}': {message}",
                 )
             }
         }
@@ -356,6 +389,49 @@ where
         value: value.clone(),
         message: err.to_string(),
     })
+}
+
+/// Look up `key` in the parsed query map, split the associated value on
+/// commas, and parse each element as `T` via [`FromStr`] (JOLT-RS-066).
+///
+/// `?ids=1,2,3` with `T = i32` returns `Ok(vec![1, 2, 3])`. A single value
+/// (`?ids=42`) yields a one-element vec; a present-but-empty value (`?ids=`)
+/// yields `Err(InvalidElement { index: 0, value: "", … })` because
+/// `"".parse::<i32>()` rejects. Callers that want "absent → empty vec"
+/// semantics should match on [`Missing`](QueryExtractError::Missing)
+/// themselves rather than swallowing it here — the absent-vs-present split
+/// is the same load-bearing distinction the rest of the typed-extractor
+/// surface preserves.
+///
+/// Element-level failures surface as
+/// [`QueryExtractError::InvalidElement`] (NOT
+/// [`Invalid`](QueryExtractError::Invalid)) so the failing position is
+/// available to the eventual 400 renderer without parsing it back out of
+/// the message text. The element's raw string is also captured in the
+/// variant's `value` field — same shape as `Invalid`'s `value` but scoped
+/// to the rejected element rather than the whole comma-separated payload.
+pub fn extract_vec<T>(params: &QueryParams, key: &str) -> Result<Vec<T>, QueryExtractError>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let value = params.get(key).ok_or_else(|| QueryExtractError::Missing {
+        key: key.to_string(),
+    })?;
+    value
+        .split(',')
+        .enumerate()
+        .map(|(index, element)| {
+            element
+                .parse::<T>()
+                .map_err(|err| QueryExtractError::InvalidElement {
+                    key: key.to_string(),
+                    index,
+                    value: element.to_string(),
+                    message: err.to_string(),
+                })
+        })
+        .collect()
 }
 
 /// Build the `400 Bad Request` response surfaced when a typed query

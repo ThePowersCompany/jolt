@@ -965,7 +965,7 @@
       "verification": [
         "Unit test: ?ids=1,2,3 → Vec<i32> = [1,2,3]."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-067",

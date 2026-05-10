@@ -3381,3 +3381,151 @@ mod parse_query_typed_extras {
         }
     }
 }
+
+mod parse_query_typed_vec {
+    //! PRD-mandated verification for JOLT-RS-066: "Unit test: ?ids=1,2,3 →
+    //! `Vec<i32> = [1,2,3]`."
+    //!
+    //! `extract_vec<T: FromStr>` is a sibling of the 064 generic extractor,
+    //! NOT an extension — the per-element split-and-parse loop produces a
+    //! `Vec<T>` rather than a single `T`, and the element-level failure
+    //! surface is its own `InvalidElement` variant (carries the failing
+    //! element's zero-based index) rather than smuggling the position
+    //! through the existing `Invalid` variant's message text.
+    //!
+    //! Tests pin:
+    //! - The PRD success path (`?ids=1,2,3` → `Ok(vec![1, 2, 3])`).
+    //! - Single-value path (no commas → one-element vec).
+    //! - Element-level failure with index in `InvalidElement`.
+    //! - 400 body renders with `[index]='value'` so HTTP callers can read
+    //!   off the failing position without diffing the input.
+    //! - Missing key → `Missing` variant (not an empty vec — preserves the
+    //!   absent-vs-present distinction the rest of the typed-extractor
+    //!   surface relies on).
+    //! - Float `FromStr` round-trip — pins the generic shape so a
+    //!   regression to int-only gets caught.
+    use std::collections::HashMap;
+
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    use crate::{
+        bad_request_for_query_error, extract_query_vec, QueryExtractError, QueryParams,
+    };
+
+    fn params_from(pairs: &[(&str, &str)]) -> QueryParams {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        QueryParams::from(map)
+    }
+
+    #[test]
+    fn vec_extracts_comma_separated_ints() {
+        // PRD: ?ids=1,2,3 → Vec<i32> = [1,2,3].
+        let params = params_from(&[("ids", "1,2,3")]);
+        let parsed: Vec<i32> =
+            extract_query_vec(&params, "ids").expect("?ids=1,2,3 must parse as Vec<i32>");
+        assert_eq!(parsed, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn vec_extracts_single_value_as_one_element_vec() {
+        // No comma in the value → one-element vec. The split-and-parse
+        // shape must NOT special-case "no comma → reject" or "no comma →
+        // scalar"; it always yields a Vec<T>.
+        let params = params_from(&[("ids", "42")]);
+        let parsed: Vec<i32> =
+            extract_query_vec(&params, "ids").expect("?ids=42 must parse as one-element Vec<i32>");
+        assert_eq!(parsed, vec![42]);
+    }
+
+    #[test]
+    fn vec_extracts_floats_via_from_str() {
+        // The generic shape must work for any T: FromStr, not just ints.
+        // Pinning `f64` here catches a regression that quietly narrowed
+        // the bound to integer types only.
+        let params = params_from(&[("ratios", "0.5,1.5,2.5")]);
+        let parsed: Vec<f64> = extract_query_vec(&params, "ratios")
+            .expect("?ratios=0.5,1.5,2.5 must parse as Vec<f64>");
+        assert_eq!(parsed.len(), 3);
+        assert!((parsed[0] - 0.5).abs() < 1e-9);
+        assert!((parsed[1] - 1.5).abs() < 1e-9);
+        assert!((parsed[2] - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_invalid_element_yields_invalid_element_variant_with_index() {
+        // ?ids=1,abc,3 → element at index 1 fails. The InvalidElement
+        // variant must carry the failing index (1), the failing element's
+        // raw value ("abc"), and the underlying parser's detail. A
+        // regression that fell back to the scalar `Invalid` variant would
+        // strip the index, and an HTTP caller debugging "?ids=1,abc,3"
+        // would have to diff the input themselves to find the bad
+        // element.
+        let params = params_from(&[("ids", "1,abc,3")]);
+        let err = extract_query_vec::<i32>(&params, "ids")
+            .expect_err("?ids=1,abc,3 must NOT parse as Vec<i32>");
+        match &err {
+            QueryExtractError::InvalidElement {
+                key,
+                index,
+                value,
+                message,
+            } => {
+                assert_eq!(key, "ids");
+                assert_eq!(*index, 1, "second element (zero-based 1) is the failing one");
+                assert_eq!(value, "abc");
+                assert!(
+                    !message.is_empty(),
+                    "InvalidElement message must carry the underlying parser detail",
+                );
+            }
+            other => panic!("expected QueryExtractError::InvalidElement, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vec_invalid_element_renders_into_400_with_index_in_body() {
+        // The 400 body shape for InvalidElement must surface the failing
+        // index AND the failing element's raw value so an HTTP caller can
+        // read "element [1]='abc'" off the response without parsing the
+        // request URI themselves. A regression that flattened InvalidElement
+        // to the scalar Invalid format would strip the index from the body.
+        let params = params_from(&[("ids", "1,abc,3")]);
+        let err = extract_query_vec::<i32>(&params, "ids")
+            .expect_err("?ids=1,abc,3 must NOT parse as Vec<i32>");
+
+        let resp = bad_request_for_query_error(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(
+            body_text.starts_with("Invalid query parameter 'ids' element [1]='abc': "),
+            "400 body must echo key + index + element value + detail, got {body_text}",
+        );
+        assert!(
+            body_text.len() > "Invalid query parameter 'ids' element [1]='abc': ".len(),
+            "400 body must include the underlying parser's detail (got bare prefix)",
+        );
+    }
+
+    #[test]
+    fn vec_missing_key_yields_missing_variant_not_empty_vec() {
+        // The absent-vs-present distinction is load-bearing: the rest of
+        // the typed-extractor surface preserves it (Missing → required-
+        // parameter error; Invalid → bad-value error). Returning an empty
+        // vec for an absent key would silently collapse those into one
+        // shape and force the AutoMiddleware codegen to re-derive the
+        // distinction from the response body.
+        let params = params_from(&[("other", "1,2,3")]);
+        let err = extract_query_vec::<i32>(&params, "ids")
+            .expect_err("absent key must NOT yield a parsed Vec");
+        match err {
+            QueryExtractError::Missing { key } => assert_eq!(key, "ids"),
+            other => panic!("expected QueryExtractError::Missing, got {other:?}"),
+        }
+    }
+}

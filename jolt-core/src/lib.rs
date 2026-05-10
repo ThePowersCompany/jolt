@@ -23,8 +23,9 @@ pub use method::{Method, ParseMethodError};
 pub use parse_body::{ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService};
 pub use parse_query::{
     bad_request_for_query_error, extract as extract_query, extract_bool as extract_query_bool,
-    extract_enum as extract_query_enum, extract_string as extract_query_string, ParseQueryLayer,
-    ParseQueryService, QueryExtractError, QueryParams,
+    extract_enum as extract_query_enum, extract_string as extract_query_string,
+    extract_vec as extract_query_vec, ParseQueryLayer, ParseQueryService, QueryExtractError,
+    QueryParams,
 };
 pub use registered_endpoint::RegisteredEndpoint;
 pub use request::Request;
