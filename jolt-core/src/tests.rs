@@ -3193,3 +3193,191 @@ mod parse_query_typed {
         }
     }
 }
+
+mod parse_query_typed_extras {
+    //! PRD-mandated verification for JOLT-RS-065: "Unit test: ?active=true →
+    //! `bool true`. ?sort=asc → `enum Sort::Asc`."
+    //!
+    //! Three sibling extractors land in 065 because their target shapes
+    //! don't match the 064 `extract::<T: FromStr>` bound:
+    //!
+    //! - `extract_bool` adds the `"1"`/`"0"` aliases (case-insensitive) on
+    //!   top of bool's FromStr (which only accepts the literal "true" /
+    //!   "false"). Tests pin all four accepted forms PLUS the rejection
+    //!   path so a regression that loosens the alias set (e.g., starts
+    //!   accepting "yes") gets caught.
+    //! - `extract_string` is a pass-through; the test pins that intent
+    //!   plus the missing-key path (the only failure mode this helper has).
+    //! - `extract_enum` targets `TryFrom<&str>` so user enums plug in. The
+    //!   PRD-mandated `?sort=asc → Sort::Asc` test uses a hand-rolled
+    //!   `TryFrom<&str>` impl on a local enum; the rejection-path test
+    //!   confirms the underlying error's `Display` is propagated into the
+    //!   `Invalid` variant's `message` field so `bad_request_for_query_error`
+    //!   has a useful payload for HTTP callers.
+    //!
+    //! 066's `Vec<T>` extractor is explicitly NOT covered here — it has its
+    //! own per-element error story.
+    use std::collections::HashMap;
+    use std::fmt;
+
+    use crate::{
+        extract_query_bool, extract_query_enum, extract_query_string, QueryExtractError,
+        QueryParams,
+    };
+
+    fn params_from(pairs: &[(&str, &str)]) -> QueryParams {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        QueryParams::from(map)
+    }
+
+    #[test]
+    fn bool_extracts_true_from_all_accepted_aliases() {
+        // PRD: ?active=true → bool true. Plus the 065-mandated aliases
+        // ("True"/"TRUE"/"1") which bool's FromStr rejects, so this test
+        // pins the full case-insensitive + numeric-alias surface that
+        // distinguishes `extract_bool` from `extract::<bool>`.
+        for alias in ["true", "True", "TRUE", "1"] {
+            let params = params_from(&[("active", alias)]);
+            let parsed = extract_query_bool(&params, "active")
+                .unwrap_or_else(|err| panic!("?active={alias} must parse as true, got {err}"));
+            assert!(parsed, "?active={alias} must yield true");
+        }
+    }
+
+    #[test]
+    fn bool_extracts_false_from_all_accepted_aliases() {
+        for alias in ["false", "False", "FALSE", "0"] {
+            let params = params_from(&[("active", alias)]);
+            let parsed = extract_query_bool(&params, "active")
+                .unwrap_or_else(|err| panic!("?active={alias} must parse as false, got {err}"));
+            assert!(!parsed, "?active={alias} must yield false");
+        }
+    }
+
+    #[test]
+    fn bool_invalid_value_yields_invalid_error_with_alias_hint() {
+        // A regression that starts accepting "yes" or "maybe" would silently
+        // widen the bool surface beyond what the PRD mandates; this test
+        // catches that. The Invalid message must name the four accepted
+        // forms so the 400 body is self-explanatory to HTTP callers.
+        let params = params_from(&[("active", "maybe")]);
+        let err = extract_query_bool(&params, "active")
+            .expect_err("?active=maybe must NOT parse as bool");
+        match err {
+            QueryExtractError::Invalid {
+                key,
+                value,
+                message,
+            } => {
+                assert_eq!(key, "active");
+                assert_eq!(value, "maybe");
+                assert!(
+                    message.contains("true") && message.contains("1"),
+                    "Invalid message must enumerate accepted forms, got {message}",
+                );
+            }
+            other => panic!("expected QueryExtractError::Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_pass_through_returns_raw_value() {
+        // The pass-through helper exists to skip the Result<String,
+        // Infallible> chain `extract::<String>` would emit. The test pins
+        // that the value comes back byte-identical, including ASCII case
+        // and embedded punctuation that a future "smart" parser might be
+        // tempted to normalize.
+        let params = params_from(&[("name", "Jolt-Rs/064")]);
+        let parsed = extract_query_string(&params, "name").expect("present key must succeed");
+        assert_eq!(parsed, "Jolt-Rs/064");
+    }
+
+    #[test]
+    fn string_missing_key_yields_missing_variant() {
+        // The pass-through helper still has to surface Missing for absent
+        // keys (since pass-through is the only failure mode it has). A
+        // regression that returned an empty String instead would silently
+        // hide required-parameter omissions from the AutoMiddleware codegen.
+        let params = params_from(&[("other", "x")]);
+        let err = extract_query_string(&params, "name")
+            .expect_err("absent key must NOT yield a string");
+        match err {
+            QueryExtractError::Missing { key } => assert_eq!(key, "name"),
+            other => panic!("expected QueryExtractError::Missing, got {other:?}"),
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Sort {
+        Asc,
+        Desc,
+    }
+
+    #[derive(Debug)]
+    struct ParseSortError(String);
+
+    impl fmt::Display for ParseSortError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "expected one of asc|desc, got {}", self.0)
+        }
+    }
+
+    impl<'a> TryFrom<&'a str> for Sort {
+        type Error = ParseSortError;
+
+        fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+            match s {
+                "asc" => Ok(Sort::Asc),
+                "desc" => Ok(Sort::Desc),
+                other => Err(ParseSortError(other.to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn enum_extracts_via_try_from_str() {
+        // PRD: ?sort=asc → enum Sort::Asc. The hand-rolled TryFrom<&str>
+        // impl above is the same shape `#[derive(strum::EnumString)]` would
+        // emit; the HRTB on `extract_enum`'s bound is what lets both wire
+        // in without lifetime gymnastics on the call site.
+        let params = params_from(&[("sort", "asc")]);
+        let parsed: Sort =
+            extract_query_enum(&params, "sort").expect("?sort=asc must parse via TryFrom");
+        assert_eq!(parsed, Sort::Asc);
+
+        let params_desc = params_from(&[("sort", "desc")]);
+        let parsed_desc: Sort = extract_query_enum(&params_desc, "sort")
+            .expect("?sort=desc must parse via TryFrom");
+        assert_eq!(parsed_desc, Sort::Desc);
+    }
+
+    #[test]
+    fn enum_invalid_value_propagates_underlying_error_into_invalid_message() {
+        // The Display impl on `ParseSortError` includes the rejected value;
+        // this test pins that the helper forwards that detail into the
+        // Invalid variant's `message` field rather than swallowing it. A
+        // regression that wrote a generic "parse failed" message would
+        // strip the actionable detail from the eventual 400 body.
+        let params = params_from(&[("sort", "sideways")]);
+        let err = extract_query_enum::<Sort>(&params, "sort")
+            .expect_err("?sort=sideways must NOT parse via TryFrom");
+        match err {
+            QueryExtractError::Invalid {
+                key,
+                value,
+                message,
+            } => {
+                assert_eq!(key, "sort");
+                assert_eq!(value, "sideways");
+                assert!(
+                    message.contains("asc") && message.contains("desc"),
+                    "Invalid message must propagate the underlying parser detail, got {message}",
+                );
+            }
+            other => panic!("expected QueryExtractError::Invalid, got {other:?}"),
+        }
+    }
+}

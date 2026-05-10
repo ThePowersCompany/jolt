@@ -16,6 +16,20 @@
 //! exists once a specific field's `T` is known — the natural caller is the
 //! AutoMiddleware codegen, which knows the per-field type at compile time.
 //!
+//! [`extract_bool`], [`extract_string`], and [`extract_enum`] (JOLT-RS-065)
+//! are sibling helpers for the three target types whose parser shape doesn't
+//! match [`extract`]'s `T: FromStr` bound:
+//!
+//! - [`extract_bool`] adds the `"1"`/`"0"` aliases (and case-insensitive
+//!   match) on top of [`bool`]'s `FromStr`, which only accepts `"true"` and
+//!   `"false"`.
+//! - [`extract_string`] is a pass-through that skips the
+//!   `Result<String, Infallible>` chain that `extract::<String>` would force
+//!   the caller through.
+//! - [`extract_enum`] targets [`TryFrom<&str>`] instead of [`FromStr`] so
+//!   user enums with hand-rolled (or `#[derive(strum::EnumString)]`-style)
+//!   string-to-variant maps can wire in.
+//!
 //! Architectural decisions pinned here for JOLT-RS-064..067 to build on:
 //!
 //! 1. **Layer carries no type parameter; output is always
@@ -274,6 +288,74 @@ where
             value: value.clone(),
             message: err.to_string(),
         })
+}
+
+/// Look up `key` in the parsed query map and parse the associated value as a
+/// [`bool`] (JOLT-RS-065).
+///
+/// Accepts (case-insensitively) `"true"` / `"1"` as `true`, and `"false"` /
+/// `"0"` as `false`. Any other value yields [`QueryExtractError::Invalid`]
+/// with a message naming the four accepted forms so the 400 body is
+/// self-explanatory.
+///
+/// Sibling of [`extract`] rather than a use of it because [`bool`]'s
+/// [`FromStr`] only accepts `"true"`/`"false"` — the `"1"`/`"0"` aliases
+/// the PRD calls out for 065 would be rejected by the generic helper.
+pub fn extract_bool(params: &QueryParams, key: &str) -> Result<bool, QueryExtractError> {
+    let value = params.get(key).ok_or_else(|| QueryExtractError::Missing {
+        key: key.to_string(),
+    })?;
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(QueryExtractError::Invalid {
+            key: key.to_string(),
+            value: value.clone(),
+            message: "expected one of true|false|1|0 (case-insensitive)".to_string(),
+        }),
+    }
+}
+
+/// Look up `key` in the parsed query map and return the raw string value
+/// (JOLT-RS-065).
+///
+/// Pass-through that always succeeds when the key is present (string
+/// "parsing" is the identity). Distinct from `extract::<String>` because
+/// [`String`]'s [`FromStr`] is `Infallible` — the generic helper would force
+/// callers through a `Result<String, Infallible>` chain whose error variant
+/// can never fire. The dedicated helper documents the intent at the call
+/// site and skips the unused error path.
+pub fn extract_string(params: &QueryParams, key: &str) -> Result<String, QueryExtractError> {
+    params
+        .get(key)
+        .cloned()
+        .ok_or_else(|| QueryExtractError::Missing {
+            key: key.to_string(),
+        })
+}
+
+/// Look up `key` in the parsed query map and parse the associated value via
+/// [`TryFrom<&str>`] (JOLT-RS-065).
+///
+/// Sibling of [`extract`] for types that implement [`TryFrom<&str>`] instead
+/// of [`FromStr`]. The natural target is user-defined enums (often via
+/// `#[derive(strum::EnumString)]` or a hand-rolled `TryFrom<&str>` impl).
+/// The HRTB on the bound lets the caller pass any `T` whose `TryFrom<&str>`
+/// works for arbitrary input lifetimes, which is the shape strum and most
+/// hand-rolled enum impls already have.
+pub fn extract_enum<T>(params: &QueryParams, key: &str) -> Result<T, QueryExtractError>
+where
+    T: for<'a> TryFrom<&'a str>,
+    for<'a> <T as TryFrom<&'a str>>::Error: fmt::Display,
+{
+    let value = params.get(key).ok_or_else(|| QueryExtractError::Missing {
+        key: key.to_string(),
+    })?;
+    T::try_from(value.as_str()).map_err(|err| QueryExtractError::Invalid {
+        key: key.to_string(),
+        value: value.clone(),
+        message: err.to_string(),
+    })
 }
 
 /// Build the `400 Bad Request` response surfaced when a typed query
