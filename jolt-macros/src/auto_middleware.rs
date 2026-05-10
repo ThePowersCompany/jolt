@@ -5,14 +5,20 @@
 //!   [`AutoMiddlewareInput`] + [`AutoMiddlewareField`]. The derive emits a
 //!   minimal hidden marker so an integration test can verify the derive
 //!   compiled and parsed without depending on later codegen.
-//! - JOLT-RS-047 (this iteration): classify each parsed field with a
-//!   [`FieldKind`]. The body-candidate rule fires when `field.ident == "body"`
-//!   per the spec ("auto-applies body parsing if `body: T` field exists"); the
+//! - JOLT-RS-047: classify each parsed field with a [`FieldKind`]. The
+//!   body-candidate rule fires when `field.ident == "body"` per the spec; the
 //!   field's type is captured verbatim so the body-extraction codegen in 053
-//!   can name `T` in `__req.json::<T>()`. JOLT-RS-048/049 extend [`FieldKind`]
-//!   with the `QueryParams` and `Request` variants.
-//! - JOLT-RS-048 will mark query-extraction fields (`QueryParams<T>` or
-//!   `HashMap<String, String>`).
+//!   can name `T` in `__req.json::<T>()`.
+//! - JOLT-RS-048 (this iteration): mark query-extraction fields. Two rules,
+//!   evaluated in this order: (a) any field whose type's last path segment is
+//!   `QueryParams` is [`FieldKind::QueryParams`] regardless of name (covers
+//!   `QueryParams<T>` and `crate::api::QueryParams<T>`); (b) a field NAMED
+//!   `query_params` AND typed `HashMap<String, String>` (last path segment
+//!   `HashMap` with two `String` generic args, covering bare `HashMap` and
+//!   `std::collections::HashMap` variants) is also [`FieldKind::QueryParams`].
+//!   The type-based rule runs before the name-based body rule so a hypothetical
+//!   `body: QueryParams<T>` is QueryParams, not Body — pinning the precedence
+//!   explicitly so 049/050 can extend without ambiguity.
 //! - JOLT-RS-049 will mark request-injection fields (`&Request` or `Request`).
 //! - JOLT-RS-050 will detect the `#[cors]` struct-level attribute.
 //!
@@ -22,7 +28,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, Ident, Type};
+use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type};
 
 /// Parsed shape of a `#[derive(AutoMiddleware)]` input.
 ///
@@ -58,26 +64,44 @@ pub(crate) struct AutoMiddlewareField {
 /// Per-field classification used by the layer codegen in JOLT-RS-051+ to emit
 /// the right extraction call per field.
 ///
-/// Detection is name-based per the spec ("auto-applies body parsing if
-/// `body: T` field exists"). 048 will add `QueryParams` (matching `query_params`
-/// by name and `QueryParams<T>` / `HashMap<String, String>` by type); 049 will
-/// add `Request` (matching `req` by name and `Request` / `&Request` by type).
-/// Until those land, every non-`body` field falls through to [`FieldKind::Other`]
-/// — including ones the spec eventually marks as Query/Request — which is the
-/// correct behavior for 047 in isolation: those fields aren't body-candidates,
-/// and their final classification is 048/049's responsibility.
+/// Classification rules, evaluated top-to-bottom in [`classify_field`]:
+/// 1. Type's last path segment is `QueryParams` → [`FieldKind::QueryParams`]
+///    (regardless of field name; covers `QueryParams<T>` and path-qualified
+///    forms like `crate::api::QueryParams<T>`).
+/// 2. Field NAMED `query_params` AND typed `HashMap<String, String>` (last
+///    path segment is `HashMap` with two `String` generic args) →
+///    [`FieldKind::QueryParams`].
+/// 3. Field NAMED `body` → [`FieldKind::Body`].
+/// 4. Otherwise → [`FieldKind::Other`].
+///
+/// Type-before-name precedence is intentional: a `body: QueryParams<T>` is
+/// classified as QueryParams (the type makes the name nonsensical for body
+/// extraction, since `QueryParams` is a framework type with extraction
+/// semantics, not a user payload shape). The body-name rule is otherwise the
+/// catch-all for "this is a body, full stop" without needing to inspect T.
+///
+/// 049 will add `Request` (matching `req` by name and `Request` / `&Request`
+/// by type) on top; the `Other` catch-all stays terminal — after phase10
+/// closes, an `Other` field is one the user added that doesn't trigger any
+/// framework extraction, and codegen treats it as `Default::default()`
+/// per-request (the same default-construction contract used by `#[endpoint]`
+/// wrappers; see JOLT-RS-043's progress notes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FieldKind {
     /// Body-candidate. The spec triggers JSON body parsing when a field named
     /// `body: T` is present; codegen in 053 will emit `__req.json::<T>()` and
     /// assign the result into the `body` field of the constructed middleware.
     Body,
-    /// Catch-all for fields not yet classified. 048/049 narrow this further by
-    /// adding `QueryParams` and `Request` variants. After phase10 closes, an
+    /// Query-params extraction. The spec triggers query-string parsing when
+    /// the field is typed `QueryParams<T>` (any name, any path qualification)
+    /// or named `query_params` and typed `HashMap<String, String>`; codegen in
+    /// 053 will emit the appropriate `__req.query_params::<T>()` (for the
+    /// typed shape) or a raw-map copy (for the HashMap shape).
+    QueryParams,
+    /// Catch-all for fields with no framework-special meaning. 049 will narrow
+    /// this further by adding a `Request` variant. After phase10 closes, an
     /// `Other` field is one the user added that doesn't trigger any framework
-    /// extraction — codegen treats it as `Default::default()` per-request (the
-    /// same default-construction contract used by `#[endpoint]` wrappers; see
-    /// JOLT-RS-043's progress notes).
+    /// extraction — codegen treats it as `Default::default()` per-request.
     Other,
 }
 
@@ -126,7 +150,7 @@ fn parse_struct_fields(
                     .ident
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
-                let kind = classify_field(&field_ident);
+                let kind = classify_field(&field_ident, &field.ty);
                 out.push(AutoMiddlewareField {
                     ident: field_ident,
                     ty: field.ty.clone(),
@@ -144,12 +168,59 @@ fn parse_struct_fields(
     }
 }
 
-fn classify_field(ident: &Ident) -> FieldKind {
-    if ident == "body" {
-        FieldKind::Body
-    } else {
-        FieldKind::Other
+fn classify_field(ident: &Ident, ty: &Type) -> FieldKind {
+    if type_path_ends_with(ty, "QueryParams") {
+        return FieldKind::QueryParams;
     }
+    if ident == "query_params" && is_hashmap_string_string(ty) {
+        return FieldKind::QueryParams;
+    }
+    if ident == "body" {
+        return FieldKind::Body;
+    }
+    FieldKind::Other
+}
+
+/// True iff `ty` is a path type whose last segment's ident equals `name`.
+///
+/// Used by 048 to spot `QueryParams<T>` (and `crate::api::QueryParams<T>`,
+/// `::framework::QueryParams<T>`, etc.) without coupling to a specific module
+/// path. 049 will reuse the same shape to spot `Request` / `&Request`.
+fn type_path_ends_with(ty: &Type, name: &str) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == name)
+}
+
+/// True iff `ty` is `HashMap<String, String>` — match on the last path segment
+/// being `HashMap` with exactly two generic type arguments, both of which are
+/// path types ending in `String`. Covers bare `HashMap` and `std::collections::HashMap`
+/// (and any other path qualification). Doesn't match if the value type isn't
+/// `String` (e.g. `HashMap<String, u32>` falls through to `Other`).
+fn is_hashmap_string_string(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let Some(last) = tp.path.segments.last() else {
+        return false;
+    };
+    if last.ident != "HashMap" {
+        return false;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    if args.args.len() != 2 {
+        return false;
+    }
+    args.args.iter().all(|arg| match arg {
+        GenericArgument::Type(t) => type_path_ends_with(t, "String"),
+        _ => false,
+    })
 }
 
 /// Top-level driver for `#[derive(AutoMiddleware)]`.
@@ -552,6 +623,200 @@ mod tests {
         assert!(
             !rendered.contains("__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT"),
             "must NOT emit marker impl when parse fails, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn parses_query_params_typed_field_as_query_params_kind() {
+        // PRD-mandated verification: "field query: QueryParams<Filters> →
+        // detected as query field." The detection rule is type-based for the
+        // `QueryParams<T>` shape — the field's name is irrelevant when the
+        // type matches, so a user writing `query: QueryParams<Filters>`
+        // (instead of the conventional `query_params: ...`) still gets the
+        // QueryParams kind.
+        let input = parse_derive(
+            r#"
+            struct WithQuery {
+                query: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 1);
+        assert_eq!(parsed.fields[0].kind, FieldKind::QueryParams);
+        let ty = &parsed.fields[0].ty;
+        let ty_tokens = quote::quote!(#ty).to_string();
+        assert!(
+            ty_tokens.contains("QueryParams") && ty_tokens.contains("Filters"),
+            "type must round-trip verbatim for codegen in 053, got: {ty_tokens}"
+        );
+    }
+
+    #[test]
+    fn parses_path_qualified_query_params_as_query_params_kind() {
+        // Type detection keys on the LAST path segment, not the full path —
+        // so `crate::api::QueryParams<T>`, `::framework::QueryParams<T>`,
+        // and bare `QueryParams<T>` all classify as QueryParams. Pinning this
+        // because users in larger codebases will namespace the import.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                q: crate::api::QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::QueryParams);
+    }
+
+    #[test]
+    fn parses_named_query_params_with_hashmap_string_string_as_query_params_kind() {
+        // Second detection rule: a field NAMED `query_params` AND typed
+        // `HashMap<String, String>` is QueryParams. This is the raw-map shape
+        // for users who want all query string entries without a typed schema.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                query_params: HashMap<String, String>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::QueryParams);
+    }
+
+    #[test]
+    fn parses_named_query_params_with_path_qualified_hashmap_as_query_params_kind() {
+        // The HashMap rule matches on the LAST path segment too —
+        // `std::collections::HashMap<String, String>` and bare
+        // `HashMap<String, String>` both classify as QueryParams when the
+        // field is named `query_params`.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                query_params: std::collections::HashMap<String, String>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::QueryParams);
+    }
+
+    #[test]
+    fn hashmap_string_string_with_non_query_params_name_classifies_as_other() {
+        // The HashMap rule requires BOTH the right name AND the right type.
+        // A `headers: HashMap<String, String>` field is NOT QueryParams — the
+        // user clearly meant headers, not query params. Falls through to Other
+        // (049 may narrow further if it adds a Headers variant; until then,
+        // codegen treats it as `Default::default()`).
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                headers: HashMap<String, String>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn named_query_params_with_non_string_value_hashmap_classifies_as_other() {
+        // The HashMap rule requires the value type to be `String` too — a
+        // `query_params: HashMap<String, u32>` doesn't match. The user
+        // probably has a typed-deserialization use in mind and would be
+        // better served by `QueryParams<T>`; falling through to Other
+        // forces them to either rename the field or use the typed shape.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                query_params: HashMap<String, u32>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn query_params_type_takes_precedence_over_body_name() {
+        // Precedence pin: a `body: QueryParams<T>` is QueryParams, NOT Body.
+        // The type-based QueryParams rule runs before the name-based body
+        // rule in `classify_field`. This is the right call because
+        // `QueryParams<T>` is a framework type with extraction semantics —
+        // calling it `body` doesn't change what extraction it needs.
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                body: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::QueryParams);
+    }
+
+    #[test]
+    fn named_query_params_with_non_hashmap_type_classifies_as_other() {
+        // Edge case: a field named `query_params` but typed as something
+        // OTHER than `HashMap<String, String>` or `QueryParams<T>` falls
+        // through to Other. The framework's framework-meaning for
+        // `query_params` is the raw-map shape; if the user wants a typed
+        // shape they must use `QueryParams<T>` (rule 1 fires on the type).
+        let input = parse_derive(
+            r#"
+            struct Mw {
+                query_params: Vec<String>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn unit_struct_has_no_query_params_field() {
+        // Parallel to `unit_struct_has_no_body_field`: the QueryParams-filter
+        // iterator on a unit struct yields zero fields, so 053's codegen will
+        // emit zero query-extraction calls. Pinned because the layer codegen
+        // will use `parsed.fields.iter().filter(|f| f.kind == QueryParams)`.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let q_count = parsed
+            .fields
+            .iter()
+            .filter(|f| f.kind == FieldKind::QueryParams)
+            .count();
+        assert_eq!(q_count, 0);
+    }
+
+    #[test]
+    fn classifies_all_three_kinds_in_mixed_struct() {
+        // End-to-end shape: a struct that mixes body, query_params (typed),
+        // headers (HashMap but wrong name), req (049's territory), and a
+        // primitive must produce the right kinds in field order.
+        let input = parse_derive(
+            r#"
+            struct Mixed {
+                body: CreateUserRequest,
+                query_params: QueryParams<Filters>,
+                headers: HashMap<String, String>,
+                req: Request,
+                count: usize,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let kinds: Vec<FieldKind> = parsed.fields.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                FieldKind::Body,
+                FieldKind::QueryParams,
+                FieldKind::Other, // headers: HashMap rule requires query_params name
+                FieldKind::Other, // req: 049 will narrow to Request
+                FieldKind::Other,
+            ]
         );
     }
 }

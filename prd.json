@@ -713,7 +713,7 @@
       "verification": [
         "Unit test: field query: QueryParams<Filters> \u2192 detected as query field."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-049",

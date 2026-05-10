@@ -47,8 +47,9 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// observe that the derive ran.
 ///
 /// Subsequent phase10/11 items extend this expansion:
-/// - 047 detects body-candidate fields (`T: DeserializeOwned`),
-/// - 048 detects query-extraction fields (`QueryParams<T>` / `HashMap<String, String>`),
+/// - 047 (landed): classifies `body`-named fields as `FieldKind::Body`,
+/// - 048 (landed): classifies `QueryParams<T>` (any name) and `query_params:
+///   HashMap<String, String>` as `FieldKind::QueryParams`,
 /// - 049 detects request-injection fields (`&Request` / `Request`),
 /// - 050 detects struct-level `#[cors]` attributes,
 /// - 051-053 generate the `tower::Layer` impl + extraction code in `call()`.
