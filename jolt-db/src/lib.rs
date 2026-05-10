@@ -378,6 +378,55 @@
 //!     [`std::path::Path::new`] call with no runtime cost. Matches the
 //!     `dir: &str` shape of every existing migration-discovery API the
 //!     port is replacing.
+//!
+//! [`sha256_hex`] (JOLT-RS-095) is the SHA-256 checksum helper the rest
+//! of the migration pipeline composes on top of. Takes a byte slice and
+//! returns a 64-character lowercase hexadecimal string. JOLT-RS-096 will
+//! extend [`MigrationFile`] with a `checksum: String` field populated by
+//! calling `sha256_hex(content.as_bytes())` inside
+//! [`read_migration_files`]; JOLT-RS-099 will hash the file content again
+//! at apply time and compare against the `_migrations` table's stored
+//! checksum to detect tampering / skip already-applied migrations.
+//!
+//! 29. **Free function `sha256_hex(bytes: &[u8]) -> String`, not a method
+//!     on [`MigrationFile`] (JOLT-RS-095).** The helper is needed in at
+//!     least three call sites — JOLT-RS-096's `read_migration_files`
+//!     loop (file body → checksum), JOLT-RS-099's apply path (compare
+//!     against `_migrations.checksum`), and any future caller that wants
+//!     to hash a precomputed string before constructing a
+//!     [`MigrationFile`] by hand. A method on [`MigrationFile`] would be
+//!     more discoverable but would couple the hash primitive to that one
+//!     struct; making it a free function at the crate root keeps the
+//!     primitive composable. The `&[u8]` (rather than `&str`) parameter
+//!     widens the input shape to any byte buffer — SQL bodies, JSON, raw
+//!     bytes from a file — without forcing callers through a `.as_bytes()`
+//!     conversion at most sites and matches the underlying
+//!     [`sha2::Sha256::digest`] signature.
+//!
+//! 30. **Hex encoding is a 4-line hand-rolled loop, not a `hex` crate
+//!     dependency (JOLT-RS-095).** The encoding logic for 32 SHA-256
+//!     output bytes is trivial — two nibble lookups against a 16-byte
+//!     ASCII table — and pulling
+//!     [`hex`](https://docs.rs/hex/latest/hex/) into the workspace solely
+//!     for this would be the heavier choice (extra crate, MSRV surface,
+//!     supply-chain footprint). The hand-rolled loop is fixed-size,
+//!     branch-free per nibble, and produces the canonical lowercase
+//!     output that `pg_dump` / `git`-style toolchains expect (so the
+//!     stored `_migrations.checksum` column lines up byte-for-byte with
+//!     whatever a developer might compute via `shasum -a 256` at the
+//!     shell). Output length is always exactly 64 ASCII characters
+//!     regardless of input length.
+//!
+//! 31. **Lowercase hex (`0-9a-f`), not uppercase (JOLT-RS-095).** Matches
+//!     the convention used by `shasum -a 256`, `openssl dgst -sha256`,
+//!     `git`'s blob hashes, and the
+//!     [`Display`](https://docs.rs/sha2/latest/sha2/index.html) impl that
+//!     `sha2` itself ships. Mixing cases between the recorded
+//!     `_migrations.checksum` value and a developer's manually-computed
+//!     reference hash would surface as a false-positive "migration
+//!     tampered with" failure at apply time (JOLT-RS-099) even when the
+//!     bytes are identical. Pinning lowercase here eliminates the
+//!     ambiguity.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -820,9 +869,42 @@ pub fn read_migration_files(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
     Ok(files)
 }
 
+/// Hash `bytes` with SHA-256 and return the digest as a 64-character
+/// lowercase hexadecimal string (JOLT-RS-095).
+///
+/// See module docs decisions 29–31 for the architectural contract:
+/// free function (not a method on [`MigrationFile`]) so the primitive
+/// composes for both the JOLT-RS-096 file-discovery path and the
+/// JOLT-RS-099 apply-time tamper check; hand-rolled hex (no `hex` crate
+/// dependency); lowercase output to match `shasum -a 256` / `git` /
+/// `openssl dgst -sha256` conventions.
+///
+/// # Example
+///
+/// ```
+/// // NIST SHA-256 test vector for the ASCII input "abc".
+/// assert_eq!(
+///     jolt_db::sha256_hex(b"abc"),
+///     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+/// );
+/// ```
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DbConfig, JoltDb, MigrationFile, TypedQuery, read_migration_files};
+    use super::{
+        DbConfig, JoltDb, MigrationFile, TypedQuery, read_migration_files, sha256_hex,
+    };
 
     #[test]
     fn default_pins_max_connections_to_10() {
@@ -1622,5 +1704,73 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "001_init.sql");
         assert_eq!(files[0].content, "SELECT 1;");
+    }
+
+    // ---- JOLT-RS-095: sha256_hex ----
+
+    /// Compile-time pin: `sha256_hex(bytes: &[u8])` resolves to a
+    /// `String` (decisions 29, 30). A regression that narrows the
+    /// parameter to `&str` or returns a `Vec<u8>` / `[u8; 32]` breaks
+    /// this build pin without ever running.
+    #[test]
+    fn sha256_hex_signature_pins() {
+        fn _pin(bytes: &[u8]) -> String {
+            sha256_hex(bytes)
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-095: a known input hashes
+    /// to the documented SHA-256 hex output. Uses the canonical NIST
+    /// test vector for `"abc"` — anyone can re-derive this via
+    /// `echo -n abc | shasum -a 256`, so a regression in either the
+    /// hash kernel or the hex encoder surfaces against a fixed
+    /// independently-verifiable reference.
+    #[test]
+    fn sha256_hex_matches_nist_abc_test_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+    }
+
+    /// SHA-256 of the empty input is the canonical
+    /// `e3b0c4...` constant. Pins both that the hex output is exactly
+    /// 64 characters (no truncation, no padding) and that the helper
+    /// handles zero-length input without panicking.
+    #[test]
+    fn sha256_hex_matches_empty_input_constant() {
+        let out = sha256_hex(b"");
+        assert_eq!(
+            out,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        assert_eq!(out.len(), 64);
+    }
+
+    /// Output is lowercase hex, not uppercase (decision 31). Pinned so
+    /// a regression that flips to `{:02X}` formatting fails this test —
+    /// such a flip would silently desync the recorded
+    /// `_migrations.checksum` from a developer's `shasum -a 256`
+    /// reference value when JOLT-RS-099's apply-time comparison runs.
+    #[test]
+    fn sha256_hex_is_lowercase() {
+        let out = sha256_hex(b"abc");
+        assert!(
+            out.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "expected lowercase hex digits, got {out:?}",
+        );
+    }
+
+    /// Hashing the SQL body of a migration file produces a stable hex
+    /// digest that the JOLT-RS-096 `read_migration_files` extension
+    /// (and the JOLT-RS-099 apply-time tamper check) can record and
+    /// compare against. Reference value computed via
+    /// `echo -n 'SELECT 1;' | shasum -a 256`.
+    #[test]
+    fn sha256_hex_hashes_migration_body() {
+        assert_eq!(
+            sha256_hex(b"SELECT 1;"),
+            "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+        );
     }
 }

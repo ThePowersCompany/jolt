@@ -1371,7 +1371,7 @@
       "verification": [
         "Unit test: known content \u2192 SHA-256 matches expected hex."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-096",
