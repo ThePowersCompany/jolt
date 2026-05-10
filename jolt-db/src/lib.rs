@@ -706,10 +706,11 @@
 //!     has been modified ...")` would force callers into substring
 //!     matching to differentiate tampered-vs-IO-vs-DB failures, which is
 //!     exactly the brittleness the PRD's pattern-match-friendly error
-//!     shape needs to avoid. Three variants for now ([`MigrationError::
-//!     Tampered`], [`MigrationError::Io`], [`MigrationError::Sqlx`]);
-//!     JOLT-RS-103 will add [`MigrationError::Removed`] for the
-//!     rollback-detection failure mode the same way. [`Self::
+//!     shape needs to avoid. Three variants at JOLT-RS-102
+//!     ([`MigrationError::Tampered`], [`MigrationError::Io`],
+//!     [`MigrationError::Sqlx`]); JOLT-RS-103 added the additive
+//!     fourth variant [`MigrationError::Removed`] for rollback
+//!     detection (decision 48). [`Self::
 //!     applied_migrations`] keeps returning [`sqlx::Error`] directly —
 //!     it has no migration-specific failure modes (decision 38 still
 //!     stands), and callers who chain it into `migrate` propagate the
@@ -764,6 +765,46 @@
 //!     unit test so a regression that drops the period, mangles the
 //!     wording, or escapes the name through `Debug` formatting fails
 //!     without ever running migrate.
+//!
+//! 48. **Rollback detection runs as a separate scan before the
+//!     three-way apply loop (JOLT-RS-103).** A name in the
+//!     `_migrations` read-back with no corresponding file in `dir`
+//!     means an operator deleted (or moved, or renamed) a migration
+//!     that already shipped — almost always an attempt to roll it
+//!     back, which jolt-db deliberately does not support
+//!     (forward-only, matching `sqlx::migrate!`'s contract). The
+//!     check belongs *before* the per-file three-way fork (decision
+//!     47) because a removed file is a global-state divergence: it
+//!     can't be expressed inside the `for file in &files { match
+//!     applied.get(&file.name) { ... } }` shape at all (that loop
+//!     iterates files, never the applied keys). Inlining the scan
+//!     at the head of `migrate` (vs. a free `detect_rollback(files,
+//!     applied) -> Result<(), MigrationError>` helper) keeps the
+//!     control flow of the entire apply pipeline visible in one
+//!     place and avoids spawning a function whose only caller is
+//!     this one. Implementation is `for applied_name in
+//!     applied.keys() { if !files.iter().any(|f| &f.name ==
+//!     applied_name) { return Err(MigrationError::Removed { name:
+//!     applied_name.clone() }); } }` — O(applied × files); with
+//!     realistic migration counts (<1000) the constant factor is
+//!     negligible vs. building a `HashSet<&str>` of file names
+//!     (which would shave the lookup to amortized O(1) but add a
+//!     `use std::collections::HashSet;` and an extra allocation for
+//!     a path that runs at most once per migrate call). Short-
+//!     circuit on the *first* missing name (HashMap iteration order
+//!     is non-deterministic, so which name is reported when more
+//!     than one is missing is also non-deterministic — a deliberate
+//!     non-decision because operators repairing one removed file
+//!     will see the next one on their re-run; a sorted scan can be
+//!     added later without changing the contract). The PRD-103
+//!     mandated [`Display`] output for the [`MigrationError::
+//!     Removed`] variant is `"Migration {name} has been removed.
+//!     Rollbacks are not supported."` verbatim — pinned by the
+//!     `migration_error_display_renders_prd_verbatim_for_removed`
+//!     unit test. The variant is additive (no breaking change to
+//!     [`MigrationError`]'s existing variants) so JOLT-RS-102's
+//!     `From<io::Error>` / `From<sqlx::Error>` impls (decision 46)
+//!     and `source()` chain (decision 45) carry through unchanged.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -1109,7 +1150,11 @@ impl JoltDb {
     /// A name present with a *different* checksum is the JOLT-RS-102
     /// tamper case — the apply loop returns
     /// [`MigrationError::Tampered`]. A name not present at all is a
-    /// new migration that the apply loop will execute.
+    /// new migration that the apply loop will execute. A name in
+    /// this map with no corresponding file in the migrations
+    /// directory is the JOLT-RS-103 rollback case — the apply loop
+    /// returns [`MigrationError::Removed`] before any file is
+    /// applied.
     ///
     /// Reads `name` and `checksum` only; the `applied_at` column is
     /// intentionally not surfaced (decision 37). Returns the raw
@@ -1141,15 +1186,19 @@ impl JoltDb {
 
     /// Discover migration files in `dir`, apply every one not yet
     /// recorded in `_migrations`, and return the count of newly applied
-    /// migrations (JOLT-RS-100; tamper detection added by JOLT-RS-102).
+    /// migrations (JOLT-RS-100; tamper detection added by JOLT-RS-102;
+    /// rollback detection added by JOLT-RS-103).
     ///
-    /// See module docs decisions 40–47 for the architectural contract:
+    /// See module docs decisions 40–48 for the architectural contract:
     /// one transaction per migration, body executed via
     /// [`sqlx::raw_sql`] (multi-statement bodies supported), filesystem
     /// errors flow through [`MigrationError::Io`], sqlx errors flow
-    /// through [`MigrationError::Sqlx`], and the apply loop runs the
+    /// through [`MigrationError::Sqlx`], the apply loop runs the
     /// three-way fork (skip on matching checksum, tamper on mismatch,
-    /// apply on missing).
+    /// apply on missing), and a rollback-detection pass runs before
+    /// the loop body to surface
+    /// [`MigrationError::Removed`] when an applied migration's file
+    /// has disappeared from disk.
     ///
     /// Composes the three primitives already in place:
     /// 1. [`read_migration_files`] (JOLT-RS-094/096) for discovery
@@ -1178,11 +1227,14 @@ impl JoltDb {
     /// `From<std::io::Error>` impl (decision 46), migration-body and
     /// bookkeeping failures flow through [`MigrationError::Sqlx`] via
     /// the `From<sqlx::Error>` impl (rolled back by the surrounding
-    /// per-migration transaction), and tamper detection surfaces
-    /// [`MigrationError::Tampered`] with the file's name. The
-    /// PRD-102 [`Display`](std::fmt::Display) message for the tamper
-    /// case is `"Migration {name} has been modified since it was
-    /// applied."` verbatim (decision 47).
+    /// per-migration transaction), tamper detection surfaces
+    /// [`MigrationError::Tampered`] with the file's name, and
+    /// rollback detection surfaces [`MigrationError::Removed`] with
+    /// the missing file's name. The PRD-102 / PRD-103
+    /// [`Display`](std::fmt::Display) messages are
+    /// `"Migration {name} has been modified since it was applied."`
+    /// and `"Migration {name} has been removed. Rollbacks are not
+    /// supported."` verbatim (decisions 47 + 48).
     ///
     /// # Example
     ///
@@ -1193,6 +1245,22 @@ impl JoltDb {
     pub async fn migrate(&self, dir: &str) -> Result<usize, MigrationError> {
         let files = read_migration_files(dir)?;
         let applied = self.applied_migrations().await?;
+        // Decision 48: rollback detection. Before the per-file apply
+        // loop runs, check that every name recorded in `_migrations`
+        // still has a corresponding file on disk. A missing file is
+        // an attempt to roll a migration back, which jolt-db does
+        // not support (forward-only). Short-circuit on the first
+        // missing name (matches the JOLT-RS-102 tamper short-circuit
+        // semantic). Runs before the three-way fork because a
+        // removed file is global-state divergence, not a per-file
+        // problem.
+        for applied_name in applied.keys() {
+            if !files.iter().any(|f| &f.name == applied_name) {
+                return Err(MigrationError::Removed {
+                    name: applied_name.clone(),
+                });
+            }
+        }
         let mut count = 0_usize;
         for file in &files {
             // Decision 47: three-way fork pinning JOLT-RS-102's
@@ -1345,17 +1413,12 @@ pub struct MigrationFile {
 /// Error type returned by the migration apply pipeline
 /// ([`JoltDb::migrate`], JOLT-RS-102+).
 ///
-/// See module docs decisions 45–47 for the architectural contract:
+/// See module docs decisions 45–48 for the architectural contract:
 /// dedicated enum (not a `sqlx::Error::Protocol(msg)` sentinel),
 /// `From<std::io::Error>` and `From<sqlx::Error>` for `?`-chaining
-/// inside the apply loop, and a PRD-102 verbatim [`Display`] message
-/// for the [`Self::Tampered`] variant.
-///
-/// JOLT-RS-103 will add a `Removed { name }` variant for the
-/// rollback-detection failure mode (applied row in `_migrations` whose
-/// migration file no longer exists on disk); the additive shape means
-/// callers that pattern-match exhaustively today will get a compile-time
-/// nudge to handle the new variant when it lands.
+/// inside the apply loop, a PRD-102 verbatim [`Display`] message for
+/// the [`Self::Tampered`] variant, and a PRD-103 verbatim [`Display`]
+/// message for the [`Self::Removed`] rollback-detection variant.
 #[derive(Debug)]
 pub enum MigrationError {
     /// A previously-applied migration's recorded checksum in
@@ -1372,6 +1435,24 @@ pub enum MigrationError {
     Tampered {
         /// Filename (basename) of the tampered migration —
         /// [`MigrationFile::name`] / `_migrations.name` verbatim.
+        name: String,
+    },
+    /// A name recorded in `_migrations` has no corresponding file in
+    /// the migrations directory (decision 48, JOLT-RS-103). An
+    /// operator deleted (or moved, or renamed) a migration file that
+    /// already shipped — almost always an attempt to roll the
+    /// migration back, which jolt-db deliberately does not support
+    /// (forward-only, matching `sqlx::migrate!`'s contract).
+    ///
+    /// The [`Display`](std::fmt::Display) output for this variant is
+    /// the PRD-103 verbatim message
+    /// `"Migration {name} has been removed. Rollbacks are not supported."`.
+    Removed {
+        /// Filename (basename) of the removed migration —
+        /// `_migrations.name` verbatim. The name reported is the
+        /// first removed name encountered while scanning the applied
+        /// set; if more than one file is missing the operator will
+        /// see the rest after fixing this one and re-running.
         name: String,
     },
     /// Filesystem failure surfaced from [`read_migration_files`]
@@ -1396,6 +1477,10 @@ impl std::fmt::Display for MigrationError {
             Self::Tampered { name } => {
                 write!(f, "Migration {name} has been modified since it was applied.")
             }
+            // PRD-103 mandates this message verbatim.
+            Self::Removed { name } => {
+                write!(f, "Migration {name} has been removed. Rollbacks are not supported.")
+            }
             Self::Io(err) => write!(f, "migration filesystem error: {err}"),
             Self::Sqlx(err) => write!(f, "migration database error: {err}"),
         }
@@ -1406,6 +1491,7 @@ impl std::error::Error for MigrationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Tampered { .. } => None,
+            Self::Removed { .. } => None,
             Self::Io(err) => Some(err),
             Self::Sqlx(err) => Some(err),
         }
@@ -3064,6 +3150,176 @@ mod tests {
             .execute(db.pool())
             .await
             .expect("drop target table (teardown)");
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
+    }
+
+    // ---- JOLT-RS-103: MigrationError::Removed + rollback detection ----
+
+    /// PRD-103 mandates the Display output for the Removed variant
+    /// verbatim: `"Migration X has been removed. Rollbacks are not
+    /// supported."`. Pins decision 48's contract. A regression that
+    /// drops the period, mangles the wording, or routes the variant
+    /// through `Debug` formatting fails this test without ever
+    /// running migrate.
+    #[test]
+    fn migration_error_display_renders_prd_verbatim_for_removed() {
+        let err = MigrationError::Removed {
+            name: String::from("003_add_users.sql"),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "Migration 003_add_users.sql has been removed. Rollbacks are not supported.",
+        );
+    }
+
+    /// `MigrationError::Removed` carries no underlying error, so
+    /// [`std::error::Error::source`] returns `None` (parallel to the
+    /// `Tampered` arm — both are jolt-db-synthesized failures, not
+    /// wrappers around an `io::Error` / `sqlx::Error`). Pins decision
+    /// 48's source contract.
+    #[test]
+    fn migration_error_source_returns_none_for_removed() {
+        use std::error::Error;
+        let removed = MigrationError::Removed {
+            name: String::from("foo.sql"),
+        };
+        assert!(
+            removed.source().is_none(),
+            "Removed carries no underlying error",
+        );
+    }
+
+    /// PRD-mandated verification for JOLT-RS-103: "remove migration
+    /// file after apply → error on next run." Env-gated on
+    /// `JOLT_TEST_DATABASE_URL` (same convention as the rest of the
+    /// live-DB tests in this module).
+    ///
+    /// Flow:
+    /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
+    ///    empty starting state.
+    /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
+    ///    `migrate`, assert `Ok(1)`.
+    /// 3. Delete the on-disk file. The `_migrations` row still
+    ///    records the original name + checksum.
+    /// 4. Call `migrate` again. Assert it returns
+    ///    [`MigrationError::Removed`] with `name = "001_init.sql"`.
+    /// 5. Assert the Display output is the PRD-103 verbatim message.
+    /// 6. Verify the rollback check ran *before* the per-file apply
+    ///    loop: write a brand-new `002_added.sql` file alongside
+    ///    the now-missing `001_init.sql`'s database row, re-run
+    ///    `migrate`, assert it still fails with
+    ///    [`MigrationError::Removed`] (the new file is not applied
+    ///    because the global-state check short-circuits). Pins
+    ///    decision 48's "before the loop" placement.
+    /// 7. Teardown.
+    #[tokio::test]
+    async fn migrate_detects_removed_migration_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Fresh-state setup.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
+            .execute(db.pool())
+            .await
+            .expect("drop should-not-run target table (setup)");
+
+        let dir = TestDir::new("removed");
+        dir.write_file(
+            "001_init.sql",
+            "CREATE TABLE _jolt_migrate_removed_target (id INT);",
+        );
+
+        let applied = db
+            .migrate(dir.path_str())
+            .await
+            .expect("first migrate should succeed on a fresh DB");
+        assert_eq!(applied, 1, "first migrate should apply the one file");
+
+        // Roll the migration back by deleting the on-disk file. The
+        // `_migrations.name = '001_init.sql'` row is still present.
+        std::fs::remove_file(dir.path.join("001_init.sql"))
+            .expect("remove 001_init.sql to simulate operator rollback");
+
+        let err = db
+            .migrate(dir.path_str())
+            .await
+            .expect_err("re-run after deleting file should surface MigrationError::Removed");
+        match &err {
+            MigrationError::Removed { name } => {
+                assert_eq!(name, "001_init.sql");
+            }
+            other => panic!("expected MigrationError::Removed, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "Migration 001_init.sql has been removed. Rollbacks are not supported.",
+        );
+
+        // Pin decision 48's "rollback check runs before the apply
+        // loop" semantic. Add a brand-new file that *would* apply
+        // cleanly if the apply loop ran — but the rollback check
+        // should short-circuit before the loop body starts. We
+        // verify the new file's body did NOT run by checking that
+        // its target table does not exist after the failed migrate
+        // call.
+        dir.write_file(
+            "002_added.sql",
+            "CREATE TABLE _jolt_migrate_removed_should_not_run (id INT);",
+        );
+        let err2 = db
+            .migrate(dir.path_str())
+            .await
+            .expect_err("re-run with new file alongside missing one should still fail Removed");
+        assert!(
+            matches!(err2, MigrationError::Removed { ref name } if name == "001_init.sql"),
+            "expected Removed for the still-missing file, got {err2:?}",
+        );
+        // The new file's body did NOT execute — its CREATE TABLE
+        // never ran, so a SELECT against the target table errors
+        // with "relation does not exist" (sqlx's `Database` error).
+        let probe: Result<(i32,), sqlx::Error> = sqlx::query_as(
+            "SELECT 1 FROM _jolt_migrate_removed_should_not_run LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await;
+        assert!(
+            probe.is_err(),
+            "002_added.sql's body must not have run when 001_init.sql was missing; got {probe:?}",
+        );
+        // Bookkeeping: the failed call did not insert the new row.
+        let bookkeeping_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _migrations WHERE name = '002_added.sql'")
+                .fetch_one(db.pool())
+                .await
+                .expect("count _migrations rows for the new file");
+        assert_eq!(
+            bookkeeping_count.0, 0,
+            "002_added.sql must not be recorded in _migrations after the rollback-blocked call",
+        );
+
+        // Teardown.
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (teardown)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
+            .execute(db.pool())
+            .await
+            .expect("drop should-not-run target table (teardown)");
         sqlx::query("TRUNCATE TABLE _migrations")
             .execute(db.pool())
             .await

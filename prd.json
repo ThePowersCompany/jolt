@@ -1483,7 +1483,7 @@
       "verification": [
         "Unit test: remove migration file after apply \u2192 error on next run."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-104",
