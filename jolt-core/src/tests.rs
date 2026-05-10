@@ -2925,3 +2925,132 @@ mod parse_body_string {
         );
     }
 }
+
+mod parse_query {
+    //! PRD-mandated verification for JOLT-RS-063: "Unit test: ?id=42 → id
+    //! parsed as \"42\"."
+    //!
+    //! The first test pins the PRD's `?id=42` example: a single-pair query
+    //! string lands in extensions as a [`QueryParams`] map with `id → "42"`.
+    //! Two sibling tests pin the always-insert contract from module docs
+    //! decision 3:
+    //! - A request with NO query string still gets an empty [`QueryParams`]
+    //!   inserted (downstream consumers can `.get::<QueryParams>()` without a
+    //!   `?query=` upstream).
+    //! - A request with multiple `&`-joined pairs has every pair represented
+    //!   in the map.
+
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use tower::{Layer, ServiceExt};
+
+    use crate::{ParseQueryLayer, QueryParams};
+
+    /// Build an inner `service_fn` that captures the [`QueryParams`] extension
+    /// (if any) into the supplied `Mutex` and returns 200. Hoisted into a
+    /// helper so the three tests below assert on the same observation surface
+    /// without duplicating the closure shape.
+    fn capture_inner(
+        captured: Arc<Mutex<Option<QueryParams>>>,
+    ) -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = impl std::future::Future<Output = Result<Response, Infallible>> + Send,
+    > + Clone {
+        tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured);
+            async move {
+                if let Some(params) = req.extensions().get::<QueryParams>() {
+                    *captured.lock().unwrap() = Some(params.clone());
+                }
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn single_pair_query_is_parsed_and_inserted_into_extensions() {
+        // The PRD-mandated case: `?id=42` → `id` parsed as `"42"`. Asserts on
+        // both the extension's presence (always-insert contract) AND the
+        // single-pair value mapping.
+        let captured: Arc<Mutex<Option<QueryParams>>> = Arc::new(Mutex::new(None));
+        let svc = ParseQueryLayer::new().layer(capture_inner(Arc::clone(&captured)));
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test?id=42")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let params = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("ParseQueryService must always insert a QueryParams extension");
+        assert_eq!(
+            params.get("id").map(String::as_str),
+            Some("42"),
+            "?id=42 must parse `id` as the string \"42\" (PRD verification)",
+        );
+        assert_eq!(params.len(), 1, "single-pair query yields a single entry");
+    }
+
+    #[tokio::test]
+    async fn missing_query_string_inserts_empty_params() {
+        // Pins module docs decision 3: the extension is ALWAYS present after
+        // the layer runs, even when the URI carries no `?…`. Without this
+        // guarantee, every downstream consumer would have to handle two shapes
+        // (present-empty vs. absent) for the same logical state.
+        let captured: Arc<Mutex<Option<QueryParams>>> = Arc::new(Mutex::new(None));
+        let svc = ParseQueryLayer::new().layer(capture_inner(Arc::clone(&captured)));
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let params = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("missing query must still produce a QueryParams extension");
+        assert!(
+            params.is_empty(),
+            "no `?` in URI → empty QueryParams; got {params:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_pairs_are_each_represented_in_the_map() {
+        let captured: Arc<Mutex<Option<QueryParams>>> = Arc::new(Mutex::new(None));
+        let svc = ParseQueryLayer::new().layer(capture_inner(Arc::clone(&captured)));
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test?id=42&name=jolt&active=true")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let params = captured.lock().unwrap().clone().expect("extension present");
+        assert_eq!(params.get("id").map(String::as_str), Some("42"));
+        assert_eq!(params.get("name").map(String::as_str), Some("jolt"));
+        assert_eq!(params.get("active").map(String::as_str), Some("true"));
+        assert_eq!(params.len(), 3);
+    }
+}
