@@ -584,3 +584,40 @@ Notes for next iterations:
 - The Cargo.toml dependency surface for 021 needs `axum::http::Extensions` — already available transitively through axum (which is already a dep). No new crate needed.
 - If JOLT-RS-022+ (server builder phase) ends up needing `Default for RequestExt`, derive it then; AtomicBool::default() is false, so it's safe — just hold off until a consumer actually asks per JOLT-RS-019's "overspecified" guidance.
 - Latch ordering choice (Relaxed for both) is now a load-bearing decision. The progress entry above documents the reasoning so a future agent reviewing memory ordering doesn't re-derive from scratch.
+
+## 2026-05-10 — JOLT-RS-021: RequestExt registration through axum Extensions (closes phase04)
+
+PRD item: JOLT-RS-021 (priority 21, phase04-requestext-flag) — Register RequestExt as an axum request extension type; test insertion + retrieval through Extensions.
+
+Verification:
+- `cargo test -p jolt-core -- tests::request_ext` → 11/11 passed (7 prior + 4 new in `tests::request_ext_extensions`); 0 failed; 54 filtered out.
+- `cargo check --workspace` → all 5 crates check clean in 0.18s; no regressions.
+- `cargo test -p jolt-core --lib` → 65 passed total (up from 61); 0 failed.
+
+Note on harness instructions: same as JOLT-RS-007..020 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Picked `Arc<RequestExt>` as the embedding shape in `axum::http::Extensions` per JOLT-RS-020 progress note recommendation. `axum::http::Extensions::insert<T>` requires `T: Clone + Send + Sync + 'static`; `RequestExt` is intentionally `!Clone` (AtomicBool's interior mutability would be silently duplicated by a per-field Clone), so wrapping in `Arc` is the path that preserves the shared-state invariant. Cloning the Arc still points at the same atomic — verified by `mark_through_one_handle_visible_through_another`.
+- Did NOT add an `extensions` field to `Request` or migrate `Request.finished` (the deferred migration flagged in JOLT-RS-014 / JOLT-RS-020 notes). The PRD step is narrowly scoped to "register + test"; the broader Request surgery is integration work that belongs to a later task that actually wires RequestExt through the request lifecycle. Doing it speculatively now would touch the JOLT-RS-014 `has_finished_reflects_finished_flag` test for no PRD-step benefit and would risk diverging the Request shape from whatever the server-builder/router phase actually needs (JOLT-RS-022..034).
+- Did NOT add helper methods on `RequestExt` for Extensions integration (e.g. `RequestExt::insert_into(&self, ext: &mut Extensions)`). The standard `Extensions::insert(Arc::new(RequestExt::new()))` / `Extensions::get::<Arc<RequestExt>>()` pattern is already minimal and idiomatic; a wrapper helper would just hide one line of code and add an indirection a future reader would have to chase. If a real call site materializes that uses this pattern in 3+ places, factor it then.
+- Did NOT change `request_ext.rs` itself. The "registration" in the PRD step is the act of storing the type in Extensions, not a method on the type. Leaving `request_ext.rs` untouched keeps the production code surface invariant under this PRD step (only tests added) — easier to review and reason about.
+- Tests live in a new `mod request_ext_extensions` sibling to `mod request_ext` (rather than extending `request_ext` itself). Rationale: `request_ext` is for unit tests of the type's intrinsic API; `request_ext_extensions` is integration with axum's Extensions container — semantically distinct, and the separate filter (`tests::request_ext_extensions`) is useful when iterating on either slice in isolation. The module-level docstring on the new module captures the Clone/!Clone reasoning so future agents don't have to re-derive.
+
+Tests added (4 in `tests::request_ext_extensions`):
+- `insert_then_get_returns_same_instance` — inserts an `Arc<RequestExt>`, retrieves via `Extensions::get::<Arc<RequestExt>>()`, asserts the retrieved Arc points at the same heap allocation (via `Arc::as_ptr` pointer-equality). Locks in that Extensions stores by-Arc and does not silently clone the inner RequestExt.
+- `mark_finished_through_extensions_is_observable_on_retrieval` — the PRD-mandated verification ("insert RequestExt into Extensions, retrieve, mark finished, verify"). Inserts, retrieves, asserts `!is_finished()`, calls `mark_finished()` through the retrieved handle, retrieves a second time, asserts `is_finished()`. Proves the same atomic state survives across get() calls.
+- `get_returns_none_when_not_inserted` — sanity check on the Option return; protects against a future accidental Default-injection that would silently produce a never-finished RequestExt for handlers that didn't go through middleware.
+- `mark_through_one_handle_visible_through_another` — clone an outside `Arc<RequestExt>` handle, insert one clone into Extensions, mutate via the inside-Extensions handle, observe via the outside handle. Locks in the shared-state invariant that motivates the `Arc` choice. Without this test, a future refactor that switched to `RequestExt: Clone` (per-field load) would pass insert/retrieve tests silently while breaking the contract.
+
+Files changed:
+- jolt-core/src/tests.rs — added `mod request_ext_extensions` with 4 unit tests.
+- prd.json — JOLT-RS-021 passes: true.
+
+Notes for next iterations:
+- Phase04 is now closed. Phase05 (server-builder) starts at JOLT-RS-022. The deferred `Request.finished` migration is STILL deferred — it's not in any phase04 task and the next natural home is whichever phase05/phase06 task first needs handlers to read the finished flag through the request lifecycle (likely JOLT-RS-033/034 "Router Tower Service: implement tower::Service for Router; injects RequestExt into every incoming request before dispatch"). When that task lands, the rewrite is mechanical: delete `pub finished: bool` from Request, delete the `has_finished()` method, rewrite the JOLT-RS-014 `has_finished_reflects_finished_flag` test to insert `Arc<RequestExt>` into a request's Extensions and call `mark_finished()` through it, and switch any callers of `req.has_finished()` to `req.extensions.get::<Arc<RequestExt>>().map(|e| e.is_finished()).unwrap_or(false)` (or similar). Keep a single source of truth for the finished flag — don't keep both `Request.finished: bool` and `Arc<RequestExt>.finished: AtomicBool` in parallel.
+- The Arc-wrapping choice is now a load-bearing public contract: middleware that wants to mark finished will look up `Arc<RequestExt>` (not bare `RequestExt`) from Extensions. The `request_ext_extensions` module-level docstring documents this so a future agent doesn't re-derive the Clone/!Clone reasoning.
+- `Extensions::insert` returns `Option<T>` — the previous value if any was present. The current tests don't exercise that return value because phase04 has no concept of "replacing" a RequestExt (one-per-request lifecycle). If a future caller intentionally re-inserts (e.g. middleware that resets state for a sub-request), add a test then.
+- `axum::http::Extensions` is re-exported from the `http` crate. The `use axum::http::Extensions;` import in tests works because axum already pulls in `http`. No Cargo.toml change needed.
+- The 4 new tests are pure-sync (no `#[tokio::test]`); RequestExt mutation through Extensions is non-async by construction. If a future test needs an async context (e.g. exercising RequestExt across an `await` point in middleware), the Arc<RequestExt>: Send + Sync property already holds — no API change needed.
+- Phase05 priority cluster (JOLT-RS-022..027) is server-builder scaffolding. JoltServer struct, builder methods, start(), endpoint registration. None of those touch RequestExt directly, so phase04 is fully self-contained as of this commit.
+

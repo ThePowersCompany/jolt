@@ -727,3 +727,70 @@ mod request_ext {
         assert!(ext.is_finished());
     }
 }
+
+mod request_ext_extensions {
+    //! `axum::http::Extensions` requires `T: Clone + Send + Sync + 'static`.
+    //! `RequestExt` is intentionally `!Clone` (AtomicBool's interior mutability
+    //! makes a per-field clone silently break the shared-state invariant), so
+    //! the canonical embedding is `Arc<RequestExt>`. Cloning the Arc still
+    //! points at the same atomic — verified by `mark_through_one_handle_visible_through_another`.
+
+    use crate::RequestExt;
+    use axum::http::Extensions;
+    use std::sync::Arc;
+
+    #[test]
+    fn insert_then_get_returns_same_instance() {
+        let mut extensions = Extensions::new();
+        let inserted = Arc::new(RequestExt::new());
+        let inserted_ptr = Arc::as_ptr(&inserted);
+        extensions.insert(inserted);
+
+        let retrieved = extensions
+            .get::<Arc<RequestExt>>()
+            .expect("Arc<RequestExt> should be retrievable after insert");
+        assert!(std::ptr::eq(Arc::as_ptr(retrieved), inserted_ptr));
+    }
+
+    #[test]
+    fn mark_finished_through_extensions_is_observable_on_retrieval() {
+        // The PRD-mandated verification: insert RequestExt into Extensions,
+        // retrieve, mark finished, verify.
+        let mut extensions = Extensions::new();
+        extensions.insert(Arc::new(RequestExt::new()));
+
+        let retrieved = extensions
+            .get::<Arc<RequestExt>>()
+            .expect("Arc<RequestExt> should be retrievable after insert");
+        assert!(!retrieved.is_finished());
+        retrieved.mark_finished();
+
+        let retrieved_again = extensions
+            .get::<Arc<RequestExt>>()
+            .expect("Arc<RequestExt> should still be retrievable");
+        assert!(retrieved_again.is_finished());
+    }
+
+    #[test]
+    fn get_returns_none_when_not_inserted() {
+        let extensions = Extensions::new();
+        assert!(extensions.get::<Arc<RequestExt>>().is_none());
+    }
+
+    #[test]
+    fn mark_through_one_handle_visible_through_another() {
+        // Locks in shared-state semantics: a clone of the Arc points at the
+        // same atomic, so mutation via one handle is observable via another.
+        // This is the property that makes `Arc<RequestExt>` the correct
+        // embedding (instead of a per-field Clone impl that would silently
+        // duplicate state).
+        let mut extensions = Extensions::new();
+        let outside_handle = Arc::new(RequestExt::new());
+        extensions.insert(Arc::clone(&outside_handle));
+
+        let inside_handle = extensions.get::<Arc<RequestExt>>().unwrap();
+        inside_handle.mark_finished();
+
+        assert!(outside_handle.is_finished());
+    }
+}
