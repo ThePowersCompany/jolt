@@ -867,7 +867,7 @@
       "verification": [
         "Unit test: valid JSON body → T populated in middleware struct."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-060",

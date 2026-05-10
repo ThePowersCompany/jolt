@@ -2023,3 +2023,39 @@ Notes for next iterations:
 - **The `select_allowed_origin` helper is an obvious extension point for Allow-Credentials.** A future PRD that adds `pub allow_credentials: bool` to `CorsConfig` could either (a) extend the helper to return both an origin and a credentials flag (tuple return), or (b) add a sibling `select_allow_credentials(config, allowed_origin)` helper that returns whether to emit `Access-Control-Allow-Credentials: true` (and enforces the spec rule that credentials cannot be combined with `*` origin). Out of scope for phase12; flag for whichever PRD opens credential-bearing CORS.
 - **JOLT-RS-027 (port-binding-conflict polish), 032 (endpoint-registry test bundle), 045 (endpoint-integration test), 054 (phase11 closing test).** Still the same pre-046 holdouts plus 054 — phase12 closes here with 058. Recommendation unchanged: defer to a polish-pass once auto-installation + AutoMiddleware-#[cors]-wiring lands and phase13 (body parsing, 059+) opens.
 - **First user-visible scope from 058 is in test code only — no public API change.** The two helper signature changes (`build_preflight_response`, `inject_response_cors_headers`) are private, and `select_allowed_origin` is also private. The CorsLayer / CorsService public surface is unchanged. A caller who built against 057 sees no breakage from 058.
+
+Iteration: 2026-05-10 (JOLT-RS-059 — ParseBodyLayer tower::Layer)
+PRD item: JOLT-RS-059 (priority 59, phase13-body-parsing)
+Description: "Implement ParseBodyLayer as tower::Layer: reads request body bytes into Vec<u8>. If the middleware struct has a body: T field, attempt serde_json::from_slice::<T>."
+PRD verification: "Unit test: valid JSON body → T populated in middleware struct."
+
+Why picked over the strict-priority next items (JOLT-RS-027 port-binding-conflict polish; JOLT-RS-032 endpoint-registry test bundle; JOLT-RS-045 endpoint-integration polish; JOLT-RS-054 phase11 closing test): per the auto-prompt's prioritization rule ("architectural decisions and core abstractions" first), 059 is the load-bearing seam that 060 (parse-failure 400 + mark_finished), 061 (String body extraction), and 062 (body-parsing test bundle) all build on. Picking 059 over the deferred test-bundle holdouts pins the LAYER SHAPE (`ParseBodyLayer<T>` parameterized over body type, not the middleware struct), the EXTENSION CHANNEL (parsed T lands in axum request extensions, NOT in RequestExt — control state vs data state separation), the BODY-RESTORATION POLICY (buffered Bytes re-armed onto the request before delegating, so downstream `build_jolt_request` re-read in the registry path still sees the body), and the SILENT-FAILURE-IN-059 stance (parse Err → no extension insert + delegate, with 060 to replace the failure branch with a 400 short-circuit). All four decisions are load-bearing for 060+. 027/032/045/054 remain test-bundle polish with no upstream dependencies; deferring them does not block any phase13+ work.
+
+Implementation notes:
+- `ParseBodyLayer<T>` carries `PhantomData<fn() -> T>` so the layer is Send + Sync regardless of T's auto-traits, and clones without requiring `T: Clone` on the marker itself. Manual Clone impl (not derive) for the same reason — derive would propagate a spurious `T: Clone` bound to the layer.
+- The `Service<AxumRequest>` impl mirrors `CorsService::call`'s tower delegation dance: `poll_ready` drove `self.inner`, so `call` `std::mem::replace`s inner with a clone we don't invoke (caller's next `poll_ready` readies the cloned slot before their next `call`). That keeps the `Service::poll_ready/call` contract sound under ServiceBuilder composition.
+- `T: DeserializeOwned + Clone + Send + Sync + 'static` is the runtime bound on the Service impl. `Clone` is required by `http::Extensions::insert<T: Clone + Send + Sync + 'static>` (axum 0.8 / http 1.4) — extensions get cloned on `req.extensions().clone()` paths. The marker on the layer/service itself stays unbounded.
+- Body cap mirrors `build_jolt_request`'s `u32::MAX as usize`. Pulled into a `buffer_body(Body) -> Bytes` helper so a future configurable-limit PRD item edits one site rather than two. The double-buffer (layer + registry both call `to_bytes`) is acknowledged in the module docs as collapsible by 062+ via a `BufferedBody(Bytes)` extension.
+
+Key decisions pinned for 060+:
+1. Layer parameterized over body type T, not middleware struct. The macro-driven `__jolt_extract_from(&Request)` already runs per-field `serde_json::from_slice` (see `jolt-macros::auto_middleware::field_init_expr`); parameterizing the layer over the middleware struct would duplicate field-shape inspection at tower-stack assembly time. Layer-over-T composes via `tower::ServiceBuilder` without needing to know about user middleware structs.
+2. Parsed T lands in axum request extensions (typed by T). `RequestExt` is reserved for cross-layer control flow (finished latch, stashed Response); body content is data, not control state.
+3. Body bytes are restored onto the request via `Body::from(bytes.clone())` BEFORE attempting the parse, so even the silent-failure-in-059 branch delivers a fully-formed request to the inner service. Downstream `build_jolt_request` re-reads the body — without restoration, ParseBodyLayer would silently zero out the body for every non-extensions consumer.
+4. Parse failure in 059 is silent (no extension insert, delegate to inner). JOLT-RS-060 will replace the failure branch with a 400 + `RequestExt::mark_finished()` short-circuit; pinning the layer shape here keeps that change additive (one new branch inside `call`, not a rebuilt service).
+
+Files changed:
+- jolt-core/src/parse_body.rs (new): `ParseBodyLayer<T>` + `ParseBodyService<S, T>` with the four decisions above pinned in module docs.
+- jolt-core/src/lib.rs: register `parse_body` module + re-export `ParseBodyLayer` and `ParseBodyService` alongside the other tower-layer types.
+- jolt-core/src/tests.rs: append `parse_body` test module with the PRD-mandated `valid_json_body_is_parsed_and_inserted_into_extensions` test. The single test exercises BOTH 059 contracts (extension insertion AND body restoration) by capturing both observations from one inner-service call.
+
+Verification:
+- `cargo build --workspace` → clean.
+- `cargo test -p jolt-core -- tests::parse_body` → 1 passed (PRD verification).
+- `cargo test -p jolt-core` → 122 unit + 6 + 8 integration passed, 0 failed.
+- `cargo clippy -p jolt-core` → 2 pre-existing errors (`RequestExt::new()` / `JoltServer::new()` missing Default — confirmed by stashing this iteration's changes and re-running on master; both errors persist). My new `parse_body.rs` is clippy-clean.
+
+Blockers / next notes:
+- JOLT-RS-060 replaces the silent-failure branch with `Response::bad_request()` carrying "Invalid JSON: ..." plus `RequestExt::mark_finished()`. Implementation hint: the failure branch already has access to the `serde_json::Error`; pipe its `.to_string()` into the body. The 400 response should be stashed via `RequestExt::set_response` (mirroring how Router consumes stashed responses) rather than returned directly from `call` — that way an OUTER layer (e.g., CorsLayer wrapping ParseBodyService) still gets to inject Allow-Origin onto the 400.
+- JOLT-RS-061's String body needs a different code path (String can be `DeserializeOwned`'d but only from a JSON string literal — `r#""hello""#`, not `r#"hello"#`). Likely needs a separate `ParseBodyStringLayer` or a const-generic switch on T; revisit when the item lands.
+- The double-buffer (ParseBodyLayer + build_jolt_request both call `to_bytes`) is collapsible by 062+ via a `BufferedBody(Bytes)` extension that build_jolt_request checks before re-reading.
+- Pre-existing clippy errors on `RequestExt::new()` and `JoltServer::new()` (missing Default) should be cleaned up in a future polish iteration — not blocking but worth fixing if a Default-on-all-stateless-new sweep lands.

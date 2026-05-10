@@ -2585,3 +2585,101 @@ mod cors {
         );
     }
 }
+
+mod parse_body {
+    //! PRD-mandated verification for JOLT-RS-059: "Unit test: valid JSON body
+    //! → T populated in middleware struct."
+    //!
+    //! Two structural checks are stacked into this slice:
+    //! 1. A valid JSON body that deserializes into `T` lands in request
+    //!    extensions on the inner service's side — so an AutoMiddleware
+    //!    consumer (or any handler) can pull it back out with the standard
+    //!    `req.extensions().get::<T>()` API. This is the "T populated"
+    //!    contract from the PRD.
+    //! 2. The layer restores the buffered body bytes onto the request before
+    //!    delegating, so downstream services (notably `build_jolt_request`'s
+    //!    re-read in the registry path) continue to see the body. Without
+    //!    this guarantee, wiring ParseBodyLayer ahead of Router would silently
+    //!    blank-out the body for every handler that doesn't go through the
+    //!    extensions channel — a regression that 060+ would have a hard time
+    //!    catching.
+    //!
+    //! Parse-failure rejection (400 + mark_finished) is JOLT-RS-060's contract
+    //! and lives in its own module when that item lands.
+
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use serde::Deserialize;
+    use tower::{Layer, ServiceExt};
+
+    use crate::ParseBodyLayer;
+
+    #[derive(Debug, Deserialize, Clone, PartialEq)]
+    struct TestBody {
+        name: String,
+        age: u32,
+    }
+
+    #[tokio::test]
+    async fn valid_json_body_is_parsed_and_inserted_into_extensions() {
+        // Inner service captures whatever it sees in extensions plus a copy
+        // of the (already-restored) body bytes — two observations from one
+        // call, so the test asserts BOTH 059 contracts (extension insertion
+        // AND body restoration) without running the request twice.
+        let captured_body: Arc<Mutex<Option<TestBody>>> = Arc::new(Mutex::new(None));
+        let captured_bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let body_clone = Arc::clone(&captured_body);
+        let bytes_clone = Arc::clone(&captured_bytes);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let body_clone = Arc::clone(&body_clone);
+            let bytes_clone = Arc::clone(&bytes_clone);
+            async move {
+                if let Some(body) = req.extensions().get::<TestBody>() {
+                    *body_clone.lock().unwrap() = Some(body.clone());
+                }
+                // Drain the restored body so the test can verify the layer
+                // didn't consume the bytes off the request.
+                let (_, body) = req.into_parts();
+                let bytes = axum::body::to_bytes(body, u32::MAX as usize)
+                    .await
+                    .unwrap_or_default();
+                *bytes_clone.lock().unwrap() = bytes.to_vec();
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        let layer = ParseBodyLayer::<TestBody>::new();
+        let svc = layer.layer(inner);
+
+        let payload = br#"{"name":"jolt","age":7}"#;
+        let req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/test")
+            .header("content-type", "application/json")
+            .body(Body::from(&payload[..]))
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let parsed = captured_body.lock().unwrap().clone();
+        assert_eq!(
+            parsed,
+            Some(TestBody {
+                name: "jolt".to_string(),
+                age: 7
+            }),
+            "valid JSON body must deserialize into T and land in extensions",
+        );
+
+        let restored = captured_bytes.lock().unwrap().clone();
+        assert_eq!(
+            restored, payload,
+            "layer must restore the buffered body bytes onto the request before delegating",
+        );
+    }
+}
