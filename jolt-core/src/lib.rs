@@ -2,6 +2,7 @@
 
 pub mod auth_bearer;
 pub mod auth_jwt;
+pub mod auth_websocket;
 pub mod cookie;
 pub mod cors;
 pub mod endpoint;
@@ -19,6 +20,13 @@ pub mod status;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
 pub use auth_jwt::{AuthJwtLayer, AuthJwtService};
+// JOLT-RS-075 surface: the WS subprotocol token extractor + its rejection
+// enum + the typed WsJwtToken handle that JOLT-RS-076's tower::Layer will
+// stash into request extensions for JOLT-RS-077 to read.
+pub use auth_websocket::{
+    extract_jwt_token as extract_ws_jwt_token, WsJwtToken, WsTokenRejectReason,
+    JOLT_JWT_SUBPROTOCOL,
+};
 // Re-export jolt-utils JWT types at the jolt-core surface so user crates that
 // consume `AuthJwtLayer` (JOLT-RS-072) don't need a direct `jolt-utils` dep
 // just to build a `JwtConfig` or read a `JwtClaims` from extensions.

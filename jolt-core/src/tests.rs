@@ -4351,3 +4351,178 @@ mod auth_jwt {
         );
     }
 }
+
+mod auth_websocket {
+    //! PRD-mandated verification for JOLT-RS-075: "Unit test: header
+    //! 'jolt-jwt, eyJ...' → extracted token 'eyJ...'."
+    //!
+    //! The structural surface is wider than the single PRD-mandated case:
+    //! 075's contract is the FORMAT extractor for the
+    //! `Sec-WebSocket-Protocol: jolt-jwt, <token>` shape. Each rejection-path
+    //! variant pinned by [`WsTokenRejectReason`] gets a dedicated test below
+    //! so JOLT-RS-076's future tower::Layer can produce a distinct 401 body
+    //! per reason.
+    //!
+    //! Module is named `auth_websocket` so
+    //! `cargo test -p jolt-core -- tests::auth_websocket` filters cleanly to
+    //! this slice; matches the established `auth_bearer` / `auth_jwt`
+    //! naming convention.
+    use axum::http::HeaderValue;
+
+    use crate::auth_websocket::{
+        extract_jwt_token, WsJwtToken, WsTokenRejectReason, JOLT_JWT_SUBPROTOCOL,
+    };
+
+    /// Distinctive non-trivial JWT-shaped string used across tests so a
+    /// false-positive (e.g. the helper returning "" or a stripped substring)
+    /// surfaces in the assertion. Three dot-separated base64url-ish chunks,
+    /// matching real JWT layout.
+    const SAMPLE_JWT: &str =
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.aBcDeFgHiJkLmNoPqRsTuV";
+
+    #[test]
+    fn extract_jwt_token_canonical_shape_yields_token() {
+        // PRD-mandated verification: header "jolt-jwt, eyJ..." → token "eyJ...".
+        let header = HeaderValue::from_str(&format!("{JOLT_JWT_SUBPROTOCOL}, {SAMPLE_JWT}"))
+            .expect("static header value is valid ASCII");
+        let extracted = extract_jwt_token(Some(&header))
+            .expect("canonical jolt-jwt subprotocol shape must yield the token");
+        assert_eq!(
+            extracted, SAMPLE_JWT,
+            "the second comma-separated subprotocol value is the JWT verbatim"
+        );
+    }
+
+    #[test]
+    fn extract_jwt_token_no_space_after_comma_yields_token() {
+        // Whitespace after the comma is BWS (RFC 7230 §7) and must be
+        // tolerated. Pinned because browsers occasionally normalize the
+        // header without inserting the canonical space.
+        let header = HeaderValue::from_str(&format!("{JOLT_JWT_SUBPROTOCOL},{SAMPLE_JWT}"))
+            .expect("static header value is valid ASCII");
+        let extracted = extract_jwt_token(Some(&header)).expect("BWS-free shape must extract");
+        assert_eq!(extracted, SAMPLE_JWT);
+    }
+
+    #[test]
+    fn extract_jwt_token_extra_whitespace_around_comma_yields_token() {
+        // Extra spaces before AND after the comma: still RFC 7230 BWS, still
+        // tolerated. `.trim()` (rather than `.trim_start_matches(' ')`)
+        // handles tabs as well, but this test pins the spaces case which is
+        // what real clients emit.
+        let header =
+            HeaderValue::from_str(&format!("  {JOLT_JWT_SUBPROTOCOL}   ,   {SAMPLE_JWT}   "))
+                .expect("static header value is valid ASCII");
+        let extracted = extract_jwt_token(Some(&header)).expect("BWS-tolerant shape must extract");
+        assert_eq!(extracted, SAMPLE_JWT);
+    }
+
+    #[test]
+    fn extract_jwt_token_missing_header_yields_missing_header_variant() {
+        let err =
+            extract_jwt_token(None).expect_err("absent header must surface MissingHeader rejection");
+        assert_eq!(err, WsTokenRejectReason::MissingHeader);
+        assert_eq!(err.message(), "Missing Sec-WebSocket-Protocol header");
+    }
+
+    #[test]
+    fn extract_jwt_token_non_ascii_header_yields_not_ascii_variant() {
+        // 0xC3 is an extended-ASCII byte that HeaderValue::from_bytes
+        // accepts but HeaderValue::to_str rejects as non-visible-ASCII.
+        let header = HeaderValue::from_bytes(b"jolt-jwt, \xC3\x28")
+            .expect("HeaderValue::from_bytes accepts extended-ASCII bytes");
+        let err = extract_jwt_token(Some(&header))
+            .expect_err("non-ASCII header must surface NotAscii rejection");
+        assert_eq!(err, WsTokenRejectReason::NotAscii);
+        assert_eq!(
+            err.message(),
+            "Sec-WebSocket-Protocol header is not valid ASCII"
+        );
+    }
+
+    #[test]
+    fn extract_jwt_token_wrong_marker_yields_missing_jolt_jwt_prefix_variant() {
+        // First subprotocol is not "jolt-jwt" (case-sensitive per RFC 6455
+        // §11.5). Both an outright wrong marker AND a wrong-case marker
+        // share the rejection variant — the tests pin both shapes since
+        // case-sensitivity is a documented decision (module rustdoc 3).
+        let header = HeaderValue::from_str(&format!("graphql-ws, {SAMPLE_JWT}")).unwrap();
+        let err = extract_jwt_token(Some(&header)).unwrap_err();
+        assert_eq!(err, WsTokenRejectReason::MissingJoltJwtPrefix);
+
+        let header_uppercase = HeaderValue::from_str(&format!("JOLT-JWT, {SAMPLE_JWT}")).unwrap();
+        let err_uppercase = extract_jwt_token(Some(&header_uppercase)).unwrap_err();
+        assert_eq!(
+            err_uppercase,
+            WsTokenRejectReason::MissingJoltJwtPrefix,
+            "subprotocol literal match must be case-sensitive (RFC 6455 §11.5)"
+        );
+        assert_eq!(
+            err.message(),
+            "Invalid Sec-WebSocket-Protocol format: expected 'jolt-jwt, <token>'"
+        );
+    }
+
+    #[test]
+    fn extract_jwt_token_solo_marker_yields_missing_jolt_jwt_prefix_variant() {
+        // Header is exactly "jolt-jwt" with no comma + token follow-up. The
+        // helper requires exactly two comma-separated parts; one part (even
+        // the right marker) is rejected as a malformed shape.
+        let header = HeaderValue::from_static("jolt-jwt");
+        let err = extract_jwt_token(Some(&header)).unwrap_err();
+        assert_eq!(err, WsTokenRejectReason::MissingJoltJwtPrefix);
+    }
+
+    #[test]
+    fn extract_jwt_token_empty_token_after_marker_yields_empty_token_variant() {
+        // Header is "jolt-jwt," (or "jolt-jwt, ") — structurally parseable
+        // (two comma-separated parts) but the token slot is empty after
+        // whitespace trim. Distinct from MissingHeader and from
+        // MissingJoltJwtPrefix because BOTH parts are present, just one is
+        // empty.
+        let header_no_trailing = HeaderValue::from_static("jolt-jwt,");
+        let err1 = extract_jwt_token(Some(&header_no_trailing)).unwrap_err();
+        assert_eq!(err1, WsTokenRejectReason::EmptyToken);
+
+        let header_trailing_space = HeaderValue::from_static("jolt-jwt, ");
+        let err2 = extract_jwt_token(Some(&header_trailing_space)).unwrap_err();
+        assert_eq!(
+            err2,
+            WsTokenRejectReason::EmptyToken,
+            "whitespace-only token slot must trim to empty and reject"
+        );
+        assert_eq!(err1.message(), "Empty WebSocket JWT token");
+    }
+
+    #[test]
+    fn extract_jwt_token_more_than_two_subprotocols_yields_malformed_variant() {
+        // Three comma-separated subprotocols: ambiguous which is the token.
+        // JWTs cannot contain commas (they are dot-separated base64url
+        // chunks), so any extra comma means the client offered another
+        // subprotocol alongside the auth pair.
+        let header =
+            HeaderValue::from_str(&format!("jolt-jwt, {SAMPLE_JWT}, graphql-ws")).unwrap();
+        let err = extract_jwt_token(Some(&header)).unwrap_err();
+        assert_eq!(err, WsTokenRejectReason::MalformedSubprotocols);
+        assert_eq!(
+            err.message(),
+            "Invalid Sec-WebSocket-Protocol: more than two subprotocols offered"
+        );
+    }
+
+    #[test]
+    fn ws_jwt_token_newtype_exposes_borrowed_str() {
+        // Pins the public surface of the WsJwtToken handle that JOLT-RS-076
+        // will stash into request extensions: construction is via the tuple
+        // ctor, and `.as_str()` borrows the underlying token string. The
+        // newtype's distinct TypeId is the load-bearing property (075
+        // module rustdoc decision 7); this test pins the borrowed-str
+        // accessor that callers will use to read the token back.
+        let handle = WsJwtToken(SAMPLE_JWT.to_owned());
+        assert_eq!(handle.as_str(), SAMPLE_JWT);
+        // Equality/Clone derived; pin the round-trip too so a future Debug
+        // implementation change doesn't accidentally drop the derive.
+        let cloned = handle.clone();
+        assert_eq!(handle, cloned);
+    }
+}
