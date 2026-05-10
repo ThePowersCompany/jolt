@@ -279,7 +279,7 @@
       "verification": [
         "Unit test: Response<String> \u2192 text/plain response."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-018",

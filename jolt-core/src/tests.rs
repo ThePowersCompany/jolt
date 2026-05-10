@@ -455,4 +455,63 @@ mod response {
             "application/json"
         );
     }
+
+    #[tokio::test]
+    async fn into_axum_response_with_string_body_uses_text_plain() {
+        use axum::http::header::CONTENT_TYPE;
+
+        let jolt_response = Response::new(StatusCode::Ok, "hello".to_string());
+        let axum_response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(axum_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum_response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+
+        let body_bytes = axum::body::to_bytes(axum_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body_bytes[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_str_body_uses_text_plain() {
+        use axum::http::header::CONTENT_TYPE;
+
+        let jolt_response = Response::new(StatusCode::Ok, "world");
+        let axum_response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(axum_response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum_response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+
+        let body_bytes = axum::body::to_bytes(axum_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body_bytes[..], b"world");
+    }
+
+    #[tokio::test]
+    async fn into_axum_response_with_string_body_forwards_custom_headers() {
+        use axum::http::{HeaderName, HeaderValue};
+
+        let mut jolt_response = Response::new(StatusCode::Created, "ok".to_string());
+        jolt_response.headers.insert(
+            HeaderName::from_static("x-trace-id"),
+            HeaderValue::from_static("zzz-9"),
+        );
+        let axum_response: axum::response::Response = jolt_response.into();
+
+        assert_eq!(axum_response.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            axum_response
+                .headers()
+                .get(HeaderName::from_static("x-trace-id"))
+                .unwrap(),
+            "zzz-9"
+        );
+    }
 }
