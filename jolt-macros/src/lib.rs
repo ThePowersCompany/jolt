@@ -58,7 +58,13 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   helper attribute owned by this derive (without it, the compiler would
 ///   reject `#[cors]` as an unknown macro at the user's source site before
 ///   the derive runs).
-/// - 051-053 generate the `tower::Layer` impl + extraction code in `call()`.
+/// - 051 (landed): emits a real `::jolt_core::tower::Layer` impl on the user
+///   struct plus a `#[doc(hidden)]` wrapper `__JoltAutoMiddleware<Ident>Service`
+///   that delegates to the inner service. The wrapper is the seam JOLT-RS-052
+///   (middleware-ordering chain) and JOLT-RS-053 (per-field extraction code)
+///   slot into.
+/// - 052-053 will splice the auth/cors/parse-query/parse-body chain and the
+///   per-field extraction calls into the wrapper's `call()`.
 ///
 /// On parse failure the emission is a single `compile_error!` token (no
 /// partial codegen), so the user gets a single targeted diagnostic instead of

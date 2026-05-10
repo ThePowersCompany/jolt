@@ -29,8 +29,14 @@ pub use status::StatusCode;
 // `inventory` to its own Cargo.toml. Re-export `jolt_macros::endpoint` for the
 // same reason — user crates `use jolt_core::endpoint;` instead of pulling in
 // jolt-macros directly.
+//
+// `tower` is re-exported for the `#[derive(AutoMiddleware)]` codegen
+// (JOLT-RS-051): the derive emits `::jolt_core::tower::Layer` /
+// `::jolt_core::tower::Service` impls so the user's middleware struct slots
+// into a tower stack without the user crate having to depend on tower itself.
 pub use inventory;
 pub use jolt_macros::{endpoint, AutoMiddleware};
+pub use tower;
 
 #[cfg(test)]
 mod tests;

@@ -26,20 +26,30 @@
 //!   matching. The Request rule lives between QueryParams and the body-name
 //!   rule so a hypothetical `body: &Request` classifies as Request, pinning
 //!   type-before-name precedence consistently with 048's QueryParams rule.
-//! - JOLT-RS-050 (this iteration): detect the struct-level `#[cors]` attribute
-//!   and stash it as [`AutoMiddlewareInput::cors`]. The derive opts the
-//!   compiler into recognising `#[cors]` as a helper attribute via
+//! - JOLT-RS-050: detect the struct-level `#[cors]` attribute and stash it as
+//!   [`AutoMiddlewareInput::cors`]. The derive opts the compiler into
+//!   recognising `#[cors]` as a helper attribute via
 //!   `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`. The
-//!   expansion emits a second hidden marker
-//!   `__JOLT_AUTO_MIDDLEWARE_CORS: bool` so an integration test (and 051+'s
-//!   layer codegen) can observe whether the CORS layer should be wired in.
+//!   expansion emits a second hidden marker `__JOLT_AUTO_MIDDLEWARE_CORS: bool`
+//!   so an integration test (and 051+'s layer codegen) can observe whether the
+//!   CORS layer should be wired in.
+//! - JOLT-RS-051 (this iteration): emit a real `::jolt_core::tower::Layer`
+//!   impl on the user's struct via [`expand_layer_impl`]. The layer's
+//!   `Service` is a generated wrapper struct
+//!   `__JoltAutoMiddleware<Ident>Service<S>` that delegates `poll_ready` and
+//!   `call` to the inner service for now — JOLT-RS-052/053 will splice the
+//!   middleware-ordering chain and per-field extraction into the wrapper's
+//!   `call()`. The 046 + 050 marker consts are kept alongside the new impl as
+//!   parse-witnesses; they're cheap (`usize` and `bool`), already wired into
+//!   the integration tests in `auto_middleware_derive.rs`, and trivially
+//!   removable once 053+'s codegen has its own observable surface.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
 //! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
 //! (proc-macro entry points themselves cannot be invoked outside the compiler).
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type,
 };
@@ -301,26 +311,21 @@ fn is_hashmap_string_string(ty: &Type) -> bool {
 
 /// Top-level driver for `#[derive(AutoMiddleware)]`.
 ///
-/// Parses via [`parse_auto_middleware_input`] and emits a hidden marker impl:
+/// Parses via [`parse_auto_middleware_input`] and emits, in order:
 ///
-/// ```ignore
-/// #[automatically_derived]
-/// impl <Struct> {
-///     #[doc(hidden)]
-///     pub const __JOLT_AUTO_MIDDLEWARE_FIELD_COUNT: usize = N;
-///     #[doc(hidden)]
-///     pub const __JOLT_AUTO_MIDDLEWARE_CORS: bool = <true if #[cors] present>;
-/// }
-/// ```
-///
-/// The two consts are the minimal observable artifacts for parse-witness:
-/// 046's `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT` proves the derive ran AND saw
-/// the user's field count; 050's `__JOLT_AUTO_MIDDLEWARE_CORS` proves the
-/// derive observed the struct-level `#[cors]` attribute (the integration test
-/// in `auto_middleware_derive.rs` asserts the bool value on a `#[cors]`-bearing
-/// vs bare struct). JOLT-RS-051+ will replace these markers with the real
-/// `tower::Layer` impl; the consts can stay as `cfg(test)`-gated witnesses or
-/// be removed at that point.
+/// 1. A hidden marker impl carrying `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT: usize`
+///    (046) and `__JOLT_AUTO_MIDDLEWARE_CORS: bool` (050) so the integration
+///    tests in `jolt-core/tests/auto_middleware_derive.rs` can witness that
+///    parsing observed the right field count and cors flag.
+/// 2. A `#[doc(hidden)]` wrapper service struct
+///    `__JoltAutoMiddleware<Ident>Service<S>` (051) holding the inner service.
+/// 3. An `impl<S> ::jolt_core::tower::Layer<S> for <Ident>` (051) that pulls
+///    the wrapper service over the inner.
+/// 4. An `impl<S, Req> ::jolt_core::tower::Service<Req> for <wrapper><S>` (051)
+///    that delegates `poll_ready` and `call` to the inner service for now.
+///    JOLT-RS-052/053 will splice the middleware-ordering chain (auth, cors,
+///    parse-query, parse-body, ...) and the per-field extraction code into the
+///    delegating `call()`.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. This keeps
@@ -334,6 +339,7 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
     let ident = &parsed.ident;
     let field_count = parsed.fields.len();
     let cors = parsed.cors;
+    let layer = expand_layer_impl(&parsed);
     quote! {
         #[automatically_derived]
         impl #ident {
@@ -341,6 +347,149 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
             pub const __JOLT_AUTO_MIDDLEWARE_FIELD_COUNT: usize = #field_count;
             #[doc(hidden)]
             pub const __JOLT_AUTO_MIDDLEWARE_CORS: bool = #cors;
+        }
+
+        #layer
+    }
+}
+
+/// Build the helper-service ident for a given middleware struct.
+///
+/// Naming is `__JoltAutoMiddleware<UserIdent>Service` so that two derives in
+/// the same scope can't collide (the user's ident is part of the wrapper's
+/// name). The double-underscore prefix marks it as macro-internal — users
+/// shouldn't reference it directly. The wrapper is `#[doc(hidden)]` for the
+/// same reason.
+fn service_ident_for(ident: &Ident) -> Ident {
+    format_ident!("__JoltAutoMiddleware{}Service", ident)
+}
+
+/// Emit the `tower::Layer` + wrapper-service portion of the derive expansion
+/// (JOLT-RS-051).
+///
+/// Shape of the emission:
+///
+/// ```ignore
+/// #[doc(hidden)]
+/// pub struct __JoltAutoMiddleware<Ident>Service<S> {
+///     inner: S,
+/// }
+///
+/// impl<S: ::core::clone::Clone> ::core::clone::Clone for ... { ... }
+///
+/// #[automatically_derived]
+/// impl<__S> ::jolt_core::tower::Layer<__S> for <Ident> {
+///     type Service = __JoltAutoMiddleware<Ident>Service<__S>;
+///     fn layer(&self, inner: __S) -> Self::Service {
+///         __JoltAutoMiddleware<Ident>Service { inner }
+///     }
+/// }
+///
+/// #[automatically_derived]
+/// impl<__S, __Req> ::jolt_core::tower::Service<__Req>
+///     for __JoltAutoMiddleware<Ident>Service<__S>
+/// where
+///     __S: ::jolt_core::tower::Service<__Req>,
+/// {
+///     type Response = <__S as ...::Service<__Req>>::Response;
+///     type Error    = <__S as ...::Service<__Req>>::Error;
+///     type Future   = <__S as ...::Service<__Req>>::Future;
+///     fn poll_ready(&mut self, cx) -> Poll<Result<(), Self::Error>> { ... }
+///     fn call(&mut self, req) -> Self::Future { ... }
+/// }
+/// ```
+///
+/// Decisions pinned at 051 (split out so 052/053's iterations can find them):
+///
+/// 1. **Wrapper service is a SIBLING free-standing struct**, not an inner
+///    module or associated type. Free-standing items can carry their own
+///    `impl` blocks with `where` clauses; an inner `mod` would force the
+///    `Service` impl into the same module and add a path qualifier at every
+///    call site. Naming via [`service_ident_for`] (`__JoltAutoMiddleware<Ident>Service`)
+///    embeds the user's ident so two derives in the same scope can't collide.
+/// 2. **Wrapper holds only `inner: __S`.** The user's middleware data
+///    (extracted body / query / req) is per-request and constructed inside
+///    `call()` via `Default::default()` in 053 — it does NOT live on the
+///    wrapper. Keeping the wrapper minimal at 051 means 052/053 only need to
+///    extend `call()`, not re-shape the wrapper's storage.
+/// 3. **Generic over `__S` (the inner service) and `__Req` (the request
+///    type).** The spec leans on `tower::Layer`'s usual signature where the
+///    inner is a generic `S: Service<Request>`. Generic-over-`__Req` lets the
+///    layer slot into either a `Service<axum::extract::Request>` stack
+///    (production) or a `Service<()>` stack (tests / type-level assertions),
+///    without forcing a specific request type at the proc-macro layer.
+/// 4. **`call` and `poll_ready` delegate to the inner service.** No
+///    extraction logic is emitted at 051 — the `call()` body is
+///    `<__S as Service<__Req>>::call(&mut self.inner, __req)`. JOLT-RS-052
+///    will wrap this in the auth/cors/parse chain; JOLT-RS-053 will splice
+///    per-field `__req.json::<T>()` / `__req.query_params::<T>()` /
+///    `&__req` extraction calls before the `inner.call(__req)`.
+/// 5. **Wrapper derives `Clone` via a hand-written impl when `__S: Clone`.**
+///    Tower stacks routinely clone services per-connection; a wrapper that
+///    can't clone breaks composition. The hand-written impl avoids the
+///    `#[derive(Clone)]`-needs-PhantomData-or-bounds-on-the-struct dance for
+///    a generic with no field of that type. (Here `__S` IS a field type, so
+///    `#[derive(Clone)]` would in theory work — but the hand-written impl is
+///    explicit about the bound, lets us add `Sync`/`Send` bounds later
+///    without re-deriving, and matches the rest of the proc-macro emission
+///    style.)
+/// 6. **The cors flag and per-field kinds are NOT consumed at 051.** They're
+///    parsed and stored, but the `call()` body doesn't branch on them yet.
+///    JOLT-RS-052 will read `parsed.cors` to decide whether to splice the
+///    cors layer; JOLT-RS-053 will iterate `parsed.fields` to emit
+///    extraction. The unused-field allow on `AutoMiddlewareInput` /
+///    `AutoMiddlewareField` continues to cover this.
+fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
+    let ident = &parsed.ident;
+    let service_ident = service_ident_for(ident);
+    quote! {
+        #[doc(hidden)]
+        pub struct #service_ident<__S> {
+            inner: __S,
+        }
+
+        #[automatically_derived]
+        impl<__S: ::core::clone::Clone> ::core::clone::Clone for #service_ident<__S> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: ::core::clone::Clone::clone(&self.inner),
+                }
+            }
+        }
+
+        #[automatically_derived]
+        impl<__S> ::jolt_core::tower::Layer<__S> for #ident {
+            type Service = #service_ident<__S>;
+
+            fn layer(&self, inner: __S) -> Self::Service {
+                #service_ident { inner }
+            }
+        }
+
+        #[automatically_derived]
+        impl<__S, __Req> ::jolt_core::tower::Service<__Req> for #service_ident<__S>
+        where
+            __S: ::jolt_core::tower::Service<__Req>,
+        {
+            type Response = <__S as ::jolt_core::tower::Service<__Req>>::Response;
+            type Error = <__S as ::jolt_core::tower::Service<__Req>>::Error;
+            type Future = <__S as ::jolt_core::tower::Service<__Req>>::Future;
+
+            fn poll_ready(
+                &mut self,
+                __cx: &mut ::core::task::Context<'_>,
+            ) -> ::core::task::Poll<::core::result::Result<(), Self::Error>> {
+                <__S as ::jolt_core::tower::Service<__Req>>::poll_ready(&mut self.inner, __cx)
+            }
+
+            fn call(&mut self, __req: __Req) -> Self::Future {
+                // JOLT-RS-052 will wrap this dispatch with the middleware
+                // ordering chain (auth → cors → parse-query → parse-body →
+                // user → handler). JOLT-RS-053 will splice per-field
+                // extraction (`__req.json::<T>()`, `__req.query_params::<T>()`,
+                // `&__req`) before the delegating call.
+                <__S as ::jolt_core::tower::Service<__Req>>::call(&mut self.inner, __req)
+            }
         }
     }
 }
@@ -1211,6 +1360,241 @@ mod tests {
         assert!(
             rendered.contains(": bool = false"),
             "expected cors = false literal, rendered: {rendered}"
+        );
+    }
+
+    // ----- JOLT-RS-051: expand_layer_impl -----
+    //
+    // The unit tests below cover the rendered token shape of
+    // [`expand_layer_impl`] directly so we can pin individual emission decisions
+    // (wrapper naming, `tower::Layer` impl shape, `tower::Service` delegation)
+    // without going through the slower compile-and-run path. The integration
+    // test in `jolt-core/tests/auto_middleware_derive.rs` covers the
+    // compile-time witness that the trait actually IS implemented (a
+    // `where T: tower::Layer<S>` bound that only resolves if the derive
+    // produced a real impl).
+
+    #[test]
+    fn service_ident_for_embeds_user_struct_name() {
+        // Wrapper-service naming embeds the user's ident so two derives in the
+        // same scope can't collide. Pinned because 052/053 will reach into the
+        // wrapper from the user's impl block; a renamed wrapper would silently
+        // break the splice. The double-underscore prefix marks it macro-internal.
+        let id: Ident = syn::parse_str("MyMw").expect("parses");
+        let svc = service_ident_for(&id);
+        assert_eq!(svc.to_string(), "__JoltAutoMiddlewareMyMwService");
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_wrapper_service_struct() {
+        // The wrapper is a free-standing struct generic over the inner service
+        // type `__S`. JOLT-RS-053 will not change the storage shape — only the
+        // `call()` body — so pinning the storage here means a regression that
+        // splices an extracted-fields struct here would surface immediately.
+        let input = parse_derive("struct AuthMw;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("# [doc (hidden)]"),
+            "wrapper must be #[doc(hidden)], rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("pub struct __JoltAutoMiddlewareAuthMwService < __S >"),
+            "wrapper struct ident + generic param must match, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("inner : __S"),
+            "wrapper must hold `inner: __S`, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_layer_impl_for_user_struct() {
+        // PRD verification: "Generated code compiles and implements
+        // tower::Layer." Token-shape pin: the impl block must be
+        // `impl<__S> ::jolt_core::tower::Layer<__S> for <UserIdent>` with a
+        // `type Service = <wrapper>` and a `fn layer(&self, inner: __S)`. The
+        // path is `::jolt_core::tower` (not bare `::tower`) because jolt-core
+        // re-exports tower so user crates don't have to depend on it.
+        let input = parse_derive("struct AuthMw;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("impl < __S > :: jolt_core :: tower :: Layer < __S > for AuthMw"),
+            "Layer impl header must match, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("type Service = __JoltAutoMiddlewareAuthMwService < __S >"),
+            "Layer::Service must point at the generated wrapper, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("fn layer (& self , inner : __S) -> Self :: Service"),
+            "Layer::layer signature must match, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_service_impl_delegating_to_inner() {
+        // The wrapper IS a tower::Service for any `Req` whose handling the
+        // inner service implements. `call` and `poll_ready` delegate to
+        // `self.inner` — JOLT-RS-052 will wrap the delegation in the
+        // middleware-ordering chain; JOLT-RS-053 will splice per-field
+        // extraction calls before it. Both still call through to inner, so
+        // the `Service<__Req> for <wrapper>` impl shape stays load-bearing.
+        let input = parse_derive("struct AuthMw;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains(
+                "impl < __S , __Req > :: jolt_core :: tower :: Service < __Req > for __JoltAutoMiddlewareAuthMwService < __S >"
+            ),
+            "Service impl header must match, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__S : :: jolt_core :: tower :: Service < __Req >"),
+            "where-clause bound must match, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("fn call (& mut self , __req : __Req) -> Self :: Future"),
+            "Service::call signature must match, rendered: {rendered}"
+        );
+        // `quote!`'s tokens print double-`>` without a space when one closes a
+        // nested generic (`Service<__Req>>::call`). Match that exact shape.
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)"),
+            "call() must delegate to inner.call, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Service < __Req >> :: poll_ready (& mut self . inner , __cx)"),
+            "poll_ready must delegate to inner.poll_ready, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_clone_when_inner_clone() {
+        // Tower stacks routinely clone services per-connection. The hand-written
+        // Clone impl bounds Clone on `__S: Clone` so a wrapper around a
+        // non-Clone inner correctly fails to be Clone (matches axum's behavior
+        // — services-without-Clone don't compose into multi-connection
+        // servers). Pinned because removing this would silently break tower
+        // composition for any caller that clones the layered stack.
+        let input = parse_derive("struct AuthMw;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains(
+                "impl < __S : :: core :: clone :: Clone > :: core :: clone :: Clone for __JoltAutoMiddlewareAuthMwService < __S >"
+            ),
+            "Clone impl header must match, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_auto_middleware_includes_both_marker_consts_and_layer() {
+        // End-to-end: `expand_auto_middleware` splices the marker impl AND the
+        // layer expansion into a single TokenStream. Both witnesses (consts
+        // for parse-trace, layer for runtime behavior) coexist after 051 —
+        // the consts can be removed after 053 has its own observable surface,
+        // but until then the integration tests in
+        // `auto_middleware_derive.rs` rely on both.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct ChainedMw {
+                body: T,
+            }
+            "#,
+        );
+        let rendered = expand_auto_middleware(input).to_string();
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT"),
+            "field-count const must remain, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_CORS"),
+            "cors const must remain, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Layer < __S > for ChainedMw"),
+            "Layer impl must be emitted alongside marker consts, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__JoltAutoMiddlewareChainedMwService"),
+            "wrapper service struct must be emitted, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_does_not_reference_user_struct_fields() {
+        // Critical for 053's eventual codegen: the wrapper service holds ONLY
+        // `inner`, never any of the user's struct fields. Per-request
+        // middleware data lives on the `Default::default()`-constructed
+        // user struct inside `call()`, not on the wrapper. A regression that
+        // tried to thread fields through the wrapper would force every user
+        // field type to be `Send + 'static`, defeating the by-reference
+        // `&Request` field shape that 049 supports.
+        let input = parse_derive(
+            r#"
+            struct WithBody {
+                body: CreateUserRequest,
+                count: usize,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            !rendered.contains("CreateUserRequest"),
+            "wrapper must not reference user-field types, rendered: {rendered}"
+        );
+        assert!(
+            !rendered.contains("body :"),
+            "wrapper must not include user field idents, rendered: {rendered}"
+        );
+        assert!(
+            !rendered.contains("count :"),
+            "wrapper must not include user field idents, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_handles_unit_struct() {
+        // Unit struct → wrapper still emitted, Layer + Service impls still
+        // emitted, no fields to extract. JOLT-RS-053 will iterate
+        // `parsed.fields` to splice extraction; on a unit struct that
+        // iteration yields nothing, so the call() body stays a pure
+        // delegation — no special-case handling required.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("__JoltAutoMiddlewareMarkerService"),
+            "wrapper struct must be emitted for unit struct, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Layer < __S > for Marker"),
+            "Layer impl must be emitted for unit struct, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_layer_impl_even_when_cors_attribute_present() {
+        // The cors flag does NOT change the layer-impl shape at 051 — the
+        // wrapper service is identical for `#[cors]`-bearing and bare structs.
+        // JOLT-RS-052 will read `parsed.cors` to splice the cors layer into
+        // the call chain, but the outer Layer impl that 051 emits is
+        // unconditional.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct WithCors;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Layer < __S > for WithCors"),
+            "Layer impl must be emitted for cors-attr struct too, rendered: {rendered}"
         );
     }
 }

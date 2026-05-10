@@ -99,3 +99,62 @@ fn middleware_with_cors_attribute_emits_cors_true() {
     // The field-count const still works alongside the cors const.
     assert_eq!(CorsEnabledMiddleware::__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT, 1);
 }
+
+// JOLT-RS-051 PRD verification: "Generated code compiles and implements
+// tower::Layer."
+//
+// The cleanest compile-time witness for "this trait is implemented" is a
+// generic free fn whose `where` bound only resolves if the impl actually
+// exists. Calling it (or just naming the resolved monomorphization) forces
+// the trait-resolution at compile time — a regression that dropped the
+// `impl Layer<S> for <Mw>` emission would surface here as a missing-impl
+// error rather than silently passing.
+//
+// The assertion is type-only — no values constructed — so it works even for
+// middleware structs whose fields don't have `Default` (the
+// per-request-construction concern is JOLT-RS-053's, not 051's).
+fn _assert_implements_tower_layer<L, S>()
+where
+    L: jolt_core::tower::Layer<S>,
+{
+}
+
+// Force monomorphization at link time so the trait bound MUST resolve. If a
+// future regression breaks the impl, these `const _` blocks fail to compile
+// with a "the trait `tower::Layer<()>` is not implemented for ..." diagnostic
+// pointing at the specific middleware struct.
+const _: fn() = _assert_implements_tower_layer::<UnitMiddleware, ()>;
+const _: fn() = _assert_implements_tower_layer::<MixedMiddleware, ()>;
+const _: fn() = _assert_implements_tower_layer::<CorsEnabledMiddleware, ()>;
+
+// JOLT-RS-051: the `Layer::Service` associated type points at the generated
+// wrapper, which itself implements `tower::Service<Req>` whenever the inner
+// service does. Pinning this on a concrete inner-service shape proves the
+// wrapper's bound chain resolves end-to-end (not just the Layer impl in
+// isolation), and the `.call(...)`-then-`.await` flow exercises the
+// delegation that JOLT-RS-052 will wrap and JOLT-RS-053 will splice
+// extraction into.
+//
+// `tower::service_fn` produces a `Service<Req>` from any closure
+// `Fn(Req) -> Future<Output = Result<Resp, Err>>`. We use the simplest
+// possible inner — `Fn(()) -> Ready<Result<(), Infallible>>` — to avoid
+// needing real HTTP types here.
+#[tokio::test]
+async fn middleware_layer_wraps_inner_service() {
+    use std::convert::Infallible;
+    use std::future::ready;
+    use jolt_core::tower::{Layer, Service};
+
+    let inner = jolt_core::tower::service_fn(|_: ()| ready(Ok::<_, Infallible>(())));
+    // `UnitMiddleware` is a unit struct — instantiate it directly. This is the
+    // outer Layer; calling `.layer(inner)` MUST produce a value whose type is
+    // the wrapper service the derive emitted.
+    let mw = UnitMiddleware;
+    let mut wrapped = mw.layer(inner);
+
+    // The wrapper IS a Service — calling it should delegate to `inner` and
+    // return `Ok(())`. A regression that emitted the Layer impl but no
+    // Service impl on the wrapper would fail to compile here.
+    let result = <_ as Service<()>>::call(&mut wrapped, ()).await;
+    assert!(result.is_ok(), "wrapper service must delegate to inner");
+}
