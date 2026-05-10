@@ -427,6 +427,45 @@
 //!     tampered with" failure at apply time (JOLT-RS-099) even when the
 //!     bytes are identical. Pinning lowercase here eliminates the
 //!     ambiguity.
+//!
+//! JOLT-RS-096 closes the phase22 [`MigrationFile`] data shape by
+//! extending the JOLT-RS-094 struct with a `checksum: String` field
+//! populated automatically inside [`read_migration_files`] using the
+//! JOLT-RS-095 [`sha256_hex`] helper. The apply-time tamper check
+//! (JOLT-RS-099) hashes the on-disk content again at apply time and
+//! compares against this recorded value.
+//!
+//! 32. **The `checksum` field is populated inside
+//!     [`read_migration_files`], not by a [`MigrationFile`] constructor
+//!     (JOLT-RS-096).** Auto-compute at discovery time keeps the
+//!     invariant tight: every [`MigrationFile`] returned by
+//!     [`read_migration_files`] carries the SHA-256 digest of its own
+//!     `content` field, so callers can't accidentally hand the
+//!     apply-time check (JOLT-RS-099) a stale or out-of-sync checksum.
+//!     Exposing a `MigrationFile::new(name, content)` constructor that
+//!     auto-computes would be ergonomic for callers who construct by
+//!     hand, but it would also be one more API surface to maintain
+//!     before any caller exists to use it — phase23 (JOLT-RS-098+) is
+//!     the only consumer in the near horizon, and it reads its
+//!     `MigrationFile` values straight from
+//!     [`read_migration_files`]. Hand-construction remains possible
+//!     via the public struct fields (decision 24) plus the public
+//!     [`sha256_hex`] helper (decision 29).
+//!
+//! 33. **The `checksum` field stays plain `pub String` (not a
+//!     `Checksum(String)` newtype), matching the flat-`pub`-fields
+//!     shape of decision 24 (JOLT-RS-096).** A newtype would protect
+//!     callers from accidentally swapping `name`, `content`, and
+//!     `checksum` arguments, but [`MigrationFile`] is a flat struct
+//!     constructed by field name (`MigrationFile { name, content,
+//!     checksum }`) rather than positionally, so the swap risk is
+//!     already structurally eliminated. The string-typed checksum
+//!     also round-trips byte-for-byte through the eventual
+//!     `_migrations.checksum` Postgres `TEXT` column (JOLT-RS-098)
+//!     without an extra `From`/`Into` shim. Decision 31's lowercase
+//!     contract is the only invariant on the field's contents and
+//!     decision 32's auto-populate enforces it at the only entry
+//!     point.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -808,13 +847,14 @@ where
     }
 }
 
-/// A migration file discovered by [`read_migration_files`] (JOLT-RS-094).
+/// A migration file discovered by [`read_migration_files`] (JOLT-RS-094,
+/// extended by JOLT-RS-096 with the [`checksum`](Self::checksum) field).
 ///
-/// Holds the bare metadata phase22's sort-by-filename discovery needs: the
-/// basename (no directory prefix) and the file's UTF-8 body. See module docs
-/// decision 24 for the flat-`pub`-fields layout rationale; JOLT-RS-096 will
-/// extend this struct with `checksum: String` once JOLT-RS-095 lands the
-/// SHA-256 helper.
+/// Holds the metadata phase22's sort-by-filename discovery needs: the
+/// basename (no directory prefix), the file's UTF-8 body, and the SHA-256
+/// digest of that body as a lowercase hex string. See module docs
+/// decisions 24 and 32–33 for the flat-`pub`-fields layout and
+/// auto-populated-checksum contracts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationFile {
     /// Filename (basename, no directory prefix). Used as the sort key in
@@ -824,14 +864,24 @@ pub struct MigrationFile {
     /// File contents read as UTF-8. The full SQL body that the apply step
     /// (JOLT-RS-100) will execute inside a transaction.
     pub content: String,
+    /// SHA-256 digest of [`Self::content`] as a 64-character lowercase
+    /// hex string (JOLT-RS-096). Populated automatically by
+    /// [`read_migration_files`] via [`sha256_hex`] — callers can rely on
+    /// `checksum == sha256_hex(content.as_bytes())` for every value
+    /// produced by the discovery function (decision 32). Hand-constructed
+    /// [`MigrationFile`] values must compute the field the same way to
+    /// stay consistent with the JOLT-RS-099 apply-time tamper check.
+    pub checksum: String,
 }
 
-/// Discover migration files in `dir` (JOLT-RS-094).
+/// Discover migration files in `dir` (JOLT-RS-094; populates the
+/// [`MigrationFile::checksum`] field as of JOLT-RS-096).
 ///
 /// Reads every entry in `dir`, retains files whose name ends in `.sql`,
-/// reads each retained file's contents as UTF-8, and returns the resulting
-/// [`MigrationFile`] values sorted lexicographically by filename. See module
-/// docs decisions 24–28 for the architectural contract.
+/// reads each retained file's contents as UTF-8, computes the SHA-256
+/// digest of those contents via [`sha256_hex`], and returns the resulting
+/// [`MigrationFile`] values sorted lexicographically by filename. See
+/// module docs decisions 24–28 and 32–33 for the architectural contract.
 ///
 /// Returns `Err(std::io::Error)` if `dir` is not readable (missing,
 /// permission denied, not a directory) or if any individual `.sql` file
@@ -863,7 +913,12 @@ pub fn read_migration_files(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
             None => continue,
         };
         let content = std::fs::read_to_string(&path)?;
-        files.push(MigrationFile { name, content });
+        let checksum = sha256_hex(content.as_bytes());
+        files.push(MigrationFile {
+            name,
+            content,
+            checksum,
+        });
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(files)
@@ -1772,5 +1827,66 @@ mod tests {
             sha256_hex(b"SELECT 1;"),
             "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
         );
+    }
+
+    // ---- JOLT-RS-096: MigrationFile.checksum ----
+
+    /// Compile-time pin for the JOLT-RS-096 struct shape: `MigrationFile`
+    /// holds `name`, `content`, and `checksum` as plain `pub String`
+    /// fields constructible by struct literal (decisions 24, 33). A
+    /// regression that drops a field, renames one, or wraps `checksum`
+    /// in a newtype breaks this build pin without ever running.
+    #[test]
+    fn migration_file_struct_shape_pins() {
+        let f = MigrationFile {
+            name: String::from("001_init.sql"),
+            content: String::from("SELECT 1;"),
+            checksum: String::from(
+                "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+            ),
+        };
+        assert_eq!(f.name, "001_init.sql");
+        assert_eq!(f.content, "SELECT 1;");
+        assert_eq!(f.checksum.len(), 64);
+    }
+
+    /// PRD-mandated verification for JOLT-RS-096: a [`MigrationFile`]
+    /// returned by [`read_migration_files`] has a populated `checksum`
+    /// that matches the SHA-256 hex digest of its own `content` field
+    /// (decision 32). Uses the same `001_init.sql` / `SELECT 1;`
+    /// fixture as `read_migration_files_captures_name_and_content` so
+    /// the recorded checksum matches the independently-derivable
+    /// reference value (`echo -n 'SELECT 1;' | shasum -a 256`) that
+    /// `sha256_hex_hashes_migration_body` already pins.
+    #[test]
+    fn read_migration_files_populates_checksum() {
+        let dir = TestDir::new("checksum");
+        dir.write_file("001_init.sql", "SELECT 1;");
+
+        let files = read_migration_files(dir.path_str()).expect("read");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].checksum,
+            "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+        );
+        assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
+    }
+
+    /// Distinct file bodies produce distinct checksums — a regression
+    /// that wired every `MigrationFile` to the same constant (or hashed
+    /// the filename instead of the body) fails this test. Also pins
+    /// that the sort step does not scramble the per-file
+    /// `name`/`content`/`checksum` triple alignment.
+    #[test]
+    fn read_migration_files_checksum_differs_per_file() {
+        let dir = TestDir::new("differs");
+        dir.write_file("001_init.sql", "SELECT 1;");
+        dir.write_file("002_users.sql", "SELECT 2;");
+
+        let files = read_migration_files(dir.path_str()).expect("read");
+        assert_eq!(files.len(), 2);
+        assert_ne!(files[0].checksum, files[1].checksum);
+        assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
+        assert_eq!(files[1].checksum, sha256_hex(files[1].content.as_bytes()));
     }
 }

@@ -1385,7 +1385,7 @@
       "verification": [
         "Struct compiles and holds correct fields."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-097",
