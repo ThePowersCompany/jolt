@@ -76,6 +76,23 @@
 //!    errors at startup rather than on the first query — matching the
 //!    "fail-fast on misconfiguration" contract documented for
 //!    [`DbConfig`]'s empty-default `database_url`.
+//!
+//! 8. **`pool()` returns `&PgPool` (a borrow), not `PgPool` (a clone)
+//!    (JOLT-RS-084).** Callers that need an owned handle clone the returned
+//!    reference themselves (`db.pool().clone()`); callers that only need to
+//!    run a query through the pool pass the borrow straight to sqlx (which
+//!    accepts `&PgPool` as an executor). Returning a borrow is the
+//!    lower-friction default — owners can always upgrade with `.clone()` but
+//!    borrowers cannot avoid an unwanted clone.
+//!
+//! 9. **`health_check()` runs `SELECT 1` and returns `Result<(), sqlx::Error>`
+//!    (JOLT-RS-084).** Discards the row payload — the success of the round
+//!    trip is the whole signal. The error shape matches decision 6 (raw
+//!    `sqlx::Error`), so a caller can pattern-match on the specific failure
+//!    (e.g. `Error::PoolTimedOut` vs `Error::Io`) without an enum hop. The
+//!    intended use sites are (a) the eventual `JoltServer` readiness probe,
+//!    (b) HTTP `/healthz` endpoints, (c) JOLT-RS-085's closing connection
+//!    test.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -131,14 +148,11 @@ impl Default for DbConfig {
 
 /// Runtime handle around a [`sqlx::PgPool`] consumed by every downstream
 /// phase19/20/21 slice (JOLT-RS-083). See module docs decisions 5–7 for
-/// the ownership shape, error contract, and connect semantics.
+/// the ownership shape, error contract, and connect semantics; decisions
+/// 8 and 9 cover the read-side API ([`Self::pool`], [`Self::health_check`])
+/// added by JOLT-RS-084.
 #[derive(Debug, Clone)]
 pub struct JoltDb {
-    // Read by the env-gated `connect_returns_ok_when_test_db_available`
-    // test and by callers via the `pool()` getter that JOLT-RS-084 will
-    // add. The lib-build dead-code lint doesn't count cfg(test) usage, so
-    // the allow stays until 084 lands the public accessor.
-    #[allow(dead_code)]
     pool: sqlx::PgPool,
 }
 
@@ -168,6 +182,32 @@ impl JoltDb {
             .connect(&config.database_url)
             .await?;
         Ok(Self { pool })
+    }
+
+    /// Borrow the underlying [`sqlx::PgPool`] (JOLT-RS-084, decision 8).
+    ///
+    /// Callers run queries by passing the returned borrow straight to sqlx
+    /// (which accepts `&PgPool` as an executor). For shared owned access
+    /// (e.g. handing the pool to a spawned task), call `.clone()` on the
+    /// borrow — [`sqlx::PgPool`] is itself an `Arc`-wrapped cheap-clone
+    /// handle.
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+
+    /// Round-trip a `SELECT 1` through the pool to verify it is alive
+    /// (JOLT-RS-084, decision 9).
+    ///
+    /// Returns `Ok(())` on a successful round trip, or the raw
+    /// [`sqlx::Error`] on any failure (acquire timeout, connection drop,
+    /// authentication failure, etc.). The row payload is discarded — the
+    /// success of the round trip is the whole signal.
+    ///
+    /// Intended use sites: `JoltServer` readiness probes, HTTP `/healthz`
+    /// endpoints, and JOLT-RS-085's closing connection test.
+    pub async fn health_check(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
     }
 }
 
@@ -316,9 +356,76 @@ mod tests {
             .expect("expected Ok from JoltDb::connect against JOLT_TEST_DATABASE_URL");
         // Pool is reachable: a trivial SELECT 1 should round-trip.
         let one: (i32,) = sqlx::query_as("SELECT 1")
-            .fetch_one(&db.pool)
+            .fetch_one(db.pool())
             .await
             .expect("SELECT 1 against the connected pool failed");
         assert_eq!(one.0, 1);
+    }
+
+    // ---- JOLT-RS-084: JoltDb::pool + JoltDb::health_check ----
+
+    /// `pool()` returns a borrow of the underlying [`sqlx::PgPool`] (decision
+    /// 8). Compile-pins that the signature is `&PgPool` (a borrow) rather
+    /// than `PgPool` (a clone) — the explicit `&sqlx::PgPool` binding will
+    /// fail to typecheck if the getter ever changes to return an owned
+    /// value.
+    ///
+    /// Uses the unreachable-server fixture from the connect error-path tests
+    /// because the slice only needs an owned `JoltDb` to exercise the getter
+    /// shape, not a live pool. The connect itself is expected to fail; the
+    /// test path that actually inspects a `pool()` borrow lives in the
+    /// env-gated `health_check_returns_ok_*` test below.
+    #[test]
+    fn pool_signature_is_borrow_not_clone() {
+        // Pure compile-time pin: the binding annotation forces the return
+        // type to be `&PgPool`. No runtime body needed.
+        fn _pin(db: &JoltDb) -> &sqlx::PgPool {
+            db.pool()
+        }
+    }
+
+    /// Health-check success path gated on `JOLT_TEST_DATABASE_URL` (same
+    /// convention as `connect_returns_ok_when_test_db_available`). Pins
+    /// decision 9: a successful `SELECT 1` round trip resolves to `Ok(())`.
+    #[tokio::test]
+    async fn health_check_returns_ok_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg)
+            .await
+            .expect("expected Ok from JoltDb::connect against JOLT_TEST_DATABASE_URL");
+        db.health_check()
+            .await
+            .expect("expected Ok from JoltDb::health_check on live pool");
+    }
+
+    /// Health-check failure path: a pool whose configured server is
+    /// unreachable surfaces an `Err` rather than hanging or panicking. Uses
+    /// the same `127.0.0.1:1` + 1-second-acquire-timeout fixture as the
+    /// connect error-path tests, with `connect_lazy_with` so the pool is
+    /// constructed without an upfront TCP dial — the `SELECT 1` inside
+    /// `health_check` is what tries (and fails) to acquire a connection.
+    ///
+    /// This is the only path in jolt-db that uses `connect_lazy_with`; it
+    /// exists exclusively to give the health-check failure path a `JoltDb`
+    /// to call `health_check()` on without requiring a live Postgres. The
+    /// production constructor remains the eager [`JoltDb::connect`] from
+    /// JOLT-RS-083.
+    #[tokio::test]
+    async fn health_check_returns_err_on_unreachable_server() {
+        let pool_options = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1));
+        let pool = pool_options
+            .connect_lazy("postgres://nouser:nopw@127.0.0.1:1/nodb")
+            .expect("connect_lazy should accept a well-formed URL even if unreachable");
+        let db = JoltDb { pool };
+        let result = db.health_check().await;
+        assert!(
+            result.is_err(),
+            "expected Err from health_check against unreachable server, got Ok",
+        );
     }
 }

@@ -1217,7 +1217,7 @@
       "verification": [
         "Unit test: pool().acquire() succeeds, SELECT 1 returns row."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-085",
