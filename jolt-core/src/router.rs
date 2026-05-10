@@ -18,14 +18,16 @@
 //! - JOLT-RS-034 (landed): `from_registry` + registry-driven `call`.
 //! - JOLT-RS-035 (landed): preserve-existing-`RequestExt` contract +
 //!   finished-flag short-circuit between dispatch and handler.
-//! - JOLT-RS-036 (this file): `Router::new(registry)` as the canonical
+//! - JOLT-RS-036 (landed): `Router::new(registry)` as the canonical
 //!   constructor. Tower Layer composition is "optional" in the sense that
 //!   `Router` itself is a [`tower::Service`], so callers stack layers around
 //!   it via [`tower::ServiceBuilder`] when they need to (no Router-side
 //!   `.layer()` method is required for the registry's hot path).
-//! - JOLT-RS-037 (next): full test sweep including 405 method-mismatch
-//!   refinement (this file's 034 dispatch returns 404 for both unknown paths
-//!   and method mismatches, matching the JOLT-RS-034 step text verbatim).
+//! - JOLT-RS-037 (this file): registry walk now distinguishes
+//!   "path matched, method didn't" from "path didn't match at all" so the
+//!   former surfaces `405 Method Not Allowed` with an `Allow` header listing
+//!   the methods that ARE registered for that path (RFC 9110 §15.5.6). Unknown
+//!   paths and unparseable verbs still surface 404.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -161,23 +163,41 @@ impl Service<AxumRequest> for Router {
 
                     // Unparseable HTTP verbs (e.g. CONNECT/TRACE) cannot match
                     // any registered endpoint, so they short-circuit to 404
-                    // before allocating the Jolt request snapshot.
+                    // before allocating the Jolt request snapshot. Returning
+                    // 405 here would require enumerating the methods Jolt
+                    // routes on, which leaks the framework's vocabulary to a
+                    // caller that already sent something Jolt doesn't speak;
+                    // 404 is the conservative answer.
                     let Ok(method) = req.method().as_str().parse::<Method>() else {
                         return Ok(not_found());
                     };
                     let path = req.uri().path().to_string();
+                    // JOLT-RS-037: walk the registry tracking any
+                    // path-match-but-method-miss entries so a no-dispatch
+                    // outcome can distinguish "wrong path" (404) from "right
+                    // path, wrong verb" (405 with `Allow` header). Stable
+                    // sort in `EndpointRegistry::sort` preserves insertion
+                    // order among same-path entries, so the `Allow` listing
+                    // is deterministic for tests + caller introspection.
+                    let mut allowed_methods: Vec<Method> = Vec::new();
                     for endpoint in registry.iter() {
-                        if endpoint.method() == method && endpoint.path() == path {
-                            // Re-check immediately before dispatching: a
-                            // future inner-middleware tier (post-035, pre-046)
-                            // may finish the request between the route walk
-                            // and the handler invocation.
-                            if request_ext.is_finished() {
-                                return Ok(short_circuit_response(&request_ext));
+                        if endpoint.path() == path {
+                            if endpoint.method() == method {
+                                // Re-check immediately before dispatching: a
+                                // future inner-middleware tier (post-035,
+                                // pre-046) may finish the request between
+                                // the route walk and the handler invocation.
+                                if request_ext.is_finished() {
+                                    return Ok(short_circuit_response(&request_ext));
+                                }
+                                let jolt_req = build_jolt_request(req).await;
+                                return Ok(endpoint.handler(jolt_req).await);
                             }
-                            let jolt_req = build_jolt_request(req).await;
-                            return Ok(endpoint.handler(jolt_req).await);
+                            allowed_methods.push(endpoint.method());
                         }
+                    }
+                    if !allowed_methods.is_empty() {
+                        return Ok(method_not_allowed(&allowed_methods));
                     }
                     Ok(not_found())
                 })
@@ -191,6 +211,23 @@ fn not_found() -> Response {
         .status(StatusCode::NOT_FOUND)
         .body(Body::empty())
         .expect("static 404 builder always succeeds")
+}
+
+/// Build the `405 Method Not Allowed` response for a path that's registered
+/// under different verbs than the one the caller used. RFC 9110 §15.5.6
+/// requires the response to advertise which methods ARE supported via the
+/// `Allow` header; the listing is comma-separated per RFC 9110 §10.2.1.
+fn method_not_allowed(allowed: &[Method]) -> Response {
+    let allow_value = allowed
+        .iter()
+        .map(Method::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header("Allow", allow_value)
+        .body(Body::empty())
+        .expect("static 405 builder always succeeds")
 }
 
 /// Build the response surfaced when the `finished` latch is set: the stashed

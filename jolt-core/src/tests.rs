@@ -1515,11 +1515,15 @@ mod router {
         }
 
         #[tokio::test]
-        async fn method_mismatch_on_registered_path_returns_404() {
-            // 034 step text says "On no match, return 404." — both wrong path
-            // AND wrong method on a registered path are "no match" at this
-            // layer. JOLT-RS-037 will refine method-mismatch to 405 once the
-            // sorted-walk learns to distinguish path-hit-from-verb-miss.
+        async fn method_mismatch_on_registered_path_returns_405() {
+            // PRD JOLT-RS-037 verification: a registered path hit with the
+            // wrong verb surfaces 405 (not 404). This inverts the provisional
+            // 034-era contract pinned by `method_mismatch_on_registered_path
+            // _returns_404`; the registry walk now collects path-match-method-
+            // miss entries and surfaces 405 if no verb matched. RFC 9110
+            // §15.5.6 distinguishes "no resource at this path" from "resource
+            // exists, method not supported," and Jolt's router now honors that
+            // distinction.
             let mut registry = EndpointRegistry::new();
             registry.register(EchoEndpoint {
                 path: "/hello",
@@ -1530,6 +1534,131 @@ mod router {
 
             let req = AxumRequest::builder()
                 .method("POST")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn method_mismatch_returns_405_with_allow_header_listing_registered_method() {
+            // Pins RFC 9110 §15.5.6's "MUST advertise allowed methods" via
+            // the `Allow` header. Status-only assertion would let a regression
+            // that returned 405 with no Allow header pass (and clients that
+            // rely on Allow to retry with the correct verb would silently
+            // break).
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("POST")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+            let allow = resp
+                .headers()
+                .get("Allow")
+                .expect("405 must include Allow header per RFC 9110 §15.5.6")
+                .to_str()
+                .expect("Allow header must be ASCII");
+            assert_eq!(allow, "GET");
+        }
+
+        #[tokio::test]
+        async fn method_mismatch_returns_405_with_allow_listing_all_registered_methods() {
+            // When the same path is registered under multiple verbs, the
+            // Allow header must enumerate ALL of them so a client can retry
+            // the request with any supported verb. Insertion order is
+            // load-bearing: stable `sort_by_key` in `EndpointRegistry::sort`
+            // preserves order among same-path entries, so the listing is
+            // deterministic. A regression that switched to an unstable sort
+            // (or reordered entries) would surface here.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Post,
+                body: "posted",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("DELETE")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+            let allow = resp
+                .headers()
+                .get("Allow")
+                .expect("405 must include Allow header per RFC 9110 §15.5.6")
+                .to_str()
+                .expect("Allow header must be ASCII");
+            assert_eq!(allow, "GET, POST");
+        }
+
+        #[tokio::test]
+        async fn unknown_path_returns_404_not_405_even_when_registry_is_populated() {
+            // The 405 refinement must NOT bleed into unknown-path responses:
+            // 405 is reserved for "path matches a registered route, verb
+            // doesn't." A different path — even with verb that's used
+            // elsewhere — must still 404. Without this test, a regression
+            // that flipped the inner conditional ("if endpoint.method() ==
+            // method") would still pass the unknown-path test but break the
+            // path-discrimination contract.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/missing")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            assert!(
+                resp.headers().get("Allow").is_none(),
+                "404 must NOT include Allow header — that's reserved for 405"
+            );
+        }
+
+        #[tokio::test]
+        async fn unparseable_http_verb_returns_404_even_for_registered_path() {
+            // Pins the conservative-404 contract for HTTP verbs Jolt's
+            // `Method` enum doesn't recognize (e.g. CONNECT, TRACE). Returning
+            // 405 here would require enumerating Jolt's vocabulary to a
+            // caller that already sent something Jolt doesn't speak; 404
+            // keeps the fingerprint surface small. If a future PRD wants 501
+            // Not Implemented (RFC 9110 §15.6.2), this test pins the current
+            // behavior so the change is intentional.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("CONNECT")
                 .uri("/hello")
                 .body(Body::empty())
                 .unwrap();
