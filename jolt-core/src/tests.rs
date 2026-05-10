@@ -193,3 +193,33 @@ mod status_code {
         assert_eq!(StatusCode::Other(599).to_string(), "599");
     }
 }
+
+mod request {
+    use crate::{Cookie, Method, Request};
+    use axum::http::HeaderMap;
+    use std::collections::HashMap;
+
+    #[test]
+    fn struct_literal_construction_reaches_every_field() {
+        let req = Request {
+            method: Method::Post,
+            path: "/api/items".to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::from([("page".to_string(), "1".to_string())]),
+            body: b"{}".to_vec(),
+            cookies: vec![Cookie {
+                name: "sid".to_string(),
+                value: "abc".to_string(),
+            }],
+        };
+
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.path, "/api/items");
+        assert!(req.headers.is_empty());
+        assert_eq!(req.query_params.get("page").map(String::as_str), Some("1"));
+        assert_eq!(req.body, b"{}");
+        assert_eq!(req.cookies.len(), 1);
+        assert_eq!(req.cookies[0].name, "sid");
+        assert_eq!(req.cookies[0].value, "abc");
+    }
+}

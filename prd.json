@@ -195,7 +195,7 @@
       "verification": [
         "Struct compiles with all fields accessible."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-012",

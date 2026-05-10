@@ -239,3 +239,35 @@ Notes for next iterations:
 - phase01-method-statuscode is now CLOSED. All 4 items (007/008/009/010) are passes: true.
 - JOLT-RS-011 opens phase02-request-type: Request struct with method (Method), path (String), headers (HeaderMap), query_params (HashMap<String, String>), body (Vec<u8>), cookies (Vec<Cookie>). The verification is just "struct compiles with all fields accessible" — minimum-viable. Open question to flag for that agent: which `HeaderMap` (axum::http::HeaderMap is the obvious choice given the From<StatusCode> bridge already pulls in axum::http) and which `Cookie` type (no Cookie type exists in the workspace yet — JOLT-RS-014 references RequestExt and cookies but doesn't say where Cookie is defined; likely 011 needs to either define a stub `pub struct Cookie { name: String, value: String }` in jolt-core or pull in the `cookie` crate). Flag this when 011 starts so the choice gets made deliberately rather than incidentally.
 - Test organization pattern (`src/tests.rs` with per-feature submodules) is now established for jolt-core. Future test-coverage PRD items should follow the same shape — table-driven where possible, one submodule per type/feature, no inline `#[cfg(test)]` blocks alongside the source modules.
+
+## 2026-05-10 — JOLT-RS-011: Request struct
+
+PRD item: JOLT-RS-011 (priority 11, phase02-request-type) — Define Request struct with method (Method), path (String), headers (HeaderMap), query_params (HashMap<String, String>), body (Vec<u8>), cookies (Vec<Cookie>). Opens phase02.
+
+Verification:
+- `cargo test -p jolt-core --lib` → 20 passed (19 prior + tests::request::struct_literal_construction_reaches_every_field); compiled clean in 1.37s.
+- `cargo check --workspace` → all 5 crates check clean in 0.41s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..010 — npm/Bun verification commands in the auto-prompt don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- HeaderMap = `axum::http::HeaderMap`. Axum is already a dep, the StatusCode bridge already pulls in axum::http, and downstream router code (phase04+) will need to read/write the same map axum hands us. Picking anything else (a hand-rolled HashMap, the http crate directly) would force conversions at every boundary.
+- Cookie defined as a minimal stub `pub struct Cookie { pub name: String, pub value: String }` in a new `jolt-core/src/cookie.rs`. The previous progress entry (JOLT-RS-010 notes) flagged the choice between a stub and pulling the `cookie` crate. Chose the stub: the PRD verification only requires the struct to compile, no parsing/serialization is needed yet, and pulling a new dep without a real consumer pins a version we'd have to revisit. JOLT-RS-014 (Request::cookie accessor) and any future Set-Cookie work can extend or replace this — it's a 6-line type, cheap to evolve.
+- All Request fields are `pub`. The PRD says "all fields accessible" and does not list a constructor in the steps (contrast with JOLT-RS-015 which does). Pub fields satisfy accessibility AND let JOLT-RS-012/013/014 tests construct Requests via struct literal without needing a builder API that hasn't been spec'd yet.
+- Did NOT add a `Request::new(...)` constructor — not in the PRD scope. Per per-item discipline, defer until a PRD item requests it.
+- Did NOT derive Default for Request. Method has no obvious default (HTTP doesn't define one), and forcing a Default impl would either require picking arbitrarily (Get?) or implementing Default for Method too. JOLT-RS-012/013/014 will likely want test helpers; those can live alongside the tests rather than in the public API.
+- Re-exported Cookie + Request at the crate root via `pub use cookie::Cookie; pub use request::Request;` — same ergonomic pattern as Method and StatusCode.
+- Test placed in `tests::request` submodule per the established convention (tests.rs with per-feature submodules, no inline `#[cfg(test)] mod tests` blocks alongside the source). One test that struct-literal-constructs a Request and reads each field — if any field disappears or loses pub, the test stops compiling, which IS the verification.
+
+Files changed:
+- jolt-core/src/cookie.rs (new) — Cookie stub struct.
+- jolt-core/src/request.rs (new) — Request struct with 6 pub fields.
+- jolt-core/src/lib.rs — added `pub mod cookie; pub mod request;` and `pub use cookie::Cookie; pub use request::Request;`.
+- jolt-core/src/tests.rs — added `mod request` with one accessibility test.
+- prd.json — JOLT-RS-011 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-012 (priority 12): `Request::header(name: &str) -> Option<&str>`. Verification names a case-insensitive lookup ("X-Test" stored, "x-test" queried returns Some). axum::http::HeaderMap already does case-insensitive lookup natively via HeaderName, so the impl is essentially `self.headers.get(name).and_then(|v| v.to_str().ok())`. Watch out: `to_str()` only succeeds for visible-ASCII values; non-ASCII bytes return Err. That's fine for typical headers; document the boundary if it matters later.
+- JOLT-RS-013 (priority 13): `Request::query(key) -> Option<&str>` is trivial (`self.query_params.get(key).map(String::as_str)`); `Request::json::<T>() -> Result<T>` needs a return error type — likely a thin wrapper around serde_json::Error, or a fresh `RequestError` enum. Flag this as a small architectural choice for that agent: introducing a crate-level error type now (vs. ad-hoc per-method errors) shapes JOLT-RS-014 (`has_finished` likely doesn't fail) and the future handler trait.
+- JOLT-RS-014 (priority 14): `Request::cookie(key) -> Option<&Cookie>` is straightforward. `Request::has_finished() -> bool` reads a `RequestExt` flag — but no RequestExt type exists in the workspace yet. The agent will need to either define a minimal RequestExt struct (likely an Extensions-style typed map keyed by TypeId) or stash the flag directly on Request. The PRD wording ("reads RequestExt flag") implies the former; flag this as a decision point. If RequestExt becomes a real type, it's likely also where future middleware-attached state (auth user, request-id, etc.) lives — meriting its own module.
+- Cookie type is intentionally minimal. When parsing/serialization is needed, the `cookie` crate (https://crates.io/crates/cookie) or a hand-rolled parser are the two options; defer until a real consumer (Set-Cookie response header, cookie-based session middleware) appears.
