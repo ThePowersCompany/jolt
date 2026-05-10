@@ -601,7 +601,7 @@
       "verification": [
         "Unit test: method with wrong signature \u2192 compile error with descriptive message."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-041",
