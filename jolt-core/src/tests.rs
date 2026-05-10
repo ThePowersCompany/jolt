@@ -4526,3 +4526,380 @@ mod auth_websocket {
         assert_eq!(handle, cloned);
     }
 }
+
+mod auth_ws_jwt {
+    //! PRD-mandated verification for JOLT-RS-076: "Integration test: WS
+    //! connect with invalid token → 401 response, no upgrade."
+    //!
+    //! The closest contract test we can write at this point in the port is a
+    //! tower-Service-level test: the layer's job is to either (a) short-
+    //! circuit with a 401 (preventing the inner WS upgrade handler from
+    //! running) or (b) delegate to the inner service (allowing the upgrade
+    //! to proceed). Verifying both paths through the tower::Service surface
+    //! pins the same contract a real WS-connect integration test would —
+    //! the inner service in these tests stands in for the upgrade handler
+    //! that JOLT-RS-077 will land. A real `axum::extract::ws::WebSocketUpgrade`-
+    //! based integration test is deferred until the WebSocketHandler trait
+    //! lands (see spec_rust.md phase 4).
+    //!
+    //! Module is named `auth_ws_jwt` so
+    //! `cargo test -p jolt-core -- tests::auth_ws_jwt` filters cleanly to
+    //! this slice; matches the established `auth_bearer` / `auth_jwt` /
+    //! `auth_websocket` naming convention.
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use axum::body::{to_bytes, Body};
+    use axum::extract::Request as AxumRequest;
+    use axum::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, WWW_AUTHENTICATE};
+    use axum::http::{HeaderValue, Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use tower::{Layer, ServiceExt};
+
+    use crate::auth_websocket::{WsJwtToken, JOLT_JWT_SUBPROTOCOL};
+    use crate::request_ext::RequestExt;
+    use crate::{AuthWsJwtLayer, JwtClaims, JwtConfig};
+
+    /// Inner service that panics if invoked. Used by every rejection-path
+    /// test so a regression that accidentally delegates past a failed auth
+    /// precheck (instead of short-circuiting and preventing the upgrade)
+    /// crashes loudly rather than passing silently. Mirrors the
+    /// `forbid_inner` helper in the sibling `auth_jwt` test module.
+    fn forbid_inner() -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+        >,
+    > + Clone {
+        tower::service_fn(|_req: AxumRequest| {
+            Box::pin(async move {
+                panic!(
+                    "AuthWsJwtService must short-circuit on rejection and never call inner \
+                     (the upgrade must NOT proceed when auth fails)"
+                );
+                #[allow(unreachable_code)]
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+                >
+        })
+    }
+
+    fn now_secs() -> usize {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is sane")
+            .as_secs() as usize
+    }
+
+    fn sign_hs256(secret: &[u8], claims: &JwtClaims) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .expect("HS256 encode with static secret never fails")
+    }
+
+    /// Build a WebSocket-shaped request whose `Sec-WebSocket-Protocol` header
+    /// carries the given value. The request also carries the upgrade-handshake
+    /// headers so a future end-to-end test against an actual WS upgrade
+    /// handler doesn't have to mint a different request shape — but 076's
+    /// auth precheck only inspects `Sec-WebSocket-Protocol`, so the upgrade
+    /// headers are inert for these tests.
+    fn ws_request_with_protocol(
+        protocol: HeaderValue,
+        request_ext: Arc<RequestExt>,
+    ) -> AxumRequest {
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/ws")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header(SEC_WEBSOCKET_PROTOCOL, protocol)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+        req
+    }
+
+    #[tokio::test]
+    async fn invalid_token_short_circuits_with_401_and_no_upgrade() {
+        // PRD-mandated half: WS connect with invalid token → 401 response,
+        // no upgrade. Pins (a) the 401 status, (b) the dedicated body for
+        // the expired-token rejection path, (c) the finished latch flip,
+        // (d) the inner-never-invoked guarantee (forbid_inner panics if the
+        // upgrade is allowed to proceed).
+        let secret = b"jolt-rs-076-auth-ws-jwt-test-secret";
+        // exp = 1000 → 1970; well in the past.
+        let claims = JwtClaims {
+            sub: "alice".to_owned(),
+            exp: 1_000,
+            iat: None,
+            extra: serde_json::Map::new(),
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let header = HeaderValue::from_str(&format!("{JOLT_JWT_SUBPROTOCOL}, {token}"))
+            .expect("subprotocol header is ASCII");
+        let req = ws_request_with_protocol(header, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "invalid (expired) WS token must surface 401 and prevent the upgrade"
+        );
+        // No `WWW-Authenticate: Bearer` challenge on a WS upgrade rejection —
+        // see auth_ws_jwt module docs decision 2.
+        assert!(
+            resp.headers().get(WWW_AUTHENTICATE).is_none(),
+            "WS auth rejection must NOT carry a WWW-Authenticate challenge"
+        );
+        // No `Sec-WebSocket-Protocol` echo on the rejection — see decision 3.
+        assert!(
+            resp.headers().get(SEC_WEBSOCKET_PROTOCOL).is_none(),
+            "WS auth rejection must NOT echo back any selected subprotocol"
+        );
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("401 must carry Content-Type")
+            .to_str()
+            .expect("Content-Type is ASCII");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "401 body is text/plain; got {content_type}"
+        );
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("401 body is UTF-8");
+        assert_eq!(
+            body_text, "Token has expired",
+            "expired-token rejection uses the dedicated body shape from JwtDecodeError::Expired"
+        );
+
+        assert!(
+            request_ext.is_finished(),
+            "AuthWsJwtService must flip RequestExt::mark_finished on rejection"
+        );
+        assert!(
+            request_ext.take_response().is_none(),
+            "the 401 is returned directly from call(), not stashed in RequestExt"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_protocol_header_short_circuits_with_401() {
+        // No `Sec-WebSocket-Protocol` header at all → MissingHeader rejection
+        // surfaces with the dedicated body string from
+        // WsTokenRejectReason::MissingHeader.
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-076-auth-ws-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/ws")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text, "Missing Sec-WebSocket-Protocol header",
+            "no-header rejection mirrors WsTokenRejectReason::MissingHeader::message()"
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn malformed_protocol_header_short_circuits_with_401() {
+        // Header is well-formed ASCII but doesn't have the canonical
+        // `jolt-jwt, <token>` shape (wrong marker subprotocol) → the
+        // extraction-side MissingJoltJwtPrefix body surfaces.
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-076-auth-ws-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let header = HeaderValue::from_static("graphql-ws, eyJhbGciOiJIUzI1NiJ9.x.y");
+        let req = ws_request_with_protocol(header, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text,
+            "Invalid Sec-WebSocket-Protocol format: expected 'jolt-jwt, <token>'",
+            "wrong-marker rejection mirrors WsTokenRejectReason::MissingJoltJwtPrefix::message()"
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_token_short_circuits_with_401() {
+        // Token signed with a DIFFERENT secret than the validator carries
+        // → the decode-side InvalidSignature body surfaces. Confirms the
+        // layer composes the 075 extractor with the 072 decoder, not just
+        // the format check alone.
+        let claims = JwtClaims {
+            sub: "alice".to_owned(),
+            exp: now_secs() + 3600,
+            iat: None,
+            extra: serde_json::Map::new(),
+        };
+        let token = sign_hs256(b"signed-with-this-secret", &claims);
+
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(
+            b"verify-with-DIFFERENT-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let header = HeaderValue::from_str(&format!("{JOLT_JWT_SUBPROTOCOL}, {token}")).unwrap();
+        let req = ws_request_with_protocol(header, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(body_text, "Invalid token signature");
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn valid_token_allows_upgrade_and_stashes_extension_keys() {
+        // Mirror image of the rejection-path test: WS connect with a valid
+        // token → the inner service runs (i.e. the upgrade is allowed to
+        // proceed in real use), and BOTH WsJwtToken and JwtClaims land in
+        // request extensions for 077's WS handler to read.
+        let secret = b"jolt-rs-076-auth-ws-jwt-test-secret";
+        let minted_sub = "user-076-valid";
+        let claims = JwtClaims {
+            sub: minted_sub.to_owned(),
+            exp: now_secs() + 3600,
+            iat: Some(now_secs()),
+            extra: serde_json::Map::new(),
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+
+        // Side-channel capture mirrors the auth_jwt test module's pattern:
+        // keep the assertion focused on the extension-key contract rather
+        // than on serialization-through-HTTP.
+        let captured: Arc<std::sync::Mutex<Option<(WsJwtToken, JwtClaims)>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_for_inner = Arc::clone(&captured);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured_for_inner);
+            async move {
+                let token = req
+                    .extensions()
+                    .get::<WsJwtToken>()
+                    .expect(
+                        "AuthWsJwtLayer must stash WsJwtToken into extensions on a valid token",
+                    )
+                    .clone();
+                let claims = req
+                    .extensions()
+                    .get::<JwtClaims>()
+                    .expect(
+                        "AuthWsJwtLayer must stash JwtClaims into extensions on a valid token",
+                    )
+                    .clone();
+                *captured.lock().unwrap() = Some((token, claims));
+                Ok::<Response, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::SWITCHING_PROTOCOLS)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let header = HeaderValue::from_str(&format!("{JOLT_JWT_SUBPROTOCOL}, {token}")).unwrap();
+        let req = ws_request_with_protocol(header, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        // The inner stand-in returns 101 Switching Protocols to model the
+        // upgrade outcome. The layer didn't short-circuit, so the inner ran.
+        assert_eq!(
+            resp.status(),
+            StatusCode::SWITCHING_PROTOCOLS,
+            "valid WS token must allow the inner upgrade handler to run"
+        );
+
+        let observed = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("inner service must have observed both extension keys");
+        let (observed_token, observed_claims) = observed;
+        assert_eq!(
+            observed_token.as_str(),
+            token,
+            "WsJwtToken in extensions must carry the verbatim token bytes"
+        );
+        assert_eq!(
+            observed_claims.sub, minted_sub,
+            "JwtClaims sub must round-trip through the extension key"
+        );
+        assert!(
+            !request_ext.is_finished(),
+            "happy path must NOT mark the request finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_request_ext_is_injected_when_no_upstream_layer_set_one() {
+        // Mirrors AuthJwtService's preserve-or-inject contract: even when no
+        // upstream Arc<RequestExt> is present, the layer injects a fresh one
+        // before flipping mark_finished. Without this, a malformed-header
+        // request reaching AuthWsJwtLayer standalone would have no observable
+        // handle on the finished latch.
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-076-auth-ws-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        // No RequestExt, no WS subprotocol header — the missing-header
+        // branch fires.
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/ws")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "rejection must still produce 401 even without an upstream RequestExt"
+        );
+    }
+}

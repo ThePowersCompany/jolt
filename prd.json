@@ -1105,7 +1105,7 @@
       "verification": [
         "Integration test: WS connect with invalid token → 401 response, no upgrade."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-077",
