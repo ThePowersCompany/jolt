@@ -796,12 +796,37 @@ mod request_ext_extensions {
 }
 
 mod server {
-    use crate::JoltServer;
+    use crate::{CorsConfig, JoltServer};
 
     #[test]
     fn new_uses_default_port_8080() {
         // PRD-mandated verification for JOLT-RS-023: defaults include port=8080.
         let server = JoltServer::new();
         assert_eq!(server.port, 8080);
+    }
+
+    #[test]
+    fn builder_chain_sets_port_and_threads() {
+        // PRD-mandated verification for JOLT-RS-024: chained .port(3000).threads(4) sets values.
+        let server = JoltServer::new().port(3000).threads(4);
+        assert_eq!(server.port, 3000);
+        assert_eq!(server.threads, 4);
+    }
+
+    #[test]
+    fn cors_builder_wraps_arg_in_some() {
+        let server = JoltServer::new().cors(CorsConfig);
+        assert!(server.cors_config.is_some());
+    }
+
+    #[test]
+    fn builder_methods_preserve_unspecified_defaults() {
+        // .port() must not clobber threads, and vice versa.
+        let default_threads = JoltServer::new().threads;
+        let server = JoltServer::new().port(9090);
+        assert_eq!(server.port, 9090);
+        assert_eq!(server.threads, default_threads);
+        assert!(server.cors_config.is_none());
+        assert!(server.tls_config.is_none());
     }
 }

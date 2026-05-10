@@ -38,4 +38,19 @@ impl JoltServer {
             tls_config: None,
         }
     }
+
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    pub fn cors(mut self, cors: CorsConfig) -> Self {
+        self.cors_config = Some(cors);
+        self
+    }
 }
