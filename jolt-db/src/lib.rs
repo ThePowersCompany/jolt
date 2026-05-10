@@ -3325,4 +3325,224 @@ mod tests {
             .await
             .expect("truncate _migrations (teardown)");
     }
+
+    // ---- JOLT-RS-101: migration apply tests (partial apply + multi-statement body) ----
+
+    /// PRD-101 mandates: "Write migration apply tests: fresh apply, partial
+    /// apply (some already done), re-run is idempotent." The fresh-apply
+    /// and idempotent-re-run cases are already pinned by
+    /// `migrate_applies_two_migrations_in_order_when_test_db_available`
+    /// (PRD-100) — the first call against an empty DB returns `Ok(2)`
+    /// (fresh) and the second call against the same fixture returns
+    /// `Ok(0)` (idempotent). This test fills in the missing third case:
+    /// **partial apply** — the DB has 1 of 2 migrations already in
+    /// `_migrations`, so `migrate(dir)` runs only the new one.
+    ///
+    /// Flow:
+    /// 1. TRUNCATE `_migrations` + DROP both target tables for a known-
+    ///    empty starting state.
+    /// 2. Write `001_partial_a.sql` (a CREATE TABLE for `A`), apply it
+    ///    via `migrate`, assert `Ok(1)`.
+    /// 3. Insert a sentinel row into `A`. If decision 43's
+    ///    skip-on-checksum-match path regressed and `migrate` re-ran
+    ///    `001_partial_a.sql`'s body in step 6, the CREATE TABLE
+    ///    against an already-existing table would error and surface as
+    ///    `MigrationError::Sqlx`, failing the `Ok(1)` assertion below.
+    ///    The sentinel additionally lets us prove A wasn't dropped /
+    ///    recreated by a regression that issued `DROP TABLE IF EXISTS`
+    ///    + `CREATE TABLE` ahead of each body.
+    /// 4. Write `002_partial_b.sql` (a CREATE TABLE for `B`) into the
+    ///    same directory. Now the dir holds two files; the DB knows
+    ///    about one of them.
+    /// 5. Call `db.migrate(dir)` and assert it returns `Ok(1)` — only
+    ///    the new file ran.
+    /// 6. Verify `B` exists by selecting against it (proves 002's body
+    ///    actually ran, not just the bookkeeping insert).
+    /// 7. Verify `A` still holds the sentinel row (proves 001 wasn't
+    ///    re-applied destructively).
+    /// 8. Verify `_migrations` holds both rows in lex-sorted filename
+    ///    order — the partial-apply path must keep the 001 bookkeeping
+    ///    row intact and append the 002 row.
+    /// 9. Teardown.
+    #[tokio::test]
+    async fn migrate_applies_only_new_migration_on_partial_apply_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Fresh-state setup.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_partial_a")
+            .execute(db.pool())
+            .await
+            .expect("drop target A (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_partial_b")
+            .execute(db.pool())
+            .await
+            .expect("drop target B (setup)");
+
+        let dir = TestDir::new("partial");
+        dir.write_file(
+            "001_partial_a.sql",
+            "CREATE TABLE _jolt_migrate_partial_a (id INT);",
+        );
+
+        let applied_first = db
+            .migrate(dir.path_str())
+            .await
+            .expect("first migrate (one file) should succeed on a fresh DB");
+        assert_eq!(applied_first, 1, "first migrate should apply only 001");
+
+        // Sentinel row. If a regression re-runs 001's body on the next
+        // migrate call, either the CREATE TABLE will error (the Ok(1)
+        // assertion below would fail) or — if the regression drops and
+        // recreates — this sentinel would disappear.
+        sqlx::query("INSERT INTO _jolt_migrate_partial_a (id) VALUES (777)")
+            .execute(db.pool())
+            .await
+            .expect("insert sentinel row into A");
+
+        // Now drop 002 into the same directory. The dir holds two
+        // files; the DB holds one bookkeeping row.
+        dir.write_file(
+            "002_partial_b.sql",
+            "CREATE TABLE _jolt_migrate_partial_b (id INT);",
+        );
+
+        let applied_second = db
+            .migrate(dir.path_str())
+            .await
+            .expect("partial migrate against a one-already-applied fixture should succeed");
+        assert_eq!(
+            applied_second, 1,
+            "partial migrate should apply only the new 002 file",
+        );
+
+        // 002's body actually ran — B exists and is queryable.
+        sqlx::query("SELECT 1 FROM _jolt_migrate_partial_b LIMIT 1")
+            .execute(db.pool())
+            .await
+            .expect("B should exist and be queryable after partial migrate");
+
+        // 001 was not re-applied destructively — the sentinel survives.
+        let sentinel: (i32,) =
+            sqlx::query_as("SELECT id FROM _jolt_migrate_partial_a WHERE id = 777")
+                .fetch_one(db.pool())
+                .await
+                .expect("sentinel row should survive partial migrate");
+        assert_eq!(sentinel.0, 777, "sentinel value must be intact");
+
+        // Bookkeeping: 001's original row is still present, 002's row
+        // is appended.
+        let bookkeeping: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, checksum FROM _migrations ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .expect("read _migrations after partial migrate");
+        assert_eq!(
+            bookkeeping
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["001_partial_a.sql", "002_partial_b.sql"],
+            "expected both migrations recorded in filename order after partial apply",
+        );
+        assert_eq!(
+            bookkeeping[0].1,
+            sha256_hex(b"CREATE TABLE _jolt_migrate_partial_a (id INT);"),
+        );
+        assert_eq!(
+            bookkeeping[1].1,
+            sha256_hex(b"CREATE TABLE _jolt_migrate_partial_b (id INT);"),
+        );
+
+        // Teardown.
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_partial_a")
+            .execute(db.pool())
+            .await
+            .expect("drop target A (teardown)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_partial_b")
+            .execute(db.pool())
+            .await
+            .expect("drop target B (teardown)");
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
+    }
+
+    /// Pins decision 41's `sqlx::raw_sql` choice for executing migration
+    /// bodies: a single migration file may contain multiple SQL
+    /// statements separated by `;` and they all run. `sqlx::query` is
+    /// single-statement only and would error on a multi-statement
+    /// body; `sqlx::raw_sql` accepts the whole script. A regression
+    /// that swaps the executor back to `sqlx::query` would fail this
+    /// test with a "cannot insert multiple commands" error before any
+    /// assertion runs.
+    #[tokio::test]
+    async fn migrate_applies_multi_statement_body_in_single_file_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Fresh-state setup.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_multi_a")
+            .execute(db.pool())
+            .await
+            .expect("drop target A (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_multi_b")
+            .execute(db.pool())
+            .await
+            .expect("drop target B (setup)");
+
+        let dir = TestDir::new("multi");
+        // Two statements in one file. Both must run for the assertions
+        // below to pass.
+        dir.write_file(
+            "001_multi.sql",
+            "CREATE TABLE _jolt_migrate_multi_a (id INT);\n\
+             CREATE TABLE _jolt_migrate_multi_b (id INT);",
+        );
+
+        let applied = db
+            .migrate(dir.path_str())
+            .await
+            .expect("multi-statement migrate should succeed via raw_sql");
+        assert_eq!(applied, 1, "one file applied → count is 1");
+
+        // Both statements ran — both tables are queryable.
+        sqlx::query("SELECT 1 FROM _jolt_migrate_multi_a LIMIT 1")
+            .execute(db.pool())
+            .await
+            .expect("first statement (CREATE A) should have run");
+        sqlx::query("SELECT 1 FROM _jolt_migrate_multi_b LIMIT 1")
+            .execute(db.pool())
+            .await
+            .expect("second statement (CREATE B) should have run");
+
+        // Teardown.
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_multi_a")
+            .execute(db.pool())
+            .await
+            .expect("drop target A (teardown)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_multi_b")
+            .execute(db.pool())
+            .await
+            .expect("drop target B (teardown)");
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
+    }
 }
