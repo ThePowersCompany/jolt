@@ -3,3 +3,5 @@ zig-out
 .env
 *.log
 types.d.ts
+target
+

@@ -1,0 +1,25 @@
+## 2026-05-10 — JOLT-RS-001: Workspace Scaffold
+
+PRD item: JOLT-RS-001 (priority 1, phase00-workspace-scaffold) — Create workspace Cargo.toml with members and [workspace.dependencies] for shared crate versions.
+
+Verification: `cargo check --workspace` → succeeds (5 crates check clean in 0.38s).
+
+Key decisions:
+- Resolver = "2"; edition 2021 pinned via [workspace.package].
+- Pinned shared deps in [workspace.dependencies]: axum 0.7 (ws+macros), axum-server 0.7 (tls-rustls), tokio 1 (full), tower 0.5, tower-http 0.6 (fs/cors/trace/compression-gzip), serde 1, serde_json 1, sqlx 0.8 (runtime-tokio-rustls + postgres + macros + migrate + chrono + uuid, default-features off), jsonwebtoken 9, handlebars 6, uuid 1 (v4/v7/serde), rustls 0.23, chrono 0.4 (serde), sha2 0.10, pbkdf2 0.12, rand 0.8, dashmap 6, syn 2 (full+extra-traits), quote 1, proc-macro2 1.
+- Created bare crate stubs (jolt-core, jolt-macros, jolt-db, jolt-utils, jolt-templates) — Cargo.toml + empty src/lib.rs each — because cargo errors on a virtual workspace with zero members. JOLT-RS-002..006 will fill in each crate's specific deps and lib.rs content; this task only establishes the workspace skeleton.
+- jolt-macros stub already declares `proc-macro = true` since that's intrinsic to the crate type, not a dependency choice.
+
+Files changed:
+- Cargo.toml (new) — workspace root
+- jolt-core/Cargo.toml, jolt-core/src/lib.rs (new, stubs)
+- jolt-macros/Cargo.toml, jolt-macros/src/lib.rs (new, stubs)
+- jolt-db/Cargo.toml, jolt-db/src/lib.rs (new, stubs)
+- jolt-utils/Cargo.toml, jolt-utils/src/lib.rs (new, stubs)
+- jolt-templates/Cargo.toml, jolt-templates/src/lib.rs (new, stubs)
+- prd.json — JOLT-RS-001 passes: true
+
+Notes for next iterations:
+- JOLT-RS-002..006 each need to ADD deps + flesh out lib.rs for their crate; the stub Cargo.toml already exists.
+- Cargo.lock will be auto-generated on first build with real deps; not committed yet.
+- examples/basic crate not yet in workspace members; will be added when phase06 needs it.

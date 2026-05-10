@@ -1,0 +1,3267 @@
+{
+  "name": "jolt-rs-task-list",
+  "description": "Port the Jolt framework from Zig to Rust, phase by phase, with fine-grained task breakdown.",
+  "source": "Generated from spec_rust.md on 2026-05-10. Broken down into small, independently-verifiable tasks.",
+  "priority_rule": "Lower priority runs first.",
+  "status": "active",
+  "task_id_prefix": "JOLT-RS",
+  "problem_statement": "Port ~10k lines of Jolt (Zig) to a Rust workspace crate-for-crate, preserving endpoint/middleware/WS/pubsub/typegen behavior while replacing C dependencies with pure-Rust equivalents.",
+  "scope": [
+    "Workspace of 5 crates + binary: jolt-core, jolt-macros, jolt-db, jolt-utils, jolt-templates, jolt-types.",
+    "Axum + tower + tokio for HTTP, WS, SSE, tasks, pub/sub.",
+    "sqlx for async DB with compile-time query checking and migrations.",
+    "Proc-macro-driven endpoint registration, auto-middleware, patch queries, and TypeScript typegen.",
+    "Replacement of facil.io (C) pub/sub with tokio::sync::broadcast + DashMap.",
+    "TLS via axum-server + rustls, file serving via tower-http.",
+    "Full example application exercising endpoints, WS, tasks, and DB migrations."
+  ],
+  "non_goals": [
+    "Exact line-for-line behavioral parity where Zig semantics don't map to Rust.",
+    "C FFI compatibility or wrapping Zig libraries.",
+    "Zero-copy optimizations that complicate the initial port."
+  ],
+  "product_decisions": [
+    "Middleware short-circuits via a RequestExt extension flag (req.markAsFinished \u2192 finished: AtomicBool).",
+    "Optional<T> is a tri-state enum: Some(T), Null (explicit JSON null), NotProvided (field absent).",
+    "WebSocket auth extracts JWT from Sec-WebSocket-Protocol header before upgrade.",
+    "Pub/sub maps to tokio::sync::broadcast channels keyed by name in a DashMap.",
+    "TypeScript typegen is a proc-macro side effect, opt-in via a jolt-types binary.",
+    "TLS uses rustls (no OpenSSL/LibreSSL C deps)."
+  ],
+  "task_shape": {
+    "id": "JOLT-RS-001",
+    "priority": 1,
+    "phase": "phase_name",
+    "category": "backend",
+    "description": "Small behavior slice.",
+    "steps": [
+      "Concrete step"
+    ],
+    "verification": [
+      "Command or observable check"
+    ],
+    "passes": false
+  },
+  "items": [
+    {
+      "id": "JOLT-RS-001",
+      "priority": 1,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create workspace Cargo.toml with [workspace] members and [workspace.dependencies] for shared crate versions (axum, tokio, serde, sqlx, tower, tower-http, jsonwebtoken, handlebars, uuid, rustls).",
+      "steps": [
+        "Create workspace Cargo.toml with [workspace] members and [workspace.dependencies] for shared crate versions (axum, tokio, serde, sqlx, tower, tower-http, jsonwebtoken, handlebars, uuid, rustls)."
+      ],
+      "verification": [
+        "cargo check --workspace succeeds."
+      ],
+      "passes": true
+    },
+    {
+      "id": "JOLT-RS-002",
+      "priority": 2,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create jolt-core crate: Cargo.toml with axum, tokio, serde, serde_json, tower, tower-http, tokio-stream, futures-util deps, stub lib.rs.",
+      "steps": [
+        "Create jolt-core crate: Cargo.toml with axum, tokio, serde, serde_json, tower, tower-http, tokio-stream, futures-util deps, stub lib.rs."
+      ],
+      "verification": [
+        "cargo check -p jolt-core succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-003",
+      "priority": 3,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create jolt-macros crate: Cargo.toml with proc-macro = true, syn 2, quote, proc-macro2 deps, stub lib.rs with #[proc_macro_attribute] and #[proc_macro_derive] placeholders.",
+      "steps": [
+        "Create jolt-macros crate: Cargo.toml with proc-macro = true, syn 2, quote, proc-macro2 deps, stub lib.rs with #[proc_macro_attribute] and #[proc_macro_derive] placeholders."
+      ],
+      "verification": [
+        "cargo check -p jolt-macros succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-004",
+      "priority": 4,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create jolt-db crate: Cargo.toml with sqlx (postgres, runtime-tokio-rustls), tokio, sha2 deps, stub lib.rs.",
+      "steps": [
+        "Create jolt-db crate: Cargo.toml with sqlx (postgres, runtime-tokio-rustls), tokio, sha2 deps, stub lib.rs."
+      ],
+      "verification": [
+        "cargo check -p jolt-db succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-005",
+      "priority": 5,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create jolt-utils crate: Cargo.toml with jsonwebtoken, pbkdf2, sha2, rand, uuid, chrono, serde, serde_json deps, stub lib.rs.",
+      "steps": [
+        "Create jolt-utils crate: Cargo.toml with jsonwebtoken, pbkdf2, sha2, rand, uuid, chrono, serde, serde_json deps, stub lib.rs."
+      ],
+      "verification": [
+        "cargo check -p jolt-utils succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-006",
+      "priority": 6,
+      "phase": "phase00-workspace-scaffold",
+      "category": "backend",
+      "description": "Workspace Scaffold: Create jolt-templates crate: Cargo.toml with handlebars, serde, serde_json deps, stub lib.rs.",
+      "steps": [
+        "Create jolt-templates crate: Cargo.toml with handlebars, serde, serde_json deps, stub lib.rs."
+      ],
+      "verification": [
+        "cargo check -p jolt-templates succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-007",
+      "priority": 7,
+      "phase": "phase01-method-statuscode",
+      "category": "backend",
+      "description": "Method Statuscode: Define Method enum: Get, Post, Put, Patch, Delete, Options, Head. Implement Display and FromStr.",
+      "steps": [
+        "Define Method enum: Get, Post, Put, Patch, Delete, Options, Head. Implement Display and FromStr."
+      ],
+      "verification": [
+        "Unit test: Method::from_str(\"GET\") == Ok(Get), invalid method returns Err."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-008",
+      "priority": 8,
+      "phase": "phase01-method-statuscode",
+      "category": "backend",
+      "description": "Method Statuscode: Define StatusCode enum with named variants (Ok=200, Created=201, NoContent=204, BadRequest=400, Unauthorized=401, Forbidden=403, NotFound=404, MethodNotAllowed=405, Conflict=409, InternalServerError=500) plus Other(u16) catch-all.",
+      "steps": [
+        "Define StatusCode enum with named variants (Ok=200, Created=201, NoContent=204, BadRequest=400, Unauthorized=401, Forbidden=403, NotFound=404, MethodNotAllowed=405, Conflict=409, InternalServerError=500) plus Other(u16) catch-all."
+      ],
+      "verification": [
+        "Unit test: StatusCode::from_u16(200) == Ok, StatusCode::from_u16(418) == Other(418)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-009",
+      "priority": 9,
+      "phase": "phase01-method-statuscode",
+      "category": "backend",
+      "description": "Method Statuscode: Implement From<StatusCode> for axum::http::StatusCode and Display for StatusCode.",
+      "steps": [
+        "Implement From<StatusCode> for axum::http::StatusCode and Display for StatusCode."
+      ],
+      "verification": [
+        "Unit test: StatusCode::NotFound \u2192 axum StatusCode 404."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-010",
+      "priority": 10,
+      "phase": "phase01-method-statuscode",
+      "category": "backend",
+      "description": "Method Statuscode: Write comprehensive unit tests for Method and StatusCode (all variants, edge cases, conversion round-trips).",
+      "steps": [
+        "Write comprehensive unit tests for Method and StatusCode (all variants, edge cases, conversion round-trips)."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::status_code passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-011",
+      "priority": 11,
+      "phase": "phase02-request-type",
+      "category": "backend",
+      "description": "Request Type: Define Request struct: method (Method), path (String), headers (HeaderMap), query_params (HashMap<String, String>), body (Vec<u8>), cookies (Vec<Cookie>).",
+      "steps": [
+        "Define Request struct: method (Method), path (String), headers (HeaderMap), query_params (HashMap<String, String>), body (Vec<u8>), cookies (Vec<Cookie>)."
+      ],
+      "verification": [
+        "Struct compiles with all fields accessible."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-012",
+      "priority": 12,
+      "phase": "phase02-request-type",
+      "category": "backend",
+      "description": "Request Type: Implement Request::header(name: &str) \u2192 Option<&str>.",
+      "steps": [
+        "Implement Request::header(name: &str) \u2192 Option<&str>."
+      ],
+      "verification": [
+        "Unit test: set header X-Test \u2192 header(\"x-test\") returns Some(\"value\")."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-013",
+      "priority": 13,
+      "phase": "phase02-request-type",
+      "category": "backend",
+      "description": "Request Type: Implement Request::query(key: &str) \u2192 Option<&str> and Request::json::<T: DeserializeOwned>() \u2192 Result<T>.",
+      "steps": [
+        "Implement Request::query(key: &str) \u2192 Option<&str> and Request::json::<T: DeserializeOwned>() \u2192 Result<T>."
+      ],
+      "verification": [
+        "Unit test: query(\"page\") returns Some(\"1\"), json body deserializes into struct."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-014",
+      "priority": 14,
+      "phase": "phase02-request-type",
+      "category": "backend",
+      "description": "Request Type: Implement Request::cookie(key: &str) \u2192 Option<&Cookie> and Request::has_finished() \u2192 bool (reads RequestExt flag).",
+      "steps": [
+        "Implement Request::cookie(key: &str) \u2192 Option<&Cookie> and Request::has_finished() \u2192 bool (reads RequestExt flag)."
+      ],
+      "verification": [
+        "Unit test: cookie extraction and finished-flag reading work."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-015",
+      "priority": 15,
+      "phase": "phase03-response-type",
+      "category": "backend",
+      "description": "Response Type: Define Response<T: Serialize> struct: status (StatusCode), headers (HeaderMap), body (T). Provide Response::new(status, body) constructor.",
+      "steps": [
+        "Define Response<T: Serialize> struct: status (StatusCode), headers (HeaderMap), body (T). Provide Response::new(status, body) constructor."
+      ],
+      "verification": [
+        "Compiles, new() constructs valid Response."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-016",
+      "priority": 16,
+      "phase": "phase03-response-type",
+      "category": "backend",
+      "description": "Response Type: Implement Into<axum::response::Response> for Response<T> where T: Serialize: serialize body as JSON, set content-type: application/json, set status.",
+      "steps": [
+        "Implement Into<axum::response::Response> for Response<T> where T: Serialize: serialize body as JSON, set content-type: application/json, set status."
+      ],
+      "verification": [
+        "Unit test: Response::new(Ok, json_val).into() \u2192 axum Response with correct JSON body and headers."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-017",
+      "priority": 17,
+      "phase": "phase03-response-type",
+      "category": "backend",
+      "description": "Response Type: Implement Into<axum::response::Response> for Response<String> and Response<&str> with content-type: text/plain.",
+      "steps": [
+        "Implement Into<axum::response::Response> for Response<String> and Response<&str> with content-type: text/plain."
+      ],
+      "verification": [
+        "Unit test: Response<String> \u2192 text/plain response."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-018",
+      "priority": 18,
+      "phase": "phase03-response-type",
+      "category": "backend",
+      "description": "Response Type: Write unit tests for all Response body types (json, string, empty/NoContent).",
+      "steps": [
+        "Write unit tests for all Response body types (json, string, empty/NoContent)."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::response passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-019",
+      "priority": 19,
+      "phase": "phase04-requestext-flag",
+      "category": "backend",
+      "description": "Requestext Flag: Define RequestExt struct with finished: AtomicBool. Implement new() defaulting to false.",
+      "steps": [
+        "Define RequestExt struct with finished: AtomicBool. Implement new() defaulting to false."
+      ],
+      "verification": [
+        "Struct compiles, AtomicBool defaults to false."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-020",
+      "priority": 20,
+      "phase": "phase04-requestext-flag",
+      "category": "backend",
+      "description": "Requestext Flag: Implement RequestExt::mark_finished() and RequestExt::is_finished().",
+      "steps": [
+        "Implement RequestExt::mark_finished() and RequestExt::is_finished()."
+      ],
+      "verification": [
+        "Unit test: mark_finished() \u2192 is_finished() returns true."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-021",
+      "priority": 21,
+      "phase": "phase04-requestext-flag",
+      "category": "backend",
+      "description": "Requestext Flag: Register RequestExt as an axum request extension type; test insertion + retrieval through Extensions.",
+      "steps": [
+        "Register RequestExt as an axum request extension type; test insertion + retrieval through Extensions."
+      ],
+      "verification": [
+        "Unit test: insert RequestExt into Extensions, retrieve, mark finished, verify."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-022",
+      "priority": 22,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Define JoltServer struct with fields: port (u16), threads (usize), cors_config (Option<CorsConfig>), tls_config (Option<TlsConfig>). Start with stub types.",
+      "steps": [
+        "Define JoltServer struct with fields: port (u16), threads (usize), cors_config (Option<CorsConfig>), tls_config (Option<TlsConfig>). Start with stub types."
+      ],
+      "verification": [
+        "Struct compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-023",
+      "priority": 23,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Implement JoltServer::new() \u2192 Self with sensible defaults (port 8080, threads = num_cpus).",
+      "steps": [
+        "Implement JoltServer::new() \u2192 Self with sensible defaults (port 8080, threads = num_cpus)."
+      ],
+      "verification": [
+        "Unit test: JoltServer::new() has port=8080."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-024",
+      "priority": 24,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Implement builder methods: port(u16) \u2192 Self, threads(usize) \u2192 Self, cors(CorsConfig) \u2192 Self.",
+      "steps": [
+        "Implement builder methods: port(u16) \u2192 Self, threads(usize) \u2192 Self, cors(CorsConfig) \u2192 Self."
+      ],
+      "verification": [
+        "Unit test: chained .port(3000).threads(4) sets values."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-025",
+      "priority": 25,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Implement JoltServer::start(self, router: Router) \u2192 starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown.",
+      "steps": [
+        "Implement JoltServer::start(self, router: Router) \u2192 starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown."
+      ],
+      "verification": [
+        "Manual: server starts, curl localhost:8080 returns 404 (empty router)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-026",
+      "priority": 26,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Implement JoltServer::endpoint<E: Endpoint>(self) \u2192 Self to register an endpoint into the internal registry.",
+      "steps": [
+        "Implement JoltServer::endpoint<E: Endpoint>(self) \u2192 Self to register an endpoint into the internal registry."
+      ],
+      "verification": [
+        "Unit test: register an endpoint, verify it appears in registry."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-027",
+      "priority": 27,
+      "phase": "phase05-server-builder",
+      "category": "backend",
+      "description": "Server Builder: Write server builder unit tests: defaults, builder chain, port binding conflict handling.",
+      "steps": [
+        "Write server builder unit tests: defaults, builder chain, port binding conflict handling."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::server passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-028",
+      "priority": 28,
+      "phase": "phase06-endpoint-registry",
+      "category": "backend",
+      "description": "Endpoint Registry: Define Endpoint trait: fn path(&self) -> &str, fn method(&self) -> Method, fn handler(&self, req: Request) -> Pin<Box<dyn Future<Output = axum::response::Response> + Send>>.",
+      "steps": [
+        "Define Endpoint trait: fn path(&self) -> &str, fn method(&self) -> Method, fn handler(&self, req: Request) -> Pin<Box<dyn Future<Output = axum::response::Response> + Send>>."
+      ],
+      "verification": [
+        "Trait compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-029",
+      "priority": 29,
+      "phase": "phase06-endpoint-registry",
+      "category": "backend",
+      "description": "Endpoint Registry: Define EndpointRegistry struct: internal Vec<Box<dyn Endpoint + Send + Sync>>. Implement register(endpoint).",
+      "steps": [
+        "Define EndpointRegistry struct: internal Vec<Box<dyn Endpoint + Send + Sync>>. Implement register(endpoint)."
+      ],
+      "verification": [
+        "Unit test: register two endpoints, registry has length 2."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-030",
+      "priority": 30,
+      "phase": "phase06-endpoint-registry",
+      "category": "backend",
+      "description": "Endpoint Registry: Implement EndpointRegistry::sort(): sort by path length descending (longest path first) to ensure /api/hello matches before /api.",
+      "steps": [
+        "Implement EndpointRegistry::sort(): sort by path length descending (longest path first) to ensure /api/hello matches before /api."
+      ],
+      "verification": [
+        "Unit test: sort [/\", \"/api/hello\", \"/api\"] \u2192 [\"/api/hello\", \"/api\", \"/\"].\""
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-031",
+      "priority": 31,
+      "phase": "phase06-endpoint-registry",
+      "category": "backend",
+      "description": "Endpoint Registry: Implement EndpointRegistry::build_router() \u2192 axum::Router: iterate sorted endpoints, add routes matching method + path.",
+      "steps": [
+        "Implement EndpointRegistry::build_router() \u2192 axum::Router: iterate sorted endpoints, add routes matching method + path."
+      ],
+      "verification": [
+        "Unit test: build_router from two endpoints produces an axum Router with correct routes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-032",
+      "priority": 32,
+      "phase": "phase06-endpoint-registry",
+      "category": "backend",
+      "description": "Endpoint Registry: Write endpoint registry unit tests: register, sort order, duplicate path detection, wildcard/path-param extraction.",
+      "steps": [
+        "Write endpoint registry unit tests: register, sort order, duplicate path detection, wildcard/path-param extraction."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::endpoint_registry passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-033",
+      "priority": 33,
+      "phase": "phase07-router-tower-service",
+      "category": "backend",
+      "description": "Router Tower Service: Implement tower::Service for Router: wraps axum Router and injects RequestExt into every incoming request before dispatch.",
+      "steps": [
+        "Implement tower::Service for Router: wraps axum Router and injects RequestExt into every incoming request before dispatch."
+      ],
+      "verification": [
+        "Service impl compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-034",
+      "priority": 34,
+      "phase": "phase07-router-tower-service",
+      "category": "backend",
+      "description": "Router Tower Service: Router::call(): parse path + method from request, match against sorted endpoint registry. On match, call handler. On no match, return 404.",
+      "steps": [
+        "Router::call(): parse path + method from request, match against sorted endpoint registry. On match, call handler. On no match, return 404."
+      ],
+      "verification": [
+        "Unit test: registered GET /hello \u2192 GET /hello returns 200, GET /unknown returns 404."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-035",
+      "priority": 35,
+      "phase": "phase07-router-tower-service",
+      "category": "backend",
+      "description": "Router Tower Service: Integrate finished-flag check: after each response, if RequestExt is finished, return response immediately without calling handler.",
+      "steps": [
+        "Integrate finished-flag check: after each response, if RequestExt is finished, return response immediately without calling handler."
+      ],
+      "verification": [
+        "Unit test: auth middleware sets finished \u2192 handler body is never invoked, response is 401."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-036",
+      "priority": 36,
+      "phase": "phase07-router-tower-service",
+      "category": "backend",
+      "description": "Router Tower Service: Implement Router::new(registry: EndpointRegistry) \u2192 Self constructor with optional tower Layer stack.",
+      "steps": [
+        "Implement Router::new(registry: EndpointRegistry) \u2192 Self constructor with optional tower Layer stack."
+      ],
+      "verification": [
+        "Unit test: Router::new() yields ready-to-serve axum Router."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-037",
+      "priority": 37,
+      "phase": "phase07-router-tower-service",
+      "category": "backend",
+      "description": "Router Tower Service: Write Router unit tests: path matching, 404 for unknown paths, method mismatch returns 405, finished-flag short-circuit.",
+      "steps": [
+        "Write Router unit tests: path matching, 404 for unknown paths, method mismatch returns 405, finished-flag short-circuit."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::router passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-038",
+      "priority": 38,
+      "phase": "phase08-endpoint-macro-parsing",
+      "category": "backend",
+      "description": "Implement proc_macro_attribute for #[endpoint(path)]: parse the path argument from attribute tokens.",
+      "steps": [
+        "Implement proc_macro_attribute for #[endpoint(path)]: parse the path argument from attribute tokens."
+      ],
+      "verification": [
+        "Unit test: #[endpoint(\"/api/test\")] extracts path = \"/api/test\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-039",
+      "priority": 39,
+      "phase": "phase08-endpoint-macro-parsing",
+      "category": "backend",
+      "description": "Scan the impl block for methods annotated with #[get], #[post], #[put], #[patch], #[delete]. Collect method sigs (name, args, return type).",
+      "steps": [
+        "Scan the impl block for methods annotated with #[get], #[post], #[put], #[patch], #[delete]. Collect method sigs (name, args, return type)."
+      ],
+      "verification": [
+        "Unit test: impl block with #[get] fn hello(...) \u2192 found method 'hello' tagged as GET."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-040",
+      "priority": 40,
+      "phase": "phase08-endpoint-macro-parsing",
+      "category": "backend",
+      "description": "Validate each method signature: first arg must be &self, must return Result<Response<T>, E> or Response<T>. Error on mismatch with clear span.",
+      "steps": [
+        "Validate each method signature: first arg must be &self, must return Result<Response<T>, E> or Response<T>. Error on mismatch with clear span."
+      ],
+      "verification": [
+        "Unit test: method with wrong signature \u2192 compile error with descriptive message."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-041",
+      "priority": 41,
+      "phase": "phase08-endpoint-macro-parsing",
+      "category": "backend",
+      "description": "Generate a match per discovered method mapping (Method, path) \u2192 handler fn.",
+      "steps": [
+        "Generate a match per discovered method mapping (Method, path) \u2192 handler fn."
+      ],
+      "verification": [
+        "Unit test: two methods (get + post) \u2192 generated code has two match arms."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-042",
+      "priority": 42,
+      "phase": "phase09-endpoint-macro-codegen",
+      "category": "backend",
+      "description": "Generate a static registration function (inventory or linkme pattern) that calls EndpointRegistry::register(path, method, handler).",
+      "steps": [
+        "Generate a static registration function (inventory or linkme pattern) that calls EndpointRegistry::register(path, method, handler)."
+      ],
+      "verification": [
+        "Integration test: define struct with #[endpoint(\"/test\")], verify it appears in registry at server start."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-043",
+      "priority": 43,
+      "phase": "phase09-endpoint-macro-codegen",
+      "category": "backend",
+      "description": "Generate handler wrapper: converts the user's fn(Request) \u2192 impl Into<axum::Response> into a tower-compatible async fn.",
+      "steps": [
+        "Generate handler wrapper: converts the user's fn(Request) \u2192 impl Into<axum::Response> into a tower-compatible async fn."
+      ],
+      "verification": [
+        "Handler wrapper compiles and can be called with a Request."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-044",
+      "priority": 44,
+      "phase": "phase09-endpoint-macro-codegen",
+      "category": "backend",
+      "description": "Wire inventory-based auto-registration: on JoltServer::start(), call inventory::iter::<RegisteredEndpoint> to collect all endpoints from all linked crates.",
+      "steps": [
+        "Wire inventory-based auto-registration: on JoltServer::start(), call inventory::iter::<RegisteredEndpoint> to collect all endpoints from all linked crates."
+      ],
+      "verification": [
+        "Integration test: endpoints defined in multiple crates all register into server."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-045",
+      "priority": 45,
+      "phase": "phase09-endpoint-macro-codegen",
+      "category": "backend",
+      "description": "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() \u2192 server returns 200 at GET /ping.",
+      "steps": [
+        "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() \u2192 server returns 200 at GET /ping."
+      ],
+      "verification": [
+        "cargo test --test endpoint_integration passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-046",
+      "priority": 46,
+      "phase": "phase10-automiddleware-field-parsing",
+      "category": "backend",
+      "description": "Implement #[derive(AutoMiddleware)] proc macro: parse struct fields and their types using syn.",
+      "steps": [
+        "Implement #[derive(AutoMiddleware)] proc macro: parse struct fields and their types using syn."
+      ],
+      "verification": [
+        "Derive compiles on a struct with various field types."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-047",
+      "priority": 47,
+      "phase": "phase10-automiddleware-field-parsing",
+      "category": "backend",
+      "description": "Detect body fields: any field typed T where T: DeserializeOwned (not Request, not QueryParams). Mark as body-candidate.",
+      "steps": [
+        "Detect body fields: any field typed T where T: DeserializeOwned (not Request, not QueryParams). Mark as body-candidate."
+      ],
+      "verification": [
+        "Unit test: field body: CreateUserRequest \u2192 detected as body field."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-048",
+      "priority": 48,
+      "phase": "phase10-automiddleware-field-parsing",
+      "category": "backend",
+      "description": "Detect query_params fields: field typed QueryParams<T> or HashMap<String, String>. Mark for query extraction.",
+      "steps": [
+        "Detect query_params fields: field typed QueryParams<T> or HashMap<String, String>. Mark for query extraction."
+      ],
+      "verification": [
+        "Unit test: field query: QueryParams<Filters> \u2192 detected as query field."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-049",
+      "priority": 49,
+      "phase": "phase10-automiddleware-field-parsing",
+      "category": "backend",
+      "description": "Detect Request reference fields: field typed &Request or Request. Mark for req injection.",
+      "steps": [
+        "Detect Request reference fields: field typed &Request or Request. Mark for req injection."
+      ],
+      "verification": [
+        "Unit test: field req: &Request \u2192 detected as request injection."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-050",
+      "priority": 50,
+      "phase": "phase10-automiddleware-field-parsing",
+      "category": "backend",
+      "description": "Detect #[cors] attribute on the struct itself (not fields). Generate flag for CORS middleware inclusion.",
+      "steps": [
+        "Detect #[cors] attribute on the struct itself (not fields). Generate flag for CORS middleware inclusion."
+      ],
+      "verification": [
+        "Unit test: #[cors] on struct \u2192 CORS flag set to true in generated code."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-051",
+      "priority": 51,
+      "phase": "phase11-automiddleware-layer-codegen",
+      "category": "backend",
+      "description": "Generate a tower::Layer impl for the middleware struct (creates a tower::Service wrapping the inner handler).",
+      "steps": [
+        "Generate a tower::Layer impl for the middleware struct (creates a tower::Service wrapping the inner handler)."
+      ],
+      "verification": [
+        "Generated code compiles and implements tower::Layer."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-052",
+      "priority": 52,
+      "phase": "phase11-automiddleware-layer-codegen",
+      "category": "backend",
+      "description": "Generate middleware call chain in order: auth \u2192 cors \u2192 log \u2192 parse-query \u2192 parse-body \u2192 user-defined middlewares \u2192 handler.",
+      "steps": [
+        "Generate middleware call chain in order: auth \u2192 cors \u2192 log \u2192 parse-query \u2192 parse-body \u2192 user-defined middlewares \u2192 handler."
+      ],
+      "verification": [
+        "Ordering logic generates correct chained calls."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-053",
+      "priority": 53,
+      "phase": "phase11-automiddleware-layer-codegen",
+      "category": "backend",
+      "description": "For each detected body/query/req field, generate the extraction code in the middleware layer's call() method.",
+      "steps": [
+        "For each detected body/query/req field, generate the extraction code in the middleware layer's call() method."
+      ],
+      "verification": [
+        "Generated call() extracts body into struct, query into struct, req ref into struct field."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-054",
+      "priority": 54,
+      "phase": "phase11-automiddleware-layer-codegen",
+      "category": "backend",
+      "description": "Write unit test: derive AutoMiddleware on struct with body + query + req fields, verify generated impl runs and populates fields correctly.",
+      "steps": [
+        "Write unit test: derive AutoMiddleware on struct with body + query + req fields, verify generated impl runs and populates fields correctly."
+      ],
+      "verification": [
+        "cargo test -p jolt-macros -- tests::auto_middleware passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-055",
+      "priority": 55,
+      "phase": "phase12-cors-middleware",
+      "category": "backend",
+      "description": "Define CorsConfig struct: allow_origins (Vec<String>), allow_methods (Vec<Method>), allow_headers (Vec<String>), max_age (u32).",
+      "steps": [
+        "Define CorsConfig struct: allow_origins (Vec<String>), allow_methods (Vec<Method>), allow_headers (Vec<String>), max_age (u32)."
+      ],
+      "verification": [
+        "Struct compiles with defaults."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-056",
+      "priority": 56,
+      "phase": "phase12-cors-middleware",
+      "category": "backend",
+      "description": "Implement CorsLayer as tower::Layer: on OPTIONS request, return 204 with Access-Control-Allow-Origin, Allow-Methods, Allow-Headers, Access-Control-Max-Age headers. Set RequestExt::mark_finished().",
+      "steps": [
+        "Implement CorsLayer as tower::Layer: on OPTIONS request, return 204 with Access-Control-Allow-Origin, Allow-Methods, Allow-Headers, Access-Control-Max-Age headers. Set RequestExt::mark_finished()."
+      ],
+      "verification": [
+        "Unit test: OPTIONS /api/test \u2192 204 with CORS headers, finished flag set."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-057",
+      "priority": 57,
+      "phase": "phase12-cors-middleware",
+      "category": "backend",
+      "description": "On non-OPTIONS requests, inject Access-Control-Allow-Origin (and optionally Access-Control-Expose-Headers) into the response.",
+      "steps": [
+        "On non-OPTIONS requests, inject Access-Control-Allow-Origin (and optionally Access-Control-Expose-Headers) into the response."
+      ],
+      "verification": [
+        "Unit test: GET /api/test \u2192 response includes CORS origin header."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-058",
+      "priority": 58,
+      "phase": "phase12-cors-middleware",
+      "category": "backend",
+      "description": "Write CORS unit tests: wildcard origin, specific origin match, no-match returns no CORS header, preflight returns correct methods.",
+      "steps": [
+        "Write CORS unit tests: wildcard origin, specific origin match, no-match returns no CORS header, preflight returns correct methods."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::cors passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-059",
+      "priority": 59,
+      "phase": "phase13-body-parsing",
+      "category": "backend",
+      "description": "Implement ParseBodyLayer as tower::Layer: reads request body bytes into Vec<u8>. If the middleware struct has a body: T field, attempt serde_json::from_slice::<T>.",
+      "steps": [
+        "Implement ParseBodyLayer as tower::Layer: reads request body bytes into Vec<u8>. If the middleware struct has a body: T field, attempt serde_json::from_slice::<T>."
+      ],
+      "verification": [
+        "Unit test: valid JSON body \u2192 T populated in middleware struct."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-060",
+      "priority": 60,
+      "phase": "phase13-body-parsing",
+      "category": "backend",
+      "description": "On deserialization failure, return Response::bad_request() with error message (\"Invalid JSON: ...\") and set RequestExt::mark_finished().",
+      "steps": [
+        "On deserialization failure, return Response::bad_request() with error message (\"Invalid JSON: ...\") and set RequestExt::mark_finished()."
+      ],
+      "verification": [
+        "Unit test: invalid JSON \u2192 400 response with error details."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-061",
+      "priority": 61,
+      "phase": "phase13-body-parsing",
+      "category": "backend",
+      "description": "Support String body extraction: if the body field is typed String or &str, read body as UTF-8 string.",
+      "steps": [
+        "Support String body extraction: if the body field is typed String or &str, read body as UTF-8 string."
+      ],
+      "verification": [
+        "Unit test: POST with text/plain body \u2192 extracted as String."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-062",
+      "priority": 62,
+      "phase": "phase13-body-parsing",
+      "category": "backend",
+      "description": "Write body parsing unit tests: empty body \u2192 error, oversized body \u2192 error, valid JSON \u2192 success, string body \u2192 success.",
+      "steps": [
+        "Write body parsing unit tests: empty body \u2192 error, oversized body \u2192 error, valid JSON \u2192 success, string body \u2192 success."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::parse_body passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-063",
+      "priority": 63,
+      "phase": "phase14-query-parsing",
+      "category": "backend",
+      "description": "Implement ParseQueryLayer as tower::Layer: extract query string from request URI, parse into key-value pairs.",
+      "steps": [
+        "Implement ParseQueryLayer as tower::Layer: extract query string from request URI, parse into key-value pairs."
+      ],
+      "verification": [
+        "Unit test: ?id=42 \u2192 id parsed as \"42\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-064",
+      "priority": 64,
+      "phase": "phase14-query-parsing",
+      "category": "backend",
+      "description": "Implement typed extraction for int (i32, i64, u32): parse from string, error on non-numeric. float (f32, f64): parse with .parse().",
+      "steps": [
+        "Implement typed extraction for int (i32, i64, u32): parse from string, error on non-numeric. float (f32, f64): parse with .parse()."
+      ],
+      "verification": [
+        "Unit test: ?count=5 \u2192 i32::from_str(\"5\") == 5. ?count=abc \u2192 400."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-065",
+      "priority": 65,
+      "phase": "phase14-query-parsing",
+      "category": "backend",
+      "description": "Implement typed extraction for bool (\"true\"/\"false\"/\"1\"/\"0\"), String (pass-through), enum (TryFrom<&str>).",
+      "steps": [
+        "Implement typed extraction for bool (\"true\"/\"false\"/\"1\"/\"0\"), String (pass-through), enum (TryFrom<&str>)."
+      ],
+      "verification": [
+        "Unit test: ?active=true \u2192 bool true. ?sort=asc \u2192 enum Sort::Asc."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-066",
+      "priority": 66,
+      "phase": "phase14-query-parsing",
+      "category": "backend",
+      "description": "Implement Vec<T> extraction: comma-separated values (?ids=1,2,3) parsed element-by-element.",
+      "steps": [
+        "Implement Vec<T> extraction: comma-separated values (?ids=1,2,3) parsed element-by-element."
+      ],
+      "verification": [
+        "Unit test: ?ids=1,2,3 \u2192 Vec<i32> = [1,2,3]."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-067",
+      "priority": 67,
+      "phase": "phase14-query-parsing",
+      "category": "backend",
+      "description": "Write query parsing unit tests: missing param \u2192 error, wrong type \u2192 400, all supported types round-trip.",
+      "steps": [
+        "Write query parsing unit tests: missing param \u2192 error, wrong type \u2192 400, all supported types round-trip."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::parse_query passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-068",
+      "priority": 68,
+      "phase": "phase15-logging",
+      "category": "backend",
+      "description": "Integrate tower_http::trace::TraceLayer into the middleware stack (enabled globally in JoltServer::start).",
+      "steps": [
+        "Integrate tower_http::trace::TraceLayer into the middleware stack (enabled globally in JoltServer::start)."
+      ],
+      "verification": [
+        "Server starts, TraceLayer is in the stack."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-069",
+      "priority": 69,
+      "phase": "phase15-logging",
+      "category": "backend",
+      "description": "Customize log format: method, path, status code, latency in ms. Log at INFO level. Use tracing crate for structured output.",
+      "steps": [
+        "Customize log format: method, path, status code, latency in ms. Log at INFO level. Use tracing crate for structured output."
+      ],
+      "verification": [
+        "Manual: make request, verify log line: \"GET /api/test 200 4ms\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-070",
+      "priority": 70,
+      "phase": "phase15-logging",
+      "category": "backend",
+      "description": "Log request body and response body at DEBUG level (truncated to reasonable size). Suppress for sensitive paths (auth).",
+      "steps": [
+        "Log request body and response body at DEBUG level (truncated to reasonable size). Suppress for sensitive paths (auth)."
+      ],
+      "verification": [
+        "Manual: RUST_LOG=debug make request, verify body content logged."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-071",
+      "priority": 71,
+      "phase": "phase16-auth-bearer",
+      "category": "backend",
+      "description": "Implement AuthBearerLayer: extract Authorization header, validate format is \"Bearer <token>\". On missing/invalid format, return 401 + mark_finished.",
+      "steps": [
+        "Implement AuthBearerLayer: extract Authorization header, validate format is \"Bearer <token>\". On missing/invalid format, return 401 + mark_finished."
+      ],
+      "verification": [
+        "Unit test: no Authorization header \u2192 401."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-072",
+      "priority": 72,
+      "phase": "phase16-auth-bearer",
+      "category": "backend",
+      "description": "Validate JWT token using jolt_utils::jwt::decode with configured secret and algorithm. On failure (expired, bad signature), return 401 + mark_finished.",
+      "steps": [
+        "Validate JWT token using jolt_utils::jwt::decode with configured secret and algorithm. On failure (expired, bad signature), return 401 + mark_finished."
+      ],
+      "verification": [
+        "Unit test: valid token \u2192 passes, expired token \u2192 401."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-073",
+      "priority": 73,
+      "phase": "phase16-auth-bearer",
+      "category": "backend",
+      "description": "On success, parse claims into JwtClaims, inject into request extensions (req.extensions_mut().insert(claims)).",
+      "steps": [
+        "On success, parse claims into JwtClaims, inject into request extensions (req.extensions_mut().insert(claims))."
+      ],
+      "verification": [
+        "Unit test: valid token \u2192 JwtClaims available via req.extensions().get::<JwtClaims>()."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-074",
+      "priority": 74,
+      "phase": "phase16-auth-bearer",
+      "category": "backend",
+      "description": "Write auth unit tests: missing header, malformed header, wrong algorithm, expired token, valid token, custom claims.",
+      "steps": [
+        "Write auth unit tests: missing header, malformed header, wrong algorithm, expired token, valid token, custom claims."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::auth passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-075",
+      "priority": 75,
+      "phase": "phase17-auth-websocket",
+      "category": "backend",
+      "description": "Extract token from Sec-WebSocket-Protocol request header (format: \"jolt-jwt, <token>\").",
+      "steps": [
+        "Extract token from Sec-WebSocket-Protocol request header (format: \"jolt-jwt, <token>\")."
+      ],
+      "verification": [
+        "Unit test: header \"jolt-jwt, eyJ...\" \u2192 extracted token \"eyJ...\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-076",
+      "priority": 76,
+      "phase": "phase17-auth-websocket",
+      "category": "backend",
+      "description": "Validate token before allowing WebSocket upgrade. On invalid token, return 401 and do not upgrade.",
+      "steps": [
+        "Validate token before allowing WebSocket upgrade. On invalid token, return 401 and do not upgrade."
+      ],
+      "verification": [
+        "Integration test: WS connect with invalid token \u2192 401 response, no upgrade."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-077",
+      "priority": 77,
+      "phase": "phase17-auth-websocket",
+      "category": "backend",
+      "description": "On valid token, complete the upgrade and inject JwtClaims into the WS handler.",
+      "steps": [
+        "On valid token, complete the upgrade and inject JwtClaims into the WS handler."
+      ],
+      "verification": [
+        "Integration test: WS connect with valid token \u2192 upgrade succeeds, handler has claims."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-078",
+      "priority": 78,
+      "phase": "phase18-early-termination",
+      "category": "backend",
+      "description": "Each middleware layer (auth, cors, body, query, log) checks req.extensions().get::<RequestExt>()?.is_finished() before proceeding. If finished, return current response unchanged.",
+      "steps": [
+        "Each middleware layer (auth, cors, body, query, log) checks req.extensions().get::<RequestExt>()?.is_finished() before proceeding. If finished, return current response unchanged."
+      ],
+      "verification": [
+        "Unit test: auth sets finished \u2192 body parsing middleware is skipped."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-079",
+      "priority": 79,
+      "phase": "phase18-early-termination",
+      "category": "backend",
+      "description": "Router checks finished flag after middleware chain: if finished, return the middleware-set response without calling the endpoint handler.",
+      "steps": [
+        "Router checks finished flag after middleware chain: if finished, return the middleware-set response without calling the endpoint handler."
+      ],
+      "verification": [
+        "Unit test: middleware chain sets finished \u2192 endpoint handler never invoked, middleware response returned."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-080",
+      "priority": 80,
+      "phase": "phase18-early-termination",
+      "category": "backend",
+      "description": "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner \u2192 outer).",
+      "steps": [
+        "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner \u2192 outer)."
+      ],
+      "verification": [
+        "Integration test: full middleware chain, auth rejects \u2192 401 returned, handler body never executed."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-081",
+      "priority": 81,
+      "phase": "phase18-early-termination",
+      "category": "backend",
+      "description": "Write early termination unit tests: single-layer finish, multi-layer finish, finish+before+handler, finish+after+handler (should not reach handler).",
+      "steps": [
+        "Write early termination unit tests: single-layer finish, multi-layer finish, finish+before+handler, finish+after+handler (should not reach handler)."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::early_termination passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-082",
+      "priority": 82,
+      "phase": "phase19-db-connection",
+      "category": "backend",
+      "description": "Define DbConfig struct: database_url (String), max_connections (u32, default 10), acquire_timeout_secs (u64, default 30).",
+      "steps": [
+        "Define DbConfig struct: database_url (String), max_connections (u32, default 10), acquire_timeout_secs (u64, default 30)."
+      ],
+      "verification": [
+        "Struct compiles with defaults."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-083",
+      "priority": 83,
+      "phase": "phase19-db-connection",
+      "category": "backend",
+      "description": "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) \u2192 Result<Self, sqlx::Error>.",
+      "steps": [
+        "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) \u2192 Result<Self, sqlx::Error>."
+      ],
+      "verification": [
+        "Unit test (requires PG): JoltDb::connect() returns Ok."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-084",
+      "priority": 84,
+      "phase": "phase19-db-connection",
+      "category": "backend",
+      "description": "Implement JoltDb::pool() \u2192 &PgPool getter. Implement health check: SELECT 1 query via pool.",
+      "steps": [
+        "Implement JoltDb::pool() \u2192 &PgPool getter. Implement health check: SELECT 1 query via pool."
+      ],
+      "verification": [
+        "Unit test: pool().acquire() succeeds, SELECT 1 returns row."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-085",
+      "priority": 85,
+      "phase": "phase19-db-connection",
+      "category": "backend",
+      "description": "Write DB connection test: connect to test DB, verify pool is alive, verify health check passes.",
+      "steps": [
+        "Write DB connection test: connect to test DB, verify pool is alive, verify health check passes."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::connection passes (requires running Postgres)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-086",
+      "priority": 86,
+      "phase": "phase20-db-queries",
+      "category": "backend",
+      "description": "Implement db.query_as::<T>(sql, params...) \u2192 TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods.",
+      "steps": [
+        "Implement db.query_as::<T>(sql, params...) \u2192 TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods."
+      ],
+      "verification": [
+        "Unit test: query_as::<TestRow>(\"SELECT 1 AS id\") \u2192 fetch_one returns TestRow { id: 1 }."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-087",
+      "priority": 87,
+      "phase": "phase20-db-queries",
+      "category": "backend",
+      "description": "Implement .fetch_all() returning Vec<T>, .fetch_one() returning T (error if 0 or >1 rows), .fetch_optional() returning Option<T>.",
+      "steps": [
+        "Implement .fetch_all() returning Vec<T>, .fetch_one() returning T (error if 0 or >1 rows), .fetch_optional() returning Option<T>."
+      ],
+      "verification": [
+        "Unit test: each fetch variant works for 0/1/N rows."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-088",
+      "priority": 88,
+      "phase": "phase20-db-queries",
+      "category": "backend",
+      "description": "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) \u2192 Future<Output = Result<T>>: begins, runs closure, commits/rollbacks.",
+      "steps": [
+        "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) \u2192 Future<Output = Result<T>>: begins, runs closure, commits/rollbacks."
+      ],
+      "verification": [
+        "Unit test: transaction that commits \u2192 changes persisted. Transaction that returns Err \u2192 rollback."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-089",
+      "priority": 89,
+      "phase": "phase20-db-queries",
+      "category": "backend",
+      "description": "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback.",
+      "steps": [
+        "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::query_helpers passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-090",
+      "priority": 90,
+      "phase": "phase21-db-listen-notify",
+      "category": "backend",
+      "description": "Open a dedicated tokio-postgres connection (separate from pool) for LISTEN. Expose as JoltDb::listen_connection().",
+      "steps": [
+        "Open a dedicated tokio-postgres connection (separate from pool) for LISTEN. Expose as JoltDb::listen_connection()."
+      ],
+      "verification": [
+        "Dedicated connection opens without error."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-091",
+      "priority": 91,
+      "phase": "phase21-db-listen-notify",
+      "category": "backend",
+      "description": "Implement JoltDb::listen(channel: &str) \u2192 impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications.",
+      "steps": [
+        "Implement JoltDb::listen(channel: &str) \u2192 impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications."
+      ],
+      "verification": [
+        "Unit test: listen(\"test_ch\") yields a Stream."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-092",
+      "priority": 92,
+      "phase": "phase21-db-listen-notify",
+      "category": "backend",
+      "description": "Implement JoltDb::notify(channel: &str, payload: &str): execute NOTIFY <channel>, '<payload>' via pool.",
+      "steps": [
+        "Implement JoltDb::notify(channel: &str, payload: &str): execute NOTIFY <channel>, '<payload>' via pool."
+      ],
+      "verification": [
+        "Unit test: notify(\"test_ch\", \"hello\") succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-093",
+      "priority": 93,
+      "phase": "phase21-db-listen-notify",
+      "category": "backend",
+      "description": "Write LISTEN/NOTIFY integration test: listen on channel, notify with payload, verify notification arrives on stream with correct payload.",
+      "steps": [
+        "Write LISTEN/NOTIFY integration test: listen on channel, notify with payload, verify notification arrives on stream with correct payload."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::listen_notify passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-094",
+      "priority": 94,
+      "phase": "phase22-migration-files",
+      "category": "backend",
+      "description": "Implement read_migration_files(dir: &str) \u2192 Vec<MigrationFile>: read .sql files, extract name and content, sort by filename.",
+      "steps": [
+        "Implement read_migration_files(dir: &str) \u2192 Vec<MigrationFile>: read .sql files, extract name and content, sort by filename."
+      ],
+      "verification": [
+        "Unit test: two files 001_init.sql, 002_users.sql \u2192 sorted [001, 002]."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-095",
+      "priority": 95,
+      "phase": "phase22-migration-files",
+      "category": "backend",
+      "description": "Compute SHA-256 checksum of each migration file content (pre-hashing, store as hex string).",
+      "steps": [
+        "Compute SHA-256 checksum of each migration file content (pre-hashing, store as hex string)."
+      ],
+      "verification": [
+        "Unit test: known content \u2192 SHA-256 matches expected hex."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-096",
+      "priority": 96,
+      "phase": "phase22-migration-files",
+      "category": "backend",
+      "description": "Define MigrationFile struct: name (String), content (String), checksum (String, SHA-256 hex).",
+      "steps": [
+        "Define MigrationFile struct: name (String), content (String), checksum (String, SHA-256 hex)."
+      ],
+      "verification": [
+        "Struct compiles and holds correct fields."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-097",
+      "priority": 97,
+      "phase": "phase22-migration-files",
+      "category": "backend",
+      "description": "Write migration file reading tests: empty directory \u2192 empty vec, missing directory \u2192 error, non-sql files skipped.",
+      "steps": [
+        "Write migration file reading tests: empty directory \u2192 empty vec, missing directory \u2192 error, non-sql files skipped."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::migration_files passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-098",
+      "priority": 98,
+      "phase": "phase23-migration-apply",
+      "category": "backend",
+      "description": "On JoltDb::connect(), auto-create _migrations table if not exists: id SERIAL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW().",
+      "steps": [
+        "On JoltDb::connect(), auto-create _migrations table if not exists: id SERIAL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW()."
+      ],
+      "verification": [
+        "Unit test: fresh DB \u2192 _migrations table created."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-099",
+      "priority": 99,
+      "phase": "phase23-migration-apply",
+      "category": "backend",
+      "description": "Read already-applied migrations from _migrations table, compare checksums to file checksums. Skip migrations with matching checksums.",
+      "steps": [
+        "Read already-applied migrations from _migrations table, compare checksums to file checksums. Skip migrations with matching checksums."
+      ],
+      "verification": [
+        "Unit test: migration already applied \u2192 skipped on next run."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-100",
+      "priority": 100,
+      "phase": "phase23-migration-apply",
+      "category": "backend",
+      "description": "Apply new migrations in filename order within a transaction. After each migration, insert row into _migrations with name + checksum.",
+      "steps": [
+        "Apply new migrations in filename order within a transaction. After each migration, insert row into _migrations with name + checksum."
+      ],
+      "verification": [
+        "Unit test: empty DB with 2 migrations \u2192 both applied in order, both rows in _migrations."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-101",
+      "priority": 101,
+      "phase": "phase23-migration-apply",
+      "category": "backend",
+      "description": "Write migration apply tests: fresh apply, partial apply (some already done), re-run is idempotent.",
+      "steps": [
+        "Write migration apply tests: fresh apply, partial apply (some already done), re-run is idempotent."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::migration_apply passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-102",
+      "priority": 102,
+      "phase": "phase24-migration-safety",
+      "category": "backend",
+      "description": "Detect checksum mismatch: if a previously-applied migration's stored checksum != current file checksum, error with: \"Migration X has been modified since it was applied.\"",
+      "steps": [
+        "Detect checksum mismatch: if a previously-applied migration's stored checksum != current file checksum, error with: \"Migration X has been modified since it was applied.\""
+      ],
+      "verification": [
+        "Unit test: change file content after apply \u2192 error on next run."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-103",
+      "priority": 103,
+      "phase": "phase24-migration-safety",
+      "category": "backend",
+      "description": "Detect rollback: if a migration exists in _migrations table but the file is missing, error with: \"Migration X has been removed. Rollbacks are not supported.\"",
+      "steps": [
+        "Detect rollback: if a migration exists in _migrations table but the file is missing, error with: \"Migration X has been removed. Rollbacks are not supported.\""
+      ],
+      "verification": [
+        "Unit test: remove migration file after apply \u2192 error on next run."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-104",
+      "priority": 104,
+      "phase": "phase24-migration-safety",
+      "category": "backend",
+      "description": "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' \u2192 creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment.",
+      "steps": [
+        "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' \u2192 creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment."
+      ],
+      "verification": [
+        "Manual: cargo run -p jolt-db -- migrate new add_users \u2192 creates migrations/20260510120000_add_users.sql."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-105",
+      "priority": 105,
+      "phase": "phase24-migration-safety",
+      "category": "backend",
+      "description": "Write migration safety tests: checksum mismatch error, rollback detection error, CLI creates correct filename.",
+      "steps": [
+        "Write migration safety tests: checksum mismatch error, rollback detection error, CLI creates correct filename."
+      ],
+      "verification": [
+        "cargo test -p jolt-db -- tests::migration_safety passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-106",
+      "priority": 106,
+      "phase": "phase25-templates",
+      "category": "backend",
+      "description": "Initialize Handlebars registry with template directory. Implement TemplateEngine::new(template_dir).",
+      "steps": [
+        "Initialize Handlebars registry with template directory. Implement TemplateEngine::new(template_dir)."
+      ],
+      "verification": [
+        "Handlebars registry created, .hbs files loaded from directory."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-107",
+      "priority": 107,
+      "phase": "phase25-templates",
+      "category": "backend",
+      "description": "Implement TemplateEngine::render(template: &str, data: &impl Serialize) \u2192 Result<String>.",
+      "steps": [
+        "Implement TemplateEngine::render(template: &str, data: &impl Serialize) \u2192 Result<String>."
+      ],
+      "verification": [
+        "Unit test: render \"hello.hbs\" with {\"name\": \"World\"} \u2192 \"Hello World\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-108",
+      "priority": 108,
+      "phase": "phase25-templates",
+      "category": "backend",
+      "description": "Register custom Handlebars helpers: eq (==), ne (!=), gt (>), lt (<), json (serde_json::to_string).",
+      "steps": [
+        "Register custom Handlebars helpers: eq (==), ne (!=), gt (>), lt (<), json (serde_json::to_string)."
+      ],
+      "verification": [
+        "Unit test: {{#if (eq status \"active\")}}active{{/if}} renders \"active\" when status is \"active\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-109",
+      "priority": 109,
+      "phase": "phase25-templates",
+      "category": "backend",
+      "description": "Write templates tests: variable substitution, partials ({{> partial}}), helpers, HTML escaping ({{value}} vs {{{value}}}), missing variable.",
+      "steps": [
+        "Write templates tests: variable substitution, partials ({{> partial}}), helpers, HTML escaping ({{value}} vs {{{value}}}), missing variable."
+      ],
+      "verification": [
+        "cargo test -p jolt-templates -- tests::templates passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-110",
+      "priority": 110,
+      "phase": "phase26-patchquery-parsing",
+      "category": "backend",
+      "description": "Implement proc_macro_derive for PatchQuery: walk struct fields using syn, collect field name + type.",
+      "steps": [
+        "Implement proc_macro_derive for PatchQuery: walk struct fields using syn, collect field name + type."
+      ],
+      "verification": [
+        "Derive compiles on a struct with Optional<T> fields."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-111",
+      "priority": 111,
+      "phase": "phase26-patchquery-parsing",
+      "category": "backend",
+      "description": "Parse #[patch(table_name)] attribute on the struct to extract the target table name.",
+      "steps": [
+        "Parse #[patch(table_name)] attribute on the struct to extract the target table name."
+      ],
+      "verification": [
+        "Unit test: #[patch(\"users\")] \u2192 table_name = \"users\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-112",
+      "priority": 112,
+      "phase": "phase26-patchquery-parsing",
+      "category": "backend",
+      "description": "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state.",
+      "steps": [
+        "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state."
+      ],
+      "verification": [
+        "Unit test: field typed Optional<String> \u2192 detected as Optional with inner String."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-113",
+      "priority": 113,
+      "phase": "phase26-patchquery-parsing",
+      "category": "backend",
+      "description": "Build an internal representation: Vec<PatchField> with name, column_name, is_optional, inner_type.",
+      "steps": [
+        "Build an internal representation: Vec<PatchField> with name, column_name, is_optional, inner_type."
+      ],
+      "verification": [
+        "Internal representation built correctly from syn types."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-114",
+      "priority": 114,
+      "phase": "phase27-patchquery-codegen",
+      "category": "backend",
+      "description": "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) \u2192 (String, Vec<&dyn ToSql>) that builds SET clause from present fields.",
+      "steps": [
+        "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) \u2192 (String, Vec<&dyn ToSql>) that builds SET clause from present fields."
+      ],
+      "verification": [
+        "Generated method compiles and returns (sql_string, params)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-115",
+      "priority": 115,
+      "phase": "phase27-patchquery-codegen",
+      "category": "backend",
+      "description": "For Optional::Some(val): add \"column = $N\" to SET clause, push val as parameter. For Optional::Null: add \"column = NULL\". For Optional::NotProvided: skip.",
+      "steps": [
+        "For Optional::Some(val): add \"column = $N\" to SET clause, push val as parameter. For Optional::Null: add \"column = NULL\". For Optional::NotProvided: skip."
+      ],
+      "verification": [
+        "Unit test: Some(name) + NotProvided(email) + Null(bio) \u2192 SET name = $1, email = NULL WHERE id = $2."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-116",
+      "priority": 116,
+      "phase": "phase27-patchquery-codegen",
+      "category": "backend",
+      "description": "Generate parameterized query with $1, $2, ... bindings to prevent SQL injection. Column names are compile-time identifiers (no injection risk).",
+      "steps": [
+        "Generate parameterized query with $1, $2, ... bindings to prevent SQL injection. Column names are compile-time identifiers (no injection risk)."
+      ],
+      "verification": [
+        "Unit test: generated SQL uses $N placeholders, never string interpolation for values."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-117",
+      "priority": 117,
+      "phase": "phase27-patchquery-codegen",
+      "category": "backend",
+      "description": "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields \u2192 error or no-op), table_name attribute works.",
+      "steps": [
+        "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields \u2192 error or no-op), table_name attribute works."
+      ],
+      "verification": [
+        "cargo test -p jolt-macros -- tests::patch_query passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-118",
+      "priority": 118,
+      "phase": "phase28-ws-trait",
+      "category": "backend",
+      "description": "Define WebSocketHandler trait: async fn on_open(&mut self, sender: WebSocketSender), async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender), async fn on_close(&mut self), async fn on_ready(&mut self, sender: WebSocketSender), async fn on_shutdown(&mut self). All have default no-op impls.",
+      "steps": [
+        "Define WebSocketHandler trait: async fn on_open(&mut self, sender: WebSocketSender), async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender), async fn on_close(&mut self), async fn on_ready(&mut self, sender: WebSocketSender), async fn on_shutdown(&mut self). All have default no-op impls."
+      ],
+      "verification": [
+        "Trait compiles and can be implemented."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-119",
+      "priority": 119,
+      "phase": "phase28-ws-trait",
+      "category": "backend",
+      "description": "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) \u2192 Result<()>, send_text(text: &str) \u2192 Result<()>, send_json(val: &impl Serialize) \u2192 Result<()>, close().",
+      "steps": [
+        "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) \u2192 Result<()>, send_text(text: &str) \u2192 Result<()>, send_json(val: &impl Serialize) \u2192 Result<()>, close()."
+      ],
+      "verification": [
+        "Unit test: sender.send_text(\"hi\") calls underlying WS send."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-120",
+      "priority": 120,
+      "phase": "phase28-ws-trait",
+      "category": "backend",
+      "description": "Define WsMessage: Text(String), Binary(Vec<u8>), Ping(Vec<u8>), Pong(Vec<u8>), Close(Option<CloseFrame>). Map axum WsMessage variants.",
+      "steps": [
+        "Define WsMessage: Text(String), Binary(Vec<u8>), Ping(Vec<u8>), Pong(Vec<u8>), Close(Option<CloseFrame>). Map axum WsMessage variants."
+      ],
+      "verification": [
+        "Unit test: axum Text message \u2192 WsMessage::Text."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-121",
+      "priority": 121,
+      "phase": "phase28-ws-trait",
+      "category": "backend",
+      "description": "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order.",
+      "steps": [
+        "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::websocket passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-122",
+      "priority": 122,
+      "phase": "phase29-ws-macro",
+      "category": "backend",
+      "description": "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) \u2192 generates an axum WS route with auth guard.",
+      "steps": [
+        "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) \u2192 generates an axum WS route with auth guard."
+      ],
+      "verification": [
+        "Macro compiles and expands to valid code."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-123",
+      "priority": 123,
+      "phase": "phase29-ws-macro",
+      "category": "backend",
+      "description": "auth_fn receives token: &str \u2192 Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available.",
+      "steps": [
+        "auth_fn receives token: &str \u2192 Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available."
+      ],
+      "verification": [
+        "Unit test: valid token \u2192 handler.on_open called. Invalid token \u2192 401."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-124",
+      "priority": 124,
+      "phase": "phase29-ws-macro",
+      "category": "backend",
+      "description": "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle.",
+      "steps": [
+        "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle."
+      ],
+      "verification": [
+        "Generated handler drives on_open \u2192 on_ready \u2192 on_message loop \u2192 on_close \u2192 on_shutdown."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-125",
+      "priority": 125,
+      "phase": "phase29-ws-macro",
+      "category": "backend",
+      "description": "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected.",
+      "steps": [
+        "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected."
+      ],
+      "verification": [
+        "cargo test --test ws_integration passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-126",
+      "priority": 126,
+      "phase": "phase30-pubsub-core",
+      "category": "backend",
+      "description": "Define PubSub struct holding DashMap<String, broadcast::Sender<PubSubMessage>> and a broadcast capacity constant (e.g., 256).",
+      "steps": [
+        "Define PubSub struct holding DashMap<String, broadcast::Sender<PubSubMessage>> and a broadcast capacity constant (e.g., 256)."
+      ],
+      "verification": [
+        "Struct compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-127",
+      "priority": 127,
+      "phase": "phase30-pubsub-core",
+      "category": "backend",
+      "description": "Define PubSubMessage struct: channel (String), payload (String), sender_id (Option<String>).",
+      "steps": [
+        "Define PubSubMessage struct: channel (String), payload (String), sender_id (Option<String>)."
+      ],
+      "verification": [
+        "Struct compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-128",
+      "priority": 128,
+      "phase": "phase30-pubsub-core",
+      "category": "backend",
+      "description": "Implement PubSub::publish(&self, channel: &str, msg: PubSubMessage): get or create channel's sender, broadcast msg. Return number of receivers.",
+      "steps": [
+        "Implement PubSub::publish(&self, channel: &str, msg: PubSubMessage): get or create channel's sender, broadcast msg. Return number of receivers."
+      ],
+      "verification": [
+        "Unit test: 0 subscribers \u2192 publish returns 0. 1 subscriber \u2192 publish returns 1."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-129",
+      "priority": 129,
+      "phase": "phase30-pubsub-core",
+      "category": "backend",
+      "description": "Implement PubSub::subscribe(&self, channel: &str) \u2192 broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver).",
+      "steps": [
+        "Implement PubSub::subscribe(&self, channel: &str) \u2192 broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver)."
+      ],
+      "verification": [
+        "Unit test: subscribe \u2192 get receiver. Publish \u2192 receiver gets message. Drop receiver \u2192 publish to 0."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-130",
+      "priority": 130,
+      "phase": "phase30-pubsub-core",
+      "category": "backend",
+      "description": "Write pubsub unit tests: multi-channel isolation (msg on channel A not received on B), late subscriber (doesn't get old messages), concurrent publishes.",
+      "steps": [
+        "Write pubsub unit tests: multi-channel isolation (msg on channel A not received on B), late subscriber (doesn't get old messages), concurrent publishes."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::pubsub passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-131",
+      "priority": 131,
+      "phase": "phase31-ws-pubsub-integration",
+      "category": "backend",
+      "description": "In WebSocketHandler::on_open, provide ws.subscribe(channel: &str) that calls PubSub::subscribe and spawns a tokio task to forward messages to WS sender.",
+      "steps": [
+        "In WebSocketHandler::on_open, provide ws.subscribe(channel: &str) that calls PubSub::subscribe and spawns a tokio task to forward messages to WS sender."
+      ],
+      "verification": [
+        "Unit test: subscribe to \"chat\" channel, publish to \"chat\" \u2192 WS sender receives message."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-132",
+      "priority": 132,
+      "phase": "phase31-ws-pubsub-integration",
+      "category": "backend",
+      "description": "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue.",
+      "steps": [
+        "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue."
+      ],
+      "verification": [
+        "Unit test: rapid publishes \u2192 all delivered, lagged handled gracefully."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-133",
+      "priority": 133,
+      "phase": "phase31-ws-pubsub-integration",
+      "category": "backend",
+      "description": "On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state).",
+      "steps": [
+        "On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state)."
+      ],
+      "verification": [
+        "Unit test: WS close \u2192 receiver dropped, publish to channel has one fewer receiver."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-134",
+      "priority": 134,
+      "phase": "phase31-ws-pubsub-integration",
+      "category": "backend",
+      "description": "Write WS + pubsub integration test: two WS clients on same channel, client A publishes via ws.publish(), client B receives.",
+      "steps": [
+        "Write WS + pubsub integration test: two WS clients on same channel, client A publishes via ws.publish(), client B receives."
+      ],
+      "verification": [
+        "cargo test --test ws_pubsub_integration passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-135",
+      "priority": 135,
+      "phase": "phase32-sse",
+      "category": "backend",
+      "description": "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) \u2192 impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self).",
+      "steps": [
+        "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) \u2192 impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self)."
+      ],
+      "verification": [
+        "Trait compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-136",
+      "priority": 136,
+      "phase": "phase32-sse",
+      "category": "backend",
+      "description": "Define SseEvent struct: name (Option<String>), data (String), id (Option<String>), retry (Option<u64>). Map to axum::response::sse::Event.",
+      "steps": [
+        "Define SseEvent struct: name (Option<String>), data (String), id (Option<String>), retry (Option<u64>). Map to axum::response::sse::Event."
+      ],
+      "verification": [
+        "Unit test: SseEvent::new(\"message\", \"hello\") \u2192 axum SSE Event."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-137",
+      "priority": 137,
+      "phase": "phase32-sse",
+      "category": "backend",
+      "description": "Implement SSE endpoint adapter: creates axum::response::Sse from handler.on_ready() stream. Handles client disconnect (on_close).",
+      "steps": [
+        "Implement SSE endpoint adapter: creates axum::response::Sse from handler.on_ready() stream. Handles client disconnect (on_close)."
+      ],
+      "verification": [
+        "Integration test: GET /events \u2192 200 with text/event-stream, events streamed."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-138",
+      "priority": 138,
+      "phase": "phase32-sse",
+      "category": "backend",
+      "description": "Implement keep-alive: every 15 seconds, send a comment event (\": keepalive\\n\\n\") to prevent proxy timeouts.",
+      "steps": [
+        "Implement keep-alive: every 15 seconds, send a comment event (\": keepalive\\n\\n\") to prevent proxy timeouts."
+      ],
+      "verification": [
+        "Integration test: stream stays alive >30s with keep-alive comments."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-139",
+      "priority": 139,
+      "phase": "phase33-background-tasks",
+      "category": "backend",
+      "description": "Define Task trait: fn name(&self) -> &str, fn interval(&self) -> Duration, async fn run(&mut self) -> Result<(), Error>.",
+      "steps": [
+        "Define Task trait: fn name(&self) -> &str, fn interval(&self) -> Duration, async fn run(&mut self) -> Result<(), Error>."
+      ],
+      "verification": [
+        "Trait compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-140",
+      "priority": 140,
+      "phase": "phase33-background-tasks",
+      "category": "backend",
+      "description": "Define TaskScheduler struct holding Vec<Box<dyn Task + Send>>. Implement register(task) and start(self).",
+      "steps": [
+        "Define TaskScheduler struct holding Vec<Box<dyn Task + Send>>. Implement register(task) and start(self)."
+      ],
+      "verification": [
+        "Struct compiles, register adds task."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-141",
+      "priority": 141,
+      "phase": "phase33-background-tasks",
+      "category": "backend",
+      "description": "TaskScheduler::start(): for each registered task, spawn a tokio task with loop { task.run().await; sleep(task.interval()).await; }.",
+      "steps": [
+        "TaskScheduler::start(): for each registered task, spawn a tokio task with loop { task.run().await; sleep(task.interval()).await; }."
+      ],
+      "verification": [
+        "Unit test: register task with 100ms interval \u2192 run() called multiple times within 500ms."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-142",
+      "priority": 142,
+      "phase": "phase33-background-tasks",
+      "category": "backend",
+      "description": "Implement arena-based task storage using slab::Slab so tasks can hold indices referencing other tasks.",
+      "steps": [
+        "Implement arena-based task storage using slab::Slab so tasks can hold indices referencing other tasks."
+      ],
+      "verification": [
+        "Tasks stored in slab, can retrieve by index."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-143",
+      "priority": 143,
+      "phase": "phase33-background-tasks",
+      "category": "backend",
+      "description": "Write task unit tests: interval timing (within tolerance), task error doesn't crash loop, multiple tasks run concurrently.",
+      "steps": [
+        "Write task unit tests: interval timing (within tolerance), task error doesn't crash loop, multiple tasks run concurrently."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::tasks passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-144",
+      "priority": 144,
+      "phase": "phase34-task-retry-shutdown",
+      "category": "backend",
+      "description": "Implement retry logic: on task.run() error, log warning, wait backoff_duration (exponential: 1s, 2s, 4s, max 60s), retry. Reset backoff on success.",
+      "steps": [
+        "Implement retry logic: on task.run() error, log warning, wait backoff_duration (exponential: 1s, 2s, 4s, max 60s), retry. Reset backoff on success."
+      ],
+      "verification": [
+        "Unit test: task fails 3 times, succeeds 4th \u2192 backoff increases then resets."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-145",
+      "priority": 145,
+      "phase": "phase34-task-retry-shutdown",
+      "category": "backend",
+      "description": "Implement graceful shutdown: on SIGTERM (tokio::signal::ctrl_c), set shutdown flag. Each task loop checks flag before next iteration.",
+      "steps": [
+        "Implement graceful shutdown: on SIGTERM (tokio::signal::ctrl_c), set shutdown flag. Each task loop checks flag before next iteration."
+      ],
+      "verification": [
+        "Unit test: send ctrl_c \u2192 task loop exits cleanly."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-146",
+      "priority": 146,
+      "phase": "phase34-task-retry-shutdown",
+      "category": "backend",
+      "description": "TaskScheduler::shutdown(): set flag, wait for all task join handles (with timeout). Log any tasks that didn't exit in time.",
+      "steps": [
+        "TaskScheduler::shutdown(): set flag, wait for all task join handles (with timeout). Log any tasks that didn't exit in time."
+      ],
+      "verification": [
+        "Unit test: shutdown \u2192 all tasks stop within timeout."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-147",
+      "priority": 147,
+      "phase": "phase34-task-retry-shutdown",
+      "category": "backend",
+      "description": "Write retry + shutdown tests: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks.",
+      "steps": [
+        "Write retry + shutdown tests: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks."
+      ],
+      "verification": [
+        "cargo test -p jolt-core -- tests::task_retry passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-148",
+      "priority": 148,
+      "phase": "phase35-jwt-utils",
+      "category": "backend",
+      "description": "Define JwtClaims struct: sub (Option<String>), exp (Option<u64>), iat (Option<u64>), nbf (Option<u64>), iss (Option<String>), aud (Option<String>), custom (HashMap<String, serde_json::Value>). Derive Serialize, Deserialize.",
+      "steps": [
+        "Define JwtClaims struct: sub (Option<String>), exp (Option<u64>), iat (Option<u64>), nbf (Option<u64>), iss (Option<String>), aud (Option<String>), custom (HashMap<String, serde_json::Value>). Derive Serialize, Deserialize."
+      ],
+      "verification": [
+        "Struct compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-149",
+      "priority": 149,
+      "phase": "phase35-jwt-utils",
+      "category": "backend",
+      "description": "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) \u2192 Result<String>. Algorithm enum: HS256, HS384, HS512.",
+      "steps": [
+        "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) \u2192 Result<String>. Algorithm enum: HS256, HS384, HS512."
+      ],
+      "verification": [
+        "Unit test: encode produces valid JWT string with three segments."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-150",
+      "priority": 150,
+      "phase": "phase35-jwt-utils",
+      "category": "backend",
+      "description": "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) \u2192 Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation.",
+      "steps": [
+        "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) \u2192 Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation."
+      ],
+      "verification": [
+        "Unit test: round-trip encode\u2192decode preserves claims. Expired token \u2192 decode error."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-151",
+      "priority": 151,
+      "phase": "phase35-jwt-utils",
+      "category": "backend",
+      "description": "Write JWT tests: all three algorithms, custom claims, expired token, not-before token, wrong audience, wrong issuer, malformed token, wrong secret.",
+      "steps": [
+        "Write JWT tests: all three algorithms, custom claims, expired token, not-before token, wrong audience, wrong issuer, malformed token, wrong secret."
+      ],
+      "verification": [
+        "cargo test -p jolt-utils -- tests::jwt passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-152",
+      "priority": 152,
+      "phase": "phase36-password-uuid",
+      "category": "backend",
+      "description": "Implement Password::hash(plaintext: &str) \u2192 Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex).",
+      "steps": [
+        "Implement Password::hash(plaintext: &str) \u2192 Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex)."
+      ],
+      "verification": [
+        "Unit test: hash returns non-empty hash and salt."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-153",
+      "priority": 153,
+      "phase": "phase36-password-uuid",
+      "category": "backend",
+      "description": "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) \u2192 Result<bool>: recompute hash with same salt, compare.",
+      "steps": [
+        "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) \u2192 Result<bool>: recompute hash with same salt, compare."
+      ],
+      "verification": [
+        "Unit test: verify correct password \u2192 true, wrong password \u2192 false."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-154",
+      "priority": 154,
+      "phase": "phase36-password-uuid",
+      "category": "backend",
+      "description": "Implement uuid_v4() \u2192 String and uuid_v7() \u2192 String using uuid crate.",
+      "steps": [
+        "Implement uuid_v4() \u2192 String and uuid_v7() \u2192 String using uuid crate."
+      ],
+      "verification": [
+        "Unit test: uuid_v4() is valid UUID v4 format, uuid_v7() is valid UUID v7."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-155",
+      "priority": 155,
+      "phase": "phase36-password-uuid",
+      "category": "backend",
+      "description": "Write password + UUID tests: hash determinism (different salts \u2192 different hashes), verify edge cases, UUID uniqueness within 1000 generations.",
+      "steps": [
+        "Write password + UUID tests: hash determinism (different salts \u2192 different hashes), verify edge cases, UUID uniqueness within 1000 generations."
+      ],
+      "verification": [
+        "cargo test -p jolt-utils -- tests::password_uuid passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-156",
+      "priority": 156,
+      "phase": "phase37-datetime-email-mime",
+      "category": "backend",
+      "description": "Implement parse_rfc3339(s: &str) \u2192 Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) \u2192 String.",
+      "steps": [
+        "Implement parse_rfc3339(s: &str) \u2192 Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) \u2192 String."
+      ],
+      "verification": [
+        "Unit test: round-trip parse\u2192format preserves timestamp."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-157",
+      "priority": 157,
+      "phase": "phase37-datetime-email-mime",
+      "category": "backend",
+      "description": "Implement is_valid_email(s: &str) \u2192 bool: contains @, non-empty local part, non-empty domain, domain contains dot.",
+      "steps": [
+        "Implement is_valid_email(s: &str) \u2192 bool: contains @, non-empty local part, non-empty domain, domain contains dot."
+      ],
+      "verification": [
+        "Unit test: valid emails \u2192 true, invalid (no @, empty local, no dot) \u2192 false."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-158",
+      "priority": 158,
+      "phase": "phase37-datetime-email-mime",
+      "category": "backend",
+      "description": "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html \u2192 text/html, .css \u2192 text/css, .js \u2192 application/javascript, .json \u2192 application/json, .png \u2192 image/png, etc.).",
+      "steps": [
+        "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html \u2192 text/html, .css \u2192 text/css, .js \u2192 application/javascript, .json \u2192 application/json, .png \u2192 image/png, etc.)."
+      ],
+      "verification": [
+        "Unit test: MIME_TABLE[\".html\"] == \"text/html\"."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-159",
+      "priority": 159,
+      "phase": "phase37-datetime-email-mime",
+      "category": "backend",
+      "description": "Implement content_type_for_path(path: &str) \u2192 Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions.",
+      "steps": [
+        "Implement content_type_for_path(path: &str) \u2192 Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions."
+      ],
+      "verification": [
+        "Unit test: content_type_for_path(\"style.css\") == Some(\"text/css\"), content_type_for_path(\"file.xyz\") == None."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-160",
+      "priority": 160,
+      "phase": "phase38-json-optional-types",
+      "category": "backend",
+      "description": "Define Json<T: Deserialize + Serialize> newtype with Deref<Target=T>, serde transparent (deserialize_as/serialize_as).",
+      "steps": [
+        "Define Json<T: Deserialize + Serialize> newtype with Deref<Target=T>, serde transparent (deserialize_as/serialize_as)."
+      ],
+      "verification": [
+        "Unit test: serde_json::from_str::<Json<User>> works same as User."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-161",
+      "priority": 161,
+      "phase": "phase38-json-optional-types",
+      "category": "backend",
+      "description": "Define JsonArray<T: Deserialize + Serialize> newtype wrapping Vec<T> with Deref<Target=Vec<T>>, serde transparent.",
+      "steps": [
+        "Define JsonArray<T: Deserialize + Serialize> newtype wrapping Vec<T> with Deref<Target=Vec<T>>, serde transparent."
+      ],
+      "verification": [
+        "Unit test: JsonArray<i32> deserializes from JSON array."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-162",
+      "priority": 162,
+      "phase": "phase38-json-optional-types",
+      "category": "backend",
+      "description": "Define Optional<T> as enum: Some(T), Null, NotProvided.",
+      "steps": [
+        "Define Optional<T> as enum: Some(T), Null, NotProvided."
+      ],
+      "verification": [
+        "Unit test: construct all three variants."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-163",
+      "priority": 163,
+      "phase": "phase38-json-optional-types",
+      "category": "backend",
+      "description": "Implement Serialize for Optional<T> where T: Serialize: Some(v) \u2192 serialize v, Null \u2192 serialize null, NotProvided \u2192 serialize nothing (skip field).",
+      "steps": [
+        "Implement Serialize for Optional<T> where T: Serialize: Some(v) \u2192 serialize v, Null \u2192 serialize null, NotProvided \u2192 serialize nothing (skip field)."
+      ],
+      "verification": [
+        "Unit test: serialize struct with Optional fields \u2192 JSON output correct."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-164",
+      "priority": 164,
+      "phase": "phase38-json-optional-types",
+      "category": "backend",
+      "description": "Implement Deserialize for Optional<T> where T: Deserialize: present non-null \u2192 Some(v), present null \u2192 Null, absent \u2192 NotProvided.",
+      "steps": [
+        "Implement Deserialize for Optional<T> where T: Deserialize: present non-null \u2192 Some(v), present null \u2192 Null, absent \u2192 NotProvided."
+      ],
+      "verification": [
+        "Unit test: JSON {\"a\": 1, \"b\": null} (no \"c\") \u2192 a=Some(1), b=Null, c=NotProvided."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-165",
+      "priority": 165,
+      "phase": "phase39-tsexport-basic",
+      "category": "backend",
+      "description": "Implement proc_macro_derive for TsExport: walk struct fields, collect field name + Rust type.",
+      "steps": [
+        "Implement proc_macro_derive for TsExport: walk struct fields, collect field name + Rust type."
+      ],
+      "verification": [
+        "Derive compiles on a simple struct."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-166",
+      "priority": 166,
+      "phase": "phase39-tsexport-basic",
+      "category": "backend",
+      "description": "Map Rust types to TypeScript: String \u2192 string, i32/i64/u32/u64/f32/f64/usize \u2192 number, bool \u2192 boolean, Vec<T> \u2192 T[].",
+      "steps": [
+        "Map Rust types to TypeScript: String \u2192 string, i32/i64/u32/u64/f32/f64/usize \u2192 number, bool \u2192 boolean, Vec<T> \u2192 T[]."
+      ],
+      "verification": [
+        "Unit test: struct with all basic types \u2192 correct TS interface string."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-167",
+      "priority": 167,
+      "phase": "phase39-tsexport-basic",
+      "category": "backend",
+      "description": "Map generics: Option<T> \u2192 T | null, Json<T> \u2192 T, JsonArray<T> \u2192 T[]. Handle nested generics (Option<Vec<String>> \u2192 string[] | null).",
+      "steps": [
+        "Map generics: Option<T> \u2192 T | null, Json<T> \u2192 T, JsonArray<T> \u2192 T[]. Handle nested generics (Option<Vec<String>> \u2192 string[] | null)."
+      ],
+      "verification": [
+        "Unit test: Option<Vec<i32>> \u2192 number[] | null."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-168",
+      "priority": 168,
+      "phase": "phase39-tsexport-basic",
+      "category": "backend",
+      "description": "Generate TS definition as interface: export interface StructName { field: type; } with sorted fields.",
+      "steps": [
+        "Generate TS definition as interface: export interface StructName { field: type; } with sorted fields."
+      ],
+      "verification": [
+        "Unit test: full struct \u2192 complete TS interface definition string."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-169",
+      "priority": 169,
+      "phase": "phase40-tsexport-attributes",
+      "category": "backend",
+      "description": "Support #[ts(rename = \"newName\")] on fields: use newName as the TS property name instead of Rust field name.",
+      "steps": [
+        "Support #[ts(rename = \"newName\")] on fields: use newName as the TS property name instead of Rust field name."
+      ],
+      "verification": [
+        "Unit test: #[ts(rename = \"userId\")] field id \u2192 TS: userId: number."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-170",
+      "priority": 170,
+      "phase": "phase40-tsexport-attributes",
+      "category": "backend",
+      "description": "Support #[ts(flatten)] on fields: inline the field's TS interface properties into the parent interface instead of nesting.",
+      "steps": [
+        "Support #[ts(flatten)] on fields: inline the field's TS interface properties into the parent interface instead of nesting."
+      ],
+      "verification": [
+        "Unit test: #[ts(flatten)] address: Address \u2192 Address fields appear directly in parent interface."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-171",
+      "priority": 171,
+      "phase": "phase40-tsexport-attributes",
+      "category": "backend",
+      "description": "Convert /// doc comments on fields to JSDoc /** ... */ comments above TS properties.",
+      "steps": [
+        "Convert /// doc comments on fields to JSDoc /** ... */ comments above TS properties."
+      ],
+      "verification": [
+        "Unit test: /// The user's name \u2192 /** The user's name */ name: string."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-172",
+      "priority": 172,
+      "phase": "phase40-tsexport-attributes",
+      "category": "backend",
+      "description": "Write attribute tests: rename, flatten, doc comments, combination of attributes on same field.",
+      "steps": [
+        "Write attribute tests: rename, flatten, doc comments, combination of attributes on same field."
+      ],
+      "verification": [
+        "cargo test -p jolt-macros -- tests::tsexport_attributes passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-173",
+      "priority": 173,
+      "phase": "phase41-tsexport-enums",
+      "category": "backend",
+      "description": "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } \u2192 type Status = \"Active\" | \"Inactive\".",
+      "steps": [
+        "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } \u2192 type Status = \"Active\" | \"Inactive\"."
+      ],
+      "verification": [
+        "Unit test: simple enum \u2192 TS string union."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-174",
+      "priority": 174,
+      "phase": "phase41-tsexport-enums",
+      "category": "backend",
+      "description": "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } \u2192 type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }.",
+      "steps": [
+        "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } \u2192 type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }."
+      ],
+      "verification": [
+        "Unit test: union enum with data \u2192 TS tagged union."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-175",
+      "priority": 175,
+      "phase": "phase41-tsexport-enums",
+      "category": "backend",
+      "description": "Implement ts_export function attribute: #[ts_export] on a function returns its return type's TS definition. Aggregate via inventory.",
+      "steps": [
+        "Implement ts_export function attribute: #[ts_export] on a function returns its return type's TS definition. Aggregate via inventory."
+      ],
+      "verification": [
+        "Unit test: #[ts_export] fn \u2192 registers return type for types.d.ts."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-176",
+      "priority": 176,
+      "phase": "phase41-tsexport-enums",
+      "category": "backend",
+      "description": "Write enum + advanced tests: simple enum, data variants, flatten in enum variants, Option<EnumName> in struct.",
+      "steps": [
+        "Write enum + advanced tests: simple enum, data variants, flatten in enum variants, Option<EnumName> in struct."
+      ],
+      "verification": [
+        "cargo test -p jolt-macros -- tests::tsexport_enums passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-177",
+      "priority": 177,
+      "phase": "phase42-types-dts-cli",
+      "category": "backend",
+      "description": "Create jolt-types binary crate at workspace root (binary, not lib). Depend on jolt-macros, jolt-utils, inventory.",
+      "steps": [
+        "Create jolt-types binary crate at workspace root (binary, not lib). Depend on jolt-macros, jolt-utils, inventory."
+      ],
+      "verification": [
+        "cargo run -p jolt-types prints usage."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-178",
+      "priority": 178,
+      "phase": "phase42-types-dts-cli",
+      "category": "backend",
+      "description": "Use inventory crate: each #[derive(TsExport)] submits a TsTypeEntry { name, definition }. On binary start, iterate inventory to collect all registered types.",
+      "steps": [
+        "Use inventory crate: each #[derive(TsExport)] submits a TsTypeEntry { name, definition }. On binary start, iterate inventory to collect all registered types."
+      ],
+      "verification": [
+        "After linking with crates that use TsExport, inventory::iter::<TsTypeEntry> yields entries."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-179",
+      "priority": 179,
+      "phase": "phase42-types-dts-cli",
+      "category": "backend",
+      "description": "Write types.d.ts generator: sort types by name, emit header comment (\"// Auto-generated by jolt-types. DO NOT EDIT.\"), emit each type definition separated by newlines.",
+      "steps": [
+        "Write types.d.ts generator: sort types by name, emit header comment (\"// Auto-generated by jolt-types. DO NOT EDIT.\"), emit each type definition separated by newlines."
+      ],
+      "verification": [
+        "Output types.d.ts is syntactically valid TypeScript."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-180",
+      "priority": 180,
+      "phase": "phase42-types-dts-cli",
+      "category": "backend",
+      "description": "Verify with tsc: run cargo run -p jolt-types, then tsc --noEmit types.d.ts. Should pass with zero errors.",
+      "steps": [
+        "Verify with tsc: run cargo run -p jolt-types, then tsc --noEmit types.d.ts. Should pass with zero errors."
+      ],
+      "verification": [
+        "tsc --noEmit types.d.ts exits 0."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-181",
+      "priority": 181,
+      "phase": "phase43-tls",
+      "category": "backend",
+      "description": "Add axum-server and rustls deps to jolt-core (feature-gated: 'tls'). Define TlsConfig struct: cert_path, key_path, client_ca_path (optional).",
+      "steps": [
+        "Add axum-server and rustls deps to jolt-core (feature-gated: 'tls'). Define TlsConfig struct: cert_path, key_path, client_ca_path (optional)."
+      ],
+      "verification": [
+        "Struct compiles behind tls feature."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-182",
+      "priority": 182,
+      "phase": "phase43-tls",
+      "category": "backend",
+      "description": "Implement JoltServer::tls(config: TlsConfig) \u2192 Self: loads cert + key, creates rustls::ServerConfig, stores in server builder.",
+      "steps": [
+        "Implement JoltServer::tls(config: TlsConfig) \u2192 Self: loads cert + key, creates rustls::ServerConfig, stores in server builder."
+      ],
+      "verification": [
+        "Unit test: valid cert + key paths \u2192 config loaded. Invalid paths \u2192 error."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-183",
+      "priority": 183,
+      "phase": "phase43-tls",
+      "category": "backend",
+      "description": "Implement SNI support: accept multiple (hostname, cert, key) tuples. Resolve based on client SNI extension.",
+      "steps": [
+        "Implement SNI support: accept multiple (hostname, cert, key) tuples. Resolve based on client SNI extension."
+      ],
+      "verification": [
+        "Manual: server with two certs, connect to each hostname \u2192 correct cert served."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-184",
+      "priority": 184,
+      "phase": "phase43-tls",
+      "category": "backend",
+      "description": "Implement client certificate trust list (mTLS): if client_ca_path is set, require client cert signed by that CA. On invalid cert, reject handshake.",
+      "steps": [
+        "Implement client certificate trust list (mTLS): if client_ca_path is set, require client cert signed by that CA. On invalid cert, reject handshake."
+      ],
+      "verification": [
+        "Manual: curl --cert client.pem \u2192 200. curl without cert \u2192 TLS error."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-185",
+      "priority": 185,
+      "phase": "phase44-file-serving",
+      "category": "backend",
+      "description": "Integrate tower_http::services::ServeDir as the final fallback route in the axum Router (after all endpoint routes).",
+      "steps": [
+        "Integrate tower_http::services::ServeDir as the final fallback route in the axum Router (after all endpoint routes)."
+      ],
+      "verification": [
+        "Request to /static/file.js \u2192 file served from static/ directory."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-186",
+      "priority": 186,
+      "phase": "phase44-file-serving",
+      "category": "backend",
+      "description": "Configure gzip compression via tower_http::compression::CompressionLayer for content types: text/*, application/javascript, application/json, text/css.",
+      "steps": [
+        "Configure gzip compression via tower_http::compression::CompressionLayer for content types: text/*, application/javascript, application/json, text/css."
+      ],
+      "verification": [
+        "Manual: curl -H 'Accept-Encoding: gzip' /static/file.html \u2192 response is gzip-compressed."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-187",
+      "priority": 187,
+      "phase": "phase44-file-serving",
+      "category": "backend",
+      "description": "Support Range requests: request with Range: bytes=0-1023 header \u2192 206 Partial Content with correct Content-Range. Handle multi-range requests.",
+      "steps": [
+        "Support Range requests: request with Range: bytes=0-1023 header \u2192 206 Partial Content with correct Content-Range. Handle multi-range requests."
+      ],
+      "verification": [
+        "Unit test: Range: bytes=0-99 \u2192 206 with Content-Range: bytes 0-99/<total>."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-188",
+      "priority": 188,
+      "phase": "phase44-file-serving",
+      "category": "backend",
+      "description": "Set Cache-Control headers: static files get max-age=31536000 (1 year) with immutable flag if versioned (has hash in filename). Non-versioned get max-age=3600.",
+      "steps": [
+        "Set Cache-Control headers: static files get max-age=31536000 (1 year) with immutable flag if versioned (has hash in filename). Non-versioned get max-age=3600."
+      ],
+      "verification": [
+        "Manual: curl -I /static/app.abc123.js \u2192 Cache-Control: public, max-age=31536000, immutable."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-189",
+      "priority": 189,
+      "phase": "phase45-cookies-redirects",
+      "category": "backend",
+      "description": "Implement Cookie struct: name (String), value (String), domain (Option<String>), path (Option<String>), max_age (Option<i64>), secure (bool), http_only (bool), same_site (Option<SameSite>).",
+      "steps": [
+        "Implement Cookie struct: name (String), value (String), domain (Option<String>), path (Option<String>), max_age (Option<i64>), secure (bool), http_only (bool), same_site (Option<SameSite>)."
+      ],
+      "verification": [
+        "Struct compiles with all fields."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-190",
+      "priority": 190,
+      "phase": "phase45-cookies-redirects",
+      "category": "backend",
+      "description": "Implement parse_cookies(header_value: &str) \u2192 Vec<Cookie>: parse Cookie request header.",
+      "steps": [
+        "Implement parse_cookies(header_value: &str) \u2192 Vec<Cookie>: parse Cookie request header."
+      ],
+      "verification": [
+        "Unit test: \"session=abc; theme=dark\" \u2192 two cookies extracted."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-191",
+      "priority": 191,
+      "phase": "phase45-cookies-redirects",
+      "category": "backend",
+      "description": "Implement set_cookie(cookie: &Cookie) \u2192 axum http HeaderValue for Set-Cookie response header.",
+      "steps": [
+        "Implement set_cookie(cookie: &Cookie) \u2192 axum http HeaderValue for Set-Cookie response header."
+      ],
+      "verification": [
+        "Unit test: set_cookie builds correct Set-Cookie string with all attributes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-192",
+      "priority": 192,
+      "phase": "phase45-cookies-redirects",
+      "category": "backend",
+      "description": "Implement Redirect::to(url: &str) \u2192 Response (302 Found), Redirect::permanent(url: &str) \u2192 Response (301 Moved Permanently), Redirect::back(req: &Request) \u2192 Response (302 to Referer or / fallback).",
+      "steps": [
+        "Implement Redirect::to(url: &str) \u2192 Response (302 Found), Redirect::permanent(url: &str) \u2192 Response (301 Moved Permanently), Redirect::back(req: &Request) \u2192 Response (302 to Referer or / fallback)."
+      ],
+      "verification": [
+        "Unit test: Redirect::to(\"/login\") \u2192 302 response with Location: /login header."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-193",
+      "priority": 193,
+      "phase": "phase46-error-handling",
+      "category": "backend",
+      "description": "Define JoltError trait: fn status_code(&self) -> StatusCode, fn message(&self) -> String, fn to_response(&self) -> Response<serde_json::Value>. Blanket impl for types implementing Display.",
+      "steps": [
+        "Define JoltError trait: fn status_code(&self) -> StatusCode, fn message(&self) -> String, fn to_response(&self) -> Response<serde_json::Value>. Blanket impl for types implementing Display."
+      ],
+      "verification": [
+        "Trait compiles."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-194",
+      "priority": 194,
+      "phase": "phase46-error-handling",
+      "category": "backend",
+      "description": "Implement JoltError for common types: serde_json::Error \u2192 400, sqlx::Error \u2192 500, std::io::Error \u2192 500, jsonwebtoken::errors::Error \u2192 401.",
+      "steps": [
+        "Implement JoltError for common types: serde_json::Error \u2192 400, sqlx::Error \u2192 500, std::io::Error \u2192 500, jsonwebtoken::errors::Error \u2192 401."
+      ],
+      "verification": [
+        "Unit test: each error type maps to correct status code."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-195",
+      "priority": 195,
+      "phase": "phase46-error-handling",
+      "category": "backend",
+      "description": "Implement endpoint-level error handler: .or_else(|e| e.to_response()) on handler result. Errors become JSON { error: message } with correct status.",
+      "steps": [
+        "Implement endpoint-level error handler: .or_else(|e| e.to_response()) on handler result. Errors become JSON { error: message } with correct status."
+      ],
+      "verification": [
+        "Unit test: endpoint returns Err(MyError) \u2192 response body {\"error\": \"...\"} with status 400."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-196",
+      "priority": 196,
+      "phase": "phase46-error-handling",
+      "category": "backend",
+      "description": "Implement global fallback: tower Layer that catches panics in handlers, logs error, returns 500 {\"error\": \"Internal server error\"} without leaking details.",
+      "steps": [
+        "Implement global fallback: tower Layer that catches panics in handlers, logs error, returns 500 {\"error\": \"Internal server error\"} without leaking details."
+      ],
+      "verification": [
+        "Unit test: handler panics \u2192 500 response, no stack trace in body."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-197",
+      "priority": 197,
+      "phase": "phase47-example-crate-setup",
+      "category": "backend",
+      "description": "Create examples/basic/ directory with Cargo.toml depending on jolt-core, jolt-db, jolt-macros, jolt-utils, jolt-templates via path deps.",
+      "steps": [
+        "Create examples/basic/ directory with Cargo.toml depending on jolt-core, jolt-db, jolt-macros, jolt-utils, jolt-templates via path deps."
+      ],
+      "verification": [
+        "cargo check -p examples-basic succeeds."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-198",
+      "priority": 198,
+      "phase": "phase47-example-crate-setup",
+      "category": "backend",
+      "description": "Create main.rs: initialize JoltServer, connect to DB, register endpoints, start server. Skeleton that compiles.",
+      "steps": [
+        "Create main.rs: initialize JoltServer, connect to DB, register endpoints, start server. Skeleton that compiles."
+      ],
+      "verification": [
+        "cargo run -p examples-basic starts (empty server, health-check only)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-199",
+      "priority": 199,
+      "phase": "phase48-example-get-endpoints",
+      "category": "backend",
+      "description": "Define User struct: id (i64), name (String), email (String), created_at (DateTime<Utc>). Derive Serialize, Deserialize, sqlx::FromRow, TsExport.",
+      "steps": [
+        "Define User struct: id (i64), name (String), email (String), created_at (DateTime<Utc>). Derive Serialize, Deserialize, sqlx::FromRow, TsExport."
+      ],
+      "verification": [
+        "Struct compiles with all derives."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-200",
+      "priority": 200,
+      "phase": "phase48-example-get-endpoints",
+      "category": "backend",
+      "description": "Implement GET /users handler: query all users from DB, return as JSON array. Use #[endpoint(\"/users\")], #[get], #[derive(AutoMiddleware)].",
+      "steps": [
+        "Implement GET /users handler: query all users from DB, return as JSON array. Use #[endpoint(\"/users\")], #[get], #[derive(AutoMiddleware)]."
+      ],
+      "verification": [
+        "curl GET /users \u2192 200 with user list JSON."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-201",
+      "priority": 201,
+      "phase": "phase48-example-get-endpoints",
+      "category": "backend",
+      "description": "Implement GET /users/:id handler: extract path param id, query single user by id, return 404 if not found.",
+      "steps": [
+        "Implement GET /users/:id handler: extract path param id, query single user by id, return 404 if not found."
+      ],
+      "verification": [
+        "curl GET /users/1 \u2192 200 with user JSON. curl GET /users/999 \u2192 404."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-202",
+      "priority": 202,
+      "phase": "phase49-example-post-patch-delete",
+      "category": "backend",
+      "description": "Implement POST /users handler: parse CreateUserRequest body (name, email), insert into DB, return created User with 201.",
+      "steps": [
+        "Implement POST /users handler: parse CreateUserRequest body (name, email), insert into DB, return created User with 201."
+      ],
+      "verification": [
+        "curl POST /users -d '{\"name\":\"Alice\",\"email\":\"a@b.com\"}' \u2192 201 with created user."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-203",
+      "priority": 203,
+      "phase": "phase49-example-post-patch-delete",
+      "category": "backend",
+      "description": "Implement PATCH /users/:id handler: use #[derive(PatchQuery)] on UpdateUserRequest, apply partial update to DB.",
+      "steps": [
+        "Implement PATCH /users/:id handler: use #[derive(PatchQuery)] on UpdateUserRequest, apply partial update to DB."
+      ],
+      "verification": [
+        "curl PATCH /users/1 -d '{\"name\":\"Bob\"}' \u2192 200 with updated user, email unchanged."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-204",
+      "priority": 204,
+      "phase": "phase49-example-post-patch-delete",
+      "category": "backend",
+      "description": "Implement DELETE /users/:id handler: delete user from DB, return 204 NoContent. Return 404 if user doesn't exist.",
+      "steps": [
+        "Implement DELETE /users/:id handler: delete user from DB, return 204 NoContent. Return 404 if user doesn't exist."
+      ],
+      "verification": [
+        "curl DELETE /users/1 \u2192 204. curl DELETE /users/1 again \u2192 404."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-205",
+      "priority": 205,
+      "phase": "phase50-example-ws-chat",
+      "category": "backend",
+      "description": "Define ChatHandler struct implementing WebSocketHandler: on_open \u2192 subscribe to \"chat\" channel. on_message \u2192 publish message to \"chat\" channel.",
+      "steps": [
+        "Define ChatHandler struct implementing WebSocketHandler: on_open \u2192 subscribe to \"chat\" channel. on_message \u2192 publish message to \"chat\" channel."
+      ],
+      "verification": [
+        "Handler compiles and implements trait."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-206",
+      "priority": 206,
+      "phase": "phase50-example-ws-chat",
+      "category": "backend",
+      "description": "Register with ws! macro: ws!(\"/ws/chat\", ChatHandler, subprotocol=\"jolt-jwt\", auth_fn = my_auth_fn). Wire into JoltServer.",
+      "steps": [
+        "Register with ws! macro: ws!(\"/ws/chat\", ChatHandler, subprotocol=\"jolt-jwt\", auth_fn = my_auth_fn). Wire into JoltServer."
+      ],
+      "verification": [
+        "ws! macro expands, endpoint registered."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-207",
+      "priority": 207,
+      "phase": "phase50-example-ws-chat",
+      "category": "backend",
+      "description": "Manual verification: start server, connect two WS clients with valid JWT, send message from client A \u2192 client B receives.",
+      "steps": [
+        "Manual verification: start server, connect two WS clients with valid JWT, send message from client A \u2192 client B receives."
+      ],
+      "verification": [
+        "Two WS clients \u2192 messages broadcast correctly."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-208",
+      "priority": 208,
+      "phase": "phase51-example-background-task",
+      "category": "backend",
+      "description": "Define CleanupTask struct implementing Task trait: every 60s, delete expired sessions from DB. Log count of deleted rows.",
+      "steps": [
+        "Define CleanupTask struct implementing Task trait: every 60s, delete expired sessions from DB. Log count of deleted rows."
+      ],
+      "verification": [
+        "Task struct compiles and implements Task."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-209",
+      "priority": 209,
+      "phase": "phase51-example-background-task",
+      "category": "backend",
+      "description": "Register CleanupTask with TaskScheduler in main.rs. Verify task is registered and will run on startup.",
+      "steps": [
+        "Register CleanupTask with TaskScheduler in main.rs. Verify task is registered and will run on startup."
+      ],
+      "verification": [
+        "Server logs show periodic cleanup task execution."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-210",
+      "priority": 210,
+      "phase": "phase52-example-sse",
+      "category": "backend",
+      "description": "Define UserEventsHandler implementing SseHandler: on_ready yields events from a broadcast channel. Each event has name=\"user_created\" or \"user_updated\" and JSON user data.",
+      "steps": [
+        "Define UserEventsHandler implementing SseHandler: on_ready yields events from a broadcast channel. Each event has name=\"user_created\" or \"user_updated\" and JSON user data."
+      ],
+      "verification": [
+        "Handler compiles and implements SseHandler."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-211",
+      "priority": 211,
+      "phase": "phase52-example-sse",
+      "category": "backend",
+      "description": "Wire DB LISTEN/NOTIFY: on user create/update/delete, send NOTIFY. SSE handler listens and forwards to event stream.",
+      "steps": [
+        "Wire DB LISTEN/NOTIFY: on user create/update/delete, send NOTIFY. SSE handler listens and forwards to event stream."
+      ],
+      "verification": [
+        "Manual: POST /users \u2192 SSE stream receives user_created event with correct data."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-212",
+      "priority": 212,
+      "phase": "phase53-example-migrations",
+      "category": "backend",
+      "description": "Create migration file 001_create_users.sql: CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ DEFAULT NOW()).",
+      "steps": [
+        "Create migration file 001_create_users.sql: CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ DEFAULT NOW())."
+      ],
+      "verification": [
+        "Migration file created at examples/basic/migrations/001_create_users.sql."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-213",
+      "priority": 213,
+      "phase": "phase53-example-migrations",
+      "category": "backend",
+      "description": "In example main.rs, call JoltDb::connect() which auto-applies all pending migrations. Verify users table exists after startup.",
+      "steps": [
+        "In example main.rs, call JoltDb::connect() which auto-applies all pending migrations. Verify users table exists after startup."
+      ],
+      "verification": [
+        "Server startup \u2192 users table created, server ready."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-214",
+      "priority": 214,
+      "phase": "phase54-itest-core",
+      "category": "backend",
+      "description": "Test: start server on random port, GET /health \u2192 200 (with test endpoint). Test graceful shutdown.",
+      "steps": [
+        "Test: start server on random port, GET /health \u2192 200 (with test endpoint). Test graceful shutdown."
+      ],
+      "verification": [
+        "cargo test --test integration_core passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-215",
+      "priority": 215,
+      "phase": "phase54-itest-core",
+      "category": "backend",
+      "description": "Test: register multiple endpoints with different paths/methods, verify correct routing including path params (/users/42).",
+      "steps": [
+        "Test: register multiple endpoints with different paths/methods, verify correct routing including path params (/users/42)."
+      ],
+      "verification": [
+        "cargo test --test integration_core passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-216",
+      "priority": 216,
+      "phase": "phase55-itest-middleware",
+      "category": "backend",
+      "description": "Test: middleware chain order \u2014 CORS, auth, body parsing, query parsing all execute in correct order via log capture.",
+      "steps": [
+        "Test: middleware chain order \u2014 CORS, auth, body parsing, query parsing all execute in correct order via log capture."
+      ],
+      "verification": [
+        "cargo test --test integration_middleware passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-217",
+      "priority": 217,
+      "phase": "phase55-itest-middleware",
+      "category": "backend",
+      "description": "Test: early termination \u2014 auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations.",
+      "steps": [
+        "Test: early termination \u2014 auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations."
+      ],
+      "verification": [
+        "cargo test --test integration_middleware passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-218",
+      "priority": 218,
+      "phase": "phase56-itest-db",
+      "category": "backend",
+      "description": "Test: full migration flow \u2014 fresh DB \u2192 apply migrations \u2192 restart \u2192 no-op (idempotent). Test checksum mismatch detection.",
+      "steps": [
+        "Test: full migration flow \u2014 fresh DB \u2192 apply migrations \u2192 restart \u2192 no-op (idempotent). Test checksum mismatch detection."
+      ],
+      "verification": [
+        "cargo test --test integration_db passes (requires testcontainers)."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-219",
+      "priority": 219,
+      "phase": "phase56-itest-db",
+      "category": "backend",
+      "description": "Test: query_as + transactions \u2192 insert, query, update, delete round-trip. LISTEN/NOTIFY \u2192 publisher and subscriber.",
+      "steps": [
+        "Test: query_as + transactions \u2192 insert, query, update, delete round-trip. LISTEN/NOTIFY \u2192 publisher and subscriber."
+      ],
+      "verification": [
+        "cargo test --test integration_db passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-220",
+      "priority": 220,
+      "phase": "phase57-itest-realtime",
+      "category": "backend",
+      "description": "Test: WebSocket lifecycle \u2014 connect with valid token, send message, receive echo, close. Test invalid token rejection.",
+      "steps": [
+        "Test: WebSocket lifecycle \u2014 connect with valid token, send message, receive echo, close. Test invalid token rejection."
+      ],
+      "verification": [
+        "cargo test --test integration_realtime passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-221",
+      "priority": 221,
+      "phase": "phase57-itest-realtime",
+      "category": "backend",
+      "description": "Test: pub/sub with multiple WS clients \u2014 client A publishes, client B receives. Test channel isolation.",
+      "steps": [
+        "Test: pub/sub with multiple WS clients \u2014 client A publishes, client B receives. Test channel isolation."
+      ],
+      "verification": [
+        "cargo test --test integration_realtime passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-222",
+      "priority": 222,
+      "phase": "phase57-itest-realtime",
+      "category": "backend",
+      "description": "Test: SSE streaming \u2014 connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive.",
+      "steps": [
+        "Test: SSE streaming \u2014 connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive."
+      ],
+      "verification": [
+        "cargo test --test integration_realtime passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-223",
+      "priority": 223,
+      "phase": "phase57-itest-realtime",
+      "category": "backend",
+      "description": "Test: background task scheduling \u2014 register task, verify it runs on interval, verify graceful shutdown stops it.",
+      "steps": [
+        "Test: background task scheduling \u2014 register task, verify it runs on interval, verify graceful shutdown stops it."
+      ],
+      "verification": [
+        "cargo test --test integration_realtime passes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-224",
+      "priority": 224,
+      "phase": "phase58-verification-typegen",
+      "category": "backend",
+      "description": "Port Zig typegen test cases to Rust: define identical structs/enums in Rust, run jolt-types, compare output to Zig-generated types.d.ts.",
+      "steps": [
+        "Port Zig typegen test cases to Rust: define identical structs/enums in Rust, run jolt-types, compare output to Zig-generated types.d.ts."
+      ],
+      "verification": [
+        "Diff between Rust and Zig types.d.ts is empty."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-225",
+      "priority": 225,
+      "phase": "phase58-verification-typegen",
+      "category": "backend",
+      "description": "Verify generated types.d.ts compiles with tsc --noEmit.",
+      "steps": [
+        "Verify generated types.d.ts compiles with tsc --noEmit."
+      ],
+      "verification": [
+        "tsc --noEmit types.d.ts exits 0."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-226",
+      "priority": 226,
+      "phase": "phase59-verification-benchmark",
+      "category": "backend",
+      "description": "Write benchmark: siege/wrk again GET /ping (no-op JSON), POST /echo (round-trip), WS echo (1k messages). Run against both Zig and Rust servers.",
+      "steps": [
+        "Write benchmark: siege/wrk again GET /ping (no-op JSON), POST /echo (round-trip), WS echo (1k messages). Run against both Zig and Rust servers."
+      ],
+      "verification": [
+        "Script produces benchmark JSON with results."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-227",
+      "priority": 227,
+      "phase": "phase59-verification-benchmark",
+      "category": "backend",
+      "description": "Measure: req/s, p50/p99 latency, memory (RSS) at idle and under 1k concurrent connections.",
+      "steps": [
+        "Measure: req/s, p50/p99 latency, memory (RSS) at idle and under 1k concurrent connections."
+      ],
+      "verification": [
+        "Benchmark results documented in docs/BENCHMARK.md."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-228",
+      "priority": 228,
+      "phase": "phase60-verification-coverage",
+      "category": "backend",
+      "description": "Run cargo tarpaulin (or cargo-llvm-cov) across workspace. Target >80% line coverage.",
+      "steps": [
+        "Run cargo tarpaulin (or cargo-llvm-cov) across workspace. Target >80% line coverage."
+      ],
+      "verification": [
+        "cargo tarpaulin --workspace reports >80% coverage."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-229",
+      "priority": 229,
+      "phase": "phase60-verification-coverage",
+      "category": "backend",
+      "description": "Run cargo clippy --workspace -- -D warnings. Fix all warnings.",
+      "steps": [
+        "Run cargo clippy --workspace -- -D warnings. Fix all warnings."
+      ],
+      "verification": [
+        "cargo clippy passes with zero warnings."
+      ],
+      "passes": false
+    },
+    {
+      "id": "JOLT-RS-230",
+      "priority": 230,
+      "phase": "phase60-verification-coverage",
+      "category": "backend",
+      "description": "Run cargo fmt --check across workspace.",
+      "steps": [
+        "Run cargo fmt --check across workspace."
+      ],
+      "verification": [
+        "cargo fmt --check passes."
+      ],
+      "passes": false
+    }
+  ]
+}
