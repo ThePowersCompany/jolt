@@ -262,4 +262,63 @@ mod request {
         );
         assert_eq!(req.header("x-binary"), None);
     }
+
+    #[test]
+    fn query_returns_value_for_present_key() {
+        let mut req = empty_request();
+        req.query_params
+            .insert("page".to_string(), "1".to_string());
+        assert_eq!(req.query("page"), Some("1"));
+    }
+
+    #[test]
+    fn query_returns_none_for_missing_key() {
+        let req = empty_request();
+        assert_eq!(req.query("page"), None);
+    }
+
+    #[test]
+    fn query_lookup_is_case_sensitive() {
+        let mut req = empty_request();
+        req.query_params
+            .insert("Page".to_string(), "1".to_string());
+        assert_eq!(req.query("page"), None);
+        assert_eq!(req.query("Page"), Some("1"));
+    }
+
+    #[test]
+    fn json_deserializes_body_into_struct() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Item {
+            name: String,
+            count: u32,
+        }
+
+        let mut req = empty_request();
+        req.body = br#"{"name":"widget","count":3}"#.to_vec();
+
+        let parsed: Item = req.json().unwrap();
+        assert_eq!(
+            parsed,
+            Item {
+                name: "widget".to_string(),
+                count: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn json_returns_err_for_malformed_body() {
+        let mut req = empty_request();
+        req.body = b"not json".to_vec();
+        let result: serde_json::Result<serde_json::Value> = req.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn json_returns_err_for_empty_body() {
+        let req = empty_request();
+        let result: serde_json::Result<serde_json::Value> = req.json();
+        assert!(result.is_err());
+    }
 }

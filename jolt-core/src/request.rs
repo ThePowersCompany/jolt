@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use axum::http::HeaderMap;
+use serde::de::DeserializeOwned;
 
 use crate::cookie::Cookie;
 use crate::method::Method;
@@ -22,5 +23,15 @@ impl Request {
     /// containing non-visible-ASCII bytes return `None`.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    /// Look up a query parameter by exact key match.
+    pub fn query(&self, key: &str) -> Option<&str> {
+        self.query_params.get(key).map(String::as_str)
+    }
+
+    /// Deserialize the raw request body as JSON into `T`.
+    pub fn json<T: DeserializeOwned>(&self) -> serde_json::Result<T> {
+        serde_json::from_slice(&self.body)
     }
 }
