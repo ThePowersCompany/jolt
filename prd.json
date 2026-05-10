@@ -391,7 +391,7 @@
       "verification": [
         "Manual: server starts, curl localhost:8080 returns 404 (empty router)."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-026",

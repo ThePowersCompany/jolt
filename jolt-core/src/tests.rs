@@ -829,4 +829,59 @@ mod server {
         assert!(server.cors_config.is_none());
         assert!(server.tls_config.is_none());
     }
+
+    #[tokio::test]
+    async fn start_binds_and_serves_404_on_empty_router() {
+        // PRD-mandated verification for JOLT-RS-025 ("server starts, curl
+        // localhost:8080 returns 404"), automated via a port-0 probe so the
+        // test is hermetic and doesn't collide with anything actually on 8080.
+        use axum::Router;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::time::timeout;
+
+        // Bind 127.0.0.1:0, capture the OS-assigned port, then drop the probe
+        // so `start` can claim it. The few-microsecond TOCTOU window is
+        // acceptable for a unit test.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let server = tokio::spawn(JoltServer::new().port(port).start(Router::new()));
+
+        // Retry-connect: `start` returns a future that hasn't yet bound at
+        // spawn time; it takes a few ms to be ready. 50 × 20ms = ~1s budget.
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut stream =
+            stream.expect("JoltServer::start should accept connections within 1s");
+
+        timeout(
+            Duration::from_secs(2),
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        )
+        .await
+        .expect("HTTP request write should not time out")
+        .unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("HTTP response read should not time out")
+            .unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "expected 404 on empty router, got: {response}"
+        );
+
+        server.abort();
+    }
 }
