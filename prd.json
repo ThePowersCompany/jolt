@@ -1357,7 +1357,7 @@
       "verification": [
         "Unit test: two files 001_init.sql, 002_users.sql \u2192 sorted [001, 002]."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-095",

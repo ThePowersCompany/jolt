@@ -312,6 +312,72 @@
 //!     trip is the whole signal, mirroring [`Self::health_check`]'s shape
 //!     (decision 9). The `()` return keeps `notify` ergonomic for
 //!     fire-and-forget call sites: `db.notify("orders", &id).await?;`.
+//!
+//! [`read_migration_files`] (JOLT-RS-094) opens phase22 — the migration
+//! file discovery half of the migration pipeline. Returns a list of
+//! [`MigrationFile`] records read from a single directory, sorted by
+//! filename. JOLT-RS-095 will add a SHA-256 checksum helper; JOLT-RS-096
+//! will extend [`MigrationFile`] with the resulting `checksum: String`
+//! field; JOLT-RS-098..101 will layer the apply / `_migrations`-table
+//! bookkeeping logic on top.
+//!
+//! 24. **[`MigrationFile`] is a flat `pub`-fields struct alongside
+//!     [`DbConfig`] and [`JoltDb`] in lib.rs (JOLT-RS-094).** Matches the
+//!     established crate-flat layout — [`DbConfig`], [`JoltDb`], and
+//!     [`TypedQuery`] all live at the crate root. Splitting migrations into
+//!     a `mod migrations` submodule would force phase22/23 callers to write
+//!     `jolt_db::migrations::MigrationFile` instead of
+//!     `jolt_db::MigrationFile`, breaking the established single-namespace
+//!     import shape callers learned for the other types. The PRD-094 fields
+//!     here are the minimum the discovery slice needs (`name`, `content`);
+//!     JOLT-RS-096 will add `checksum: String` once JOLT-RS-095 lands the
+//!     SHA-256 helper.
+//!
+//! 25. **[`read_migration_files`] returns `std::io::Result<Vec<...>>`, not
+//!     a wrapped [`sqlx::Error`] shape (JOLT-RS-094).** The work is pure
+//!     filesystem ([`std::fs::read_dir`] + [`std::fs::read_to_string`]) —
+//!     no Postgres round trip happens — so the natural error type is
+//!     [`std::io::Error`]. Wrapping it in `sqlx::Error::Io` would force
+//!     callers into a `sqlx::Error` match arm for filesystem errors that
+//!     have nothing to do with sqlx, and the future `JoltDb::migrate` call
+//!     (JOLT-RS-098+) can re-wrap or `?`-chain through a unified migration
+//!     error type when that aggregation actually pays for itself. For now,
+//!     `std::io::Result<...>` is the right level — it composes cleanly with
+//!     every standard-library filesystem helper a caller might layer on top.
+//!
+//! 26. **Sort is plain [`Vec::sort_by`] on the `name` field (PRD-094
+//!     mandate, JOLT-RS-094).** A natural-sort variant would put
+//!     `2_foo.sql` before `10_foo.sql`, but the established migration-file
+//!     convention (and the PRD-094 verification fixture `001_init.sql`,
+//!     `002_users.sql`) uses zero-padded numeric prefixes which
+//!     lexicographic sort already orders correctly. Adding a natural-sort
+//!     dependency just for this case would be overkill; the lex-sort
+//!     contract is simple to understand and works correctly for both
+//!     zero-padded-numeric naming and pure-alphabetic naming
+//!     (`migration_a.sql`, `migration_b.sql`).
+//!
+//! 27. **Non-`.sql` entries (and subdirectories) are silently skipped
+//!     (JOLT-RS-094, exercised by JOLT-RS-097's closing tests).** A
+//!     migration directory commonly contains README files, editor backup
+//!     files (`.bak`, `~`), and the like; erroring on the first non-SQL
+//!     entry would force every caller to keep the directory perfectly
+//!     clean. Skipping is the lower-friction default — an entry that
+//!     actually IS a migration but has the wrong extension is a caller-
+//!     side mistake that surfaces loudly as "migration not applied" when
+//!     JOLT-RS-098+ runs. Subdirectories are also skipped (no recursive
+//!     descent) so a `migrations/archive/` subdir holding superseded
+//!     scripts does not get re-run.
+//!
+//! 28. **`read_migration_files(dir: &str)` accepts `&str`, not
+//!     `impl AsRef<Path>` (JOLT-RS-094, PRD-094 mandate).** The PRD
+//!     signature is explicit. A future overload that accepts an arbitrary
+//!     path-like is a forward-compatible addition; making the parameter
+//!     generic now would force a turbofish at call sites that want to
+//!     pass a string literal without a path conversion, and the
+//!     `&str → Path` step inside the function is a single
+//!     [`std::path::Path::new`] call with no runtime cost. Matches the
+//!     `dir: &str` shape of every existing migration-discovery API the
+//!     port is replacing.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -693,9 +759,70 @@ where
     }
 }
 
+/// A migration file discovered by [`read_migration_files`] (JOLT-RS-094).
+///
+/// Holds the bare metadata phase22's sort-by-filename discovery needs: the
+/// basename (no directory prefix) and the file's UTF-8 body. See module docs
+/// decision 24 for the flat-`pub`-fields layout rationale; JOLT-RS-096 will
+/// extend this struct with `checksum: String` once JOLT-RS-095 lands the
+/// SHA-256 helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationFile {
+    /// Filename (basename, no directory prefix). Used as the sort key in
+    /// [`read_migration_files`] and as the identifier the eventual
+    /// `_migrations` bookkeeping table (JOLT-RS-098) will record.
+    pub name: String,
+    /// File contents read as UTF-8. The full SQL body that the apply step
+    /// (JOLT-RS-100) will execute inside a transaction.
+    pub content: String,
+}
+
+/// Discover migration files in `dir` (JOLT-RS-094).
+///
+/// Reads every entry in `dir`, retains files whose name ends in `.sql`,
+/// reads each retained file's contents as UTF-8, and returns the resulting
+/// [`MigrationFile`] values sorted lexicographically by filename. See module
+/// docs decisions 24–28 for the architectural contract.
+///
+/// Returns `Err(std::io::Error)` if `dir` is not readable (missing,
+/// permission denied, not a directory) or if any individual `.sql` file
+/// fails to read as UTF-8. Subdirectories, non-`.sql` files, and entries
+/// whose filename is not valid UTF-8 are silently skipped (decision 27).
+///
+/// # Example
+///
+/// ```ignore
+/// let files = jolt_db::read_migration_files("./migrations")?;
+/// for f in &files {
+///     println!("{}: {} bytes", f.name, f.content.len());
+/// }
+/// ```
+pub fn read_migration_files(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(std::path::Path::new(dir))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("sql") => {}
+            _ => continue,
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+        let content = std::fs::read_to_string(&path)?;
+        files.push(MigrationFile { name, content });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DbConfig, JoltDb, TypedQuery};
+    use super::{DbConfig, JoltDb, MigrationFile, TypedQuery, read_migration_files};
 
     #[test]
     fn default_pins_max_connections_to_10() {
@@ -1402,5 +1529,98 @@ mod tests {
         db.notify("_jolt_notify_smoke_ch", "it's safe")
             .await
             .expect("single-quote payload should round-trip via parameter binding");
+    }
+
+    // ---- JOLT-RS-094: read_migration_files ----
+
+    /// Self-cleaning temp directory used by the `read_migration_files`
+    /// tests. Each instance lives in `std::env::temp_dir()` under a
+    /// PID + process-local atomic-counter name so concurrent test threads
+    /// don't collide, and the directory is removed on `Drop`. Tests use
+    /// the `path_str` accessor to feed the directory's UTF-8 path straight
+    /// into [`read_migration_files`] (decision 28).
+    struct TestDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "jolt-db-094-{}-{}-{}",
+                std::process::id(),
+                label,
+                n,
+            ));
+            // Best-effort cleanup of any stale directory left by a prior
+            // crashed run with the same PID+counter (unlikely with the
+            // atomic counter, but free insurance).
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir(&path).expect("create test dir");
+            Self { path }
+        }
+
+        fn write_file(&self, name: &str, content: &str) {
+            std::fs::write(self.path.join(name), content).expect("write file");
+        }
+
+        fn path_str(&self) -> &str {
+            self.path
+                .to_str()
+                .expect("std::env::temp_dir() path is UTF-8")
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Compile-time pin: `read_migration_files(dir: &str)` resolves to
+    /// `std::io::Result<Vec<MigrationFile>>` (decisions 25, 28). The
+    /// explicit return annotation forces the typecheck — a regression that
+    /// switches the parameter to `&Path` / `impl AsRef<Path>` or wraps the
+    /// return in a foreign error type breaks this build pin without ever
+    /// needing a real directory.
+    #[test]
+    fn read_migration_files_signature_pins() {
+        fn _pin(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
+            read_migration_files(dir)
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-094: two files
+    /// `001_init.sql` and `002_users.sql` read back as a Vec sorted
+    /// lexicographically by filename → `[001_..., 002_...]`. Writes the
+    /// `002_` file first so a sortless implementation that returned
+    /// `read_dir`'s incidental order would put `002_` ahead of `001_`
+    /// and fail this test on most platforms.
+    #[test]
+    fn read_migration_files_sorts_by_filename() {
+        let dir = TestDir::new("sort");
+        dir.write_file("002_users.sql", "CREATE TABLE users();");
+        dir.write_file("001_init.sql", "CREATE TABLE init();");
+
+        let files = read_migration_files(dir.path_str()).expect("read");
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["001_init.sql", "002_users.sql"]);
+    }
+
+    /// Each [`MigrationFile`] captures both the basename and the file's
+    /// UTF-8 body (decision 24). Pins the field-shape contract — a
+    /// regression that captures only the name, strips the file content,
+    /// or returns a non-UTF-8 buffer fails this test.
+    #[test]
+    fn read_migration_files_captures_name_and_content() {
+        let dir = TestDir::new("body");
+        dir.write_file("001_init.sql", "SELECT 1;");
+
+        let files = read_migration_files(dir.path_str()).expect("read");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "001_init.sql");
+        assert_eq!(files[0].content, "SELECT 1;");
     }
 }
