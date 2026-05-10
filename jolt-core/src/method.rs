@@ -66,17 +66,3 @@ impl FromStr for Method {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn from_str_get_is_ok() {
-        assert_eq!(Method::from_str("GET"), Ok(Method::Get));
-    }
-
-    #[test]
-    fn from_str_invalid_is_err() {
-        assert!(Method::from_str("BOGUS").is_err());
-    }
-}

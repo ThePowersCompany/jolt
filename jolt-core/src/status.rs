@@ -75,35 +75,3 @@ impl fmt::Display for StatusCode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn from_u16_known_is_named() {
-        assert_eq!(StatusCode::from_u16(200), StatusCode::Ok);
-    }
-
-    #[test]
-    fn from_u16_unknown_is_other() {
-        assert_eq!(StatusCode::from_u16(418), StatusCode::Other(418));
-    }
-
-    #[test]
-    fn into_axum_status_not_found() {
-        let axum_status: axum::http::StatusCode = StatusCode::NotFound.into();
-        assert_eq!(axum_status, axum::http::StatusCode::NOT_FOUND);
-        assert_eq!(axum_status.as_u16(), 404);
-    }
-
-    #[test]
-    fn display_known_includes_reason_phrase() {
-        assert_eq!(StatusCode::NotFound.to_string(), "404 Not Found");
-        assert_eq!(StatusCode::Ok.to_string(), "200 OK");
-    }
-
-    #[test]
-    fn display_other_with_known_code_uses_reason_phrase() {
-        assert_eq!(StatusCode::Other(418).to_string(), "418 I'm a teapot");
-    }
-}

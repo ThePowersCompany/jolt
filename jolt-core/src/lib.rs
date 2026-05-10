@@ -5,3 +5,6 @@ pub mod status;
 
 pub use method::{Method, ParseMethodError};
 pub use status::StatusCode;
+
+#[cfg(test)]
+mod tests;

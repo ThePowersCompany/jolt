@@ -1,0 +1,195 @@
+//! Comprehensive variant + round-trip coverage for `Method` and `StatusCode`.
+//!
+//! Submodule names are deliberate: `cargo test -p jolt-core -- tests::method`
+//! and `cargo test -p jolt-core -- tests::status_code` filter cleanly to the
+//! relevant slice.
+
+mod method {
+    use crate::{Method, ParseMethodError};
+    use std::str::FromStr;
+
+    const ALL_METHODS: &[(Method, &str)] = &[
+        (Method::Get, "GET"),
+        (Method::Post, "POST"),
+        (Method::Put, "PUT"),
+        (Method::Patch, "PATCH"),
+        (Method::Delete, "DELETE"),
+        (Method::Options, "OPTIONS"),
+        (Method::Head, "HEAD"),
+    ];
+
+    #[test]
+    fn as_str_matches_canonical_name_for_all_variants() {
+        for (method, name) in ALL_METHODS {
+            assert_eq!(method.as_str(), *name);
+        }
+    }
+
+    #[test]
+    fn display_matches_as_str_for_all_variants() {
+        for (method, name) in ALL_METHODS {
+            assert_eq!(method.to_string(), *name);
+        }
+    }
+
+    #[test]
+    fn from_str_round_trips_all_variants() {
+        for (method, name) in ALL_METHODS {
+            assert_eq!(Method::from_str(name), Ok(*method));
+        }
+    }
+
+    #[test]
+    fn as_str_then_from_str_is_identity() {
+        for (method, _) in ALL_METHODS {
+            assert_eq!(Method::from_str(method.as_str()), Ok(*method));
+        }
+    }
+
+    #[test]
+    fn from_str_is_case_sensitive() {
+        assert!(Method::from_str("get").is_err());
+        assert!(Method::from_str("Get").is_err());
+        assert!(Method::from_str("gEt").is_err());
+    }
+
+    #[test]
+    fn from_str_rejects_empty_and_whitespace() {
+        assert!(Method::from_str("").is_err());
+        assert!(Method::from_str(" GET").is_err());
+        assert!(Method::from_str("GET ").is_err());
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_verb() {
+        assert!(Method::from_str("BOGUS").is_err());
+        assert!(Method::from_str("CONNECT").is_err());
+        assert!(Method::from_str("TRACE").is_err());
+    }
+
+    #[test]
+    fn parse_error_preserves_offending_input_in_display() {
+        let err = Method::from_str("BOGUS").unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("BOGUS"),
+            "expected error display to mention input, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn parse_error_implements_std_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        let err: ParseMethodError = Method::from_str("nope").unwrap_err();
+        assert_error(&err);
+    }
+}
+
+mod status_code {
+    use crate::StatusCode;
+
+    const NAMED_VARIANTS: &[(StatusCode, u16, &str)] = &[
+        (StatusCode::Ok, 200, "200 OK"),
+        (StatusCode::Created, 201, "201 Created"),
+        (StatusCode::NoContent, 204, "204 No Content"),
+        (StatusCode::BadRequest, 400, "400 Bad Request"),
+        (StatusCode::Unauthorized, 401, "401 Unauthorized"),
+        (StatusCode::Forbidden, 403, "403 Forbidden"),
+        (StatusCode::NotFound, 404, "404 Not Found"),
+        (StatusCode::MethodNotAllowed, 405, "405 Method Not Allowed"),
+        (StatusCode::Conflict, 409, "409 Conflict"),
+        (
+            StatusCode::InternalServerError,
+            500,
+            "500 Internal Server Error",
+        ),
+    ];
+
+    #[test]
+    fn from_u16_maps_each_named_code_to_its_variant() {
+        for (variant, code, _) in NAMED_VARIANTS {
+            assert_eq!(StatusCode::from_u16(*code), *variant);
+        }
+    }
+
+    #[test]
+    fn as_u16_returns_each_variants_canonical_code() {
+        for (variant, code, _) in NAMED_VARIANTS {
+            assert_eq!(variant.as_u16(), *code);
+        }
+    }
+
+    #[test]
+    fn from_u16_then_as_u16_round_trips_named_codes() {
+        for (_, code, _) in NAMED_VARIANTS {
+            assert_eq!(StatusCode::from_u16(*code).as_u16(), *code);
+        }
+    }
+
+    #[test]
+    fn unknown_codes_round_trip_through_other() {
+        for code in [100u16, 301, 418, 429, 503, 599] {
+            let s = StatusCode::from_u16(code);
+            assert_eq!(s, StatusCode::Other(code));
+            assert_eq!(s.as_u16(), code);
+        }
+    }
+
+    #[test]
+    fn other_with_named_code_value_still_round_trips_to_u16() {
+        // Constructing Other(200) directly is unusual but the u16 round-trip
+        // must hold because as_u16 reads the inner value.
+        assert_eq!(StatusCode::Other(200).as_u16(), 200);
+    }
+
+    #[test]
+    fn into_axum_status_matches_constants_for_each_named_variant() {
+        let cases: &[(StatusCode, axum::http::StatusCode)] = &[
+            (StatusCode::Ok, axum::http::StatusCode::OK),
+            (StatusCode::Created, axum::http::StatusCode::CREATED),
+            (StatusCode::NoContent, axum::http::StatusCode::NO_CONTENT),
+            (StatusCode::BadRequest, axum::http::StatusCode::BAD_REQUEST),
+            (StatusCode::Unauthorized, axum::http::StatusCode::UNAUTHORIZED),
+            (StatusCode::Forbidden, axum::http::StatusCode::FORBIDDEN),
+            (StatusCode::NotFound, axum::http::StatusCode::NOT_FOUND),
+            (
+                StatusCode::MethodNotAllowed,
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (StatusCode::Conflict, axum::http::StatusCode::CONFLICT),
+            (
+                StatusCode::InternalServerError,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (jolt, axum_status) in cases {
+            let converted: axum::http::StatusCode = (*jolt).into();
+            assert_eq!(converted, *axum_status);
+        }
+    }
+
+    #[test]
+    fn into_axum_status_preserves_other_in_range() {
+        let converted: axum::http::StatusCode = StatusCode::Other(418).into();
+        assert_eq!(converted.as_u16(), 418);
+    }
+
+    #[test]
+    fn display_named_variants_use_canonical_reason_phrases() {
+        for (variant, _, rendered) in NAMED_VARIANTS {
+            assert_eq!(variant.to_string(), *rendered);
+        }
+    }
+
+    #[test]
+    fn display_other_with_known_code_uses_reason_phrase() {
+        assert_eq!(StatusCode::Other(418).to_string(), "418 I'm a teapot");
+    }
+
+    #[test]
+    fn display_other_with_unknown_code_falls_back_to_numeric() {
+        // 599 is reserved/unassigned in the IANA registry; axum's
+        // canonical_reason returns None, so Display should print just the code.
+        assert_eq!(StatusCode::Other(599).to_string(), "599");
+    }
+}
