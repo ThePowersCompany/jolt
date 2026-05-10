@@ -667,3 +667,22 @@ mod response {
         );
     }
 }
+
+mod request_ext {
+    use crate::RequestExt;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn new_constructs_with_finished_defaulting_to_false() {
+        let ext = RequestExt::new();
+        assert!(!ext.finished.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn new_into_inner_reports_false() {
+        // Independent of any Ordering choice the load API picks: into_inner
+        // consumes the atomic and returns the underlying bool directly.
+        let ext = RequestExt::new();
+        assert!(!ext.finished.into_inner());
+    }
+}

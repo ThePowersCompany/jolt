@@ -503,4 +503,42 @@ Notes for next iterations:
 - JOLT-RS-021 (priority 21): the deferred `Request.finished` field migration. Per JOLT-RS-014 progress notes: the migration plan is mechanical — JOLT-RS-021 either adds an `extensions: axum::http::Extensions` field to Request and stores RequestExt there, or wraps Request in a shim type. The current `pub finished: bool` field on Request gets deleted at that point. `has_finished()` body switches from `self.finished` to whatever lookup 021 settles on. The JOLT-RS-014 `has_finished_reflects_finished_flag` test will need to be rewritten to use `mark_finished()` (from JOLT-RS-020) instead of `req.finished = true`.
 - JsonBody trait is openness now locked in by `into_axum_response_with_user_defined_struct_body_serializes_as_json`. Future agents wanting to seal the trait must explicitly delete or rework that test — not a silent refactor.
 - Content-Type override precedence for the JSON path is locked in. A symmetric test for the text/plain path (`Response<String>` with caller-set CONTENT_TYPE) was NOT added — same code path through `finalize_axum_response`, would be redundant. If the helper is ever broken into per-content-type branches, add the symmetric test then.
+
+## 2026-05-10 — JOLT-RS-019: RequestExt struct with finished AtomicBool (opens phase04)
+
+PRD item: JOLT-RS-019 (priority 19, phase04-requestext-flag) — Define RequestExt struct with finished: AtomicBool. Implement new() defaulting to false.
+
+Verification:
+- `cargo check -p jolt-core` → clean in 0.80s.
+- `cargo test -p jolt-core -- tests::request_ext` → 2/2 passed (54 filtered out); 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.30s; no regressions.
+- `cargo test -p jolt-core --lib` → 56 passed total (up from 54); 0 failed.
+
+Note on harness instructions: same as JOLT-RS-007..018 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Placed `RequestExt` at `jolt-core/src/request_ext.rs` per JOLT-RS-018 progress note recommendation: flat module list at crate root mirrors `request.rs` / `response.rs` precedent. The alternative (submodule of `request`) would conflate two conceptually distinct types — Request (immutable owned snapshot) vs RequestExt (mutable async-shared state).
+- Re-exported as `pub use request_ext::RequestExt` in `lib.rs` matching the precedent for Cookie/Method/Request/Response/StatusCode.
+- Field is `pub finished: AtomicBool` (consistent with Request's all-pub-fields pattern). Direct field access lets tests verify the default without committing to an Ordering choice or a `is_finished()` API — both of those belong to JOLT-RS-020.
+- `#[derive(Debug)]` only — NOT Clone (AtomicBool is `!Clone` because cloning interior mutability is ambiguous; per-field clone via `.load()` would silently break the shared-state semantics that motivate the type). NOT `Default` either — JOLT-RS-018's notes explicitly flagged Default as "only do this if a downstream consumer asks; otherwise overspecified," and the PRD says `new()` not `default()`.
+- `new()` uses `AtomicBool::new(false)` rather than `AtomicBool::default()` — they're equivalent (`AtomicBool::default() == AtomicBool::new(false)`), but `new(false)` reads as the intent stated in the PRD ("defaulting to false") without relying on a Default impl that we deliberately don't derive.
+- Did NOT add `mark_finished()` / `is_finished()` methods — those are JOLT-RS-020. The Ordering question is therefore deferred (the test reads `finished` directly with `Ordering::Relaxed`, but that's a test-local choice, not an API choice).
+- Did NOT integrate RequestExt with Request yet — that's JOLT-RS-021 (axum Extensions registration) and follows the deferred Request.finished migration flagged in JOLT-RS-014's notes.
+
+Tests added (2 in `tests::request_ext`):
+- `new_constructs_with_finished_defaulting_to_false` — `RequestExt::new()` then `finished.load(Ordering::Relaxed)` is false. Tests the construction path.
+- `new_into_inner_reports_false` — `RequestExt::new()` then `finished.into_inner()` is false. The comment explicitly notes this is independent of any Ordering API choice the load path picks; protects against a 020 refactor that changes Ordering and accidentally breaks default semantics.
+
+Files changed:
+- jolt-core/src/request_ext.rs — new file: `pub struct RequestExt { pub finished: AtomicBool }` + `pub fn new() -> Self`.
+- jolt-core/src/lib.rs — added `pub mod request_ext;` and `pub use request_ext::RequestExt;`.
+- jolt-core/src/tests.rs — added `mod request_ext` with 2 unit tests.
+- prd.json — JOLT-RS-019 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-020 (priority 20): adds `mark_finished()` and `is_finished()`. Ordering recommendation: `Ordering::Relaxed` for both — `finished` is a one-way latch (false → true), no other state hangs off it, no acquire/release relationship to another datum. If a future requirement adds state that must be visible alongside the flip (e.g. a "finished_by" middleware-id field), upgrade to Release/Acquire then. The methods take `&self` (not `&mut self`) — that's the whole point of using AtomicBool over a regular bool: the request handle is shared across middleware layers and we don't want to thread `&mut` through everything.
+- JOLT-RS-021 (priority 21): two viable approaches for connecting RequestExt to a request lifecycle: (a) add `extensions: axum::http::Extensions` field to Request, store RequestExt there via Extensions::insert; (b) keep RequestExt as a separate parameter alongside Request in handlers. Approach (a) matches the PRD step's "axum request extension" language and the product_decision in prd.json (`req.markAsFinished → finished: AtomicBool`). The current `pub finished: bool` field on Request gets deleted at that point, and the JOLT-RS-014 `has_finished_reflects_finished_flag` test rewrites to use `RequestExt::mark_finished()` instead of `req.finished = true`.
+- The Cargo.toml dependency surface is unchanged — `std::sync::atomic::AtomicBool` is in core, no new crate needed.
+- `RequestExt` is currently `Send + Sync` automatically (AtomicBool is both). When 021 stores it in axum::http::Extensions, the `'static + Send + Sync` bound is satisfied. No PhantomData or unsafe needed.
+- JsonBody openness lock from 018 is unaffected by this change. Phase04 doesn't touch the response surface.
 - The `body_bytes` test helper is private to `tests::response` (same module). If `tests::request` or future test modules need similar bytes-extraction helpers, factor up to `mod tests` (sibling to `mod response`) — but only if a second consumer materializes; YAGNI applies.
