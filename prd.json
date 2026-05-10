@@ -587,7 +587,7 @@
       "verification": [
         "Unit test: impl block with #[get] fn hello(...) \u2192 found method 'hello' tagged as GET."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-040",
