@@ -1,5 +1,6 @@
 #![doc = "jolt-core: HTTP, WebSocket, SSE, tasks, and pub/sub primitives for the Jolt framework."]
 
+pub mod auth_bearer;
 pub mod cookie;
 pub mod cors;
 pub mod endpoint;
@@ -15,6 +16,7 @@ pub mod router;
 pub mod server;
 pub mod status;
 
+pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
 pub use cookie::Cookie;
 pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};

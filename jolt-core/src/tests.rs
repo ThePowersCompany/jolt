@@ -3529,3 +3529,327 @@ mod parse_query_typed_vec {
         }
     }
 }
+
+mod auth_bearer {
+    //! PRD-mandated verification for JOLT-RS-071: "Unit test: no Authorization
+    //! header → 401."
+    //!
+    //! The structural surface is wider than the single PRD-mandated case:
+    //! 071's contract is the FORMAT validator (`Bearer <token>` shape) plus
+    //! the rejection-side guarantees (401 + `WWW-Authenticate: Bearer` +
+    //! `mark_finished` + inner-skip + distinct-body-per-reason). Each test
+    //! below pins one of those guarantees so 072+'s additions (JWT validation,
+    //! claims extraction) compose against a stable 071 surface rather than
+    //! re-discovering it.
+    //!
+    //! Module is named `auth_bearer` so `cargo test -p jolt-core -- tests::auth_bearer`
+    //! filters cleanly to this slice; matches the existing `parse_body` /
+    //! `parse_query` naming convention for layer-scoped test bundles.
+    use std::convert::Infallible;
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::extract::Request as AxumRequest;
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use tower::{Layer, ServiceExt};
+
+    use crate::auth_bearer::BearerToken;
+    use crate::request_ext::RequestExt;
+    use crate::AuthBearerLayer;
+
+    /// Inner service that panics if invoked. Used by every rejection-path
+    /// test so a regression that accidentally delegates past a malformed
+    /// header (instead of short-circuiting) crashes loudly rather than
+    /// passing silently.
+    fn forbid_inner() -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+        >,
+    > + Clone {
+        tower::service_fn(|_req: AxumRequest| {
+            Box::pin(async move {
+                panic!("AuthBearerService must short-circuit on rejection and never call inner");
+                #[allow(unreachable_code)]
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+                >
+        })
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_header_short_circuits_with_401() {
+        // PRD-mandated test: no Authorization header → 401. Also pins the
+        // four sibling guarantees (WWW-Authenticate challenge,
+        // text/plain body, finished latch flipped, inner never invoked).
+        let layer = AuthBearerLayer::new();
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing Authorization header must surface 401"
+        );
+        let www_auth = resp
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .expect("401 must carry WWW-Authenticate")
+            .to_str()
+            .expect("WWW-Authenticate is ASCII");
+        assert_eq!(
+            www_auth, "Bearer",
+            "WWW-Authenticate must advertise the Bearer scheme",
+        );
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("401 must carry Content-Type")
+            .to_str()
+            .expect("Content-Type is ASCII");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "401 body is text/plain; got {content_type}"
+        );
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("401 body is UTF-8");
+        assert_eq!(
+            body_text, "Missing Authorization header",
+            "missing-header rejection must use the dedicated body shape"
+        );
+
+        assert!(
+            request_ext.is_finished(),
+            "AuthBearerService must flip RequestExt::mark_finished on rejection"
+        );
+        assert!(
+            request_ext.take_response().is_none(),
+            "the 401 is returned directly from call(), not stashed in RequestExt"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_bearer_authorization_header_short_circuits_with_401() {
+        // A scheme other than Bearer (e.g. `Basic dXNlcjpwYXNz`) is rejected
+        // with the dedicated `MissingBearerPrefix` body so the caller sees
+        // *why* the header was rejected rather than a generic 401.
+        let layer = AuthBearerLayer::new();
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .header(AUTHORIZATION, "Basic dXNlcjpwYXNz")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text, "Invalid Authorization header format: expected 'Bearer <token>'",
+            "non-Bearer scheme must use the format-specific rejection body",
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_token_short_circuits_with_401() {
+        // Header of `Bearer ` (prefix + space, no token) is structurally
+        // parseable but semantically empty. The dedicated `EmptyToken` body
+        // disambiguates this case from the missing-header case.
+        let layer = AuthBearerLayer::new();
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .header(AUTHORIZATION, "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text, "Empty bearer token",
+            "empty-token rejection must use the dedicated body shape",
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn non_ascii_authorization_header_short_circuits_with_401() {
+        // A header carrying non-visible-ASCII bytes (e.g. an embedded NUL)
+        // can't round-trip through HeaderValue::to_str. The layer rejects
+        // with 401 + `NotAscii` body rather than 400, since the failure is
+        // an auth-contract violation rather than a generic body issue.
+        let layer = AuthBearerLayer::new();
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        // HeaderValue::from_bytes accepts visible ASCII + extended bytes
+        // (0x80-0xFF). 0xC3 is an extended byte that to_str() rejects as
+        // non-ASCII. Build the request via headers_mut() so we can plant a
+        // raw HeaderValue without going through the builder's safer path.
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+        let raw = axum::http::HeaderValue::from_bytes(b"Bearer \xC3\x28").unwrap();
+        req.headers_mut().insert(AUTHORIZATION, raw);
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(body_text, "Authorization header is not valid ASCII");
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_header_extracts_token_into_extensions() {
+        // Happy path: `Authorization: Bearer <token>` → token lands in
+        // extensions as `BearerToken`, finished latch UNTOUCHED, inner
+        // service IS invoked and its response is propagated unchanged.
+        let layer = AuthBearerLayer::new();
+        let inner = tower::service_fn(|req: AxumRequest| async move {
+            // Inner observes the BearerToken in extensions; if it's missing
+            // or has the wrong content, surface a 500 so the test sees the
+            // contract violation as a status-code mismatch.
+            match req.extensions().get::<BearerToken>() {
+                Some(token) if token.as_str() == "eyJhbGciOiJIUzI1NiJ9" => {
+                    Ok::<Response, Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::from("authorized"))
+                            .unwrap(),
+                    )
+                }
+                _ => Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::empty())
+                    .unwrap()),
+            }
+        });
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .header(AUTHORIZATION, "Bearer eyJhbGciOiJIUzI1NiJ9")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid bearer header must allow inner service to run",
+        );
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        assert_eq!(&body_bytes[..], b"authorized");
+
+        assert!(
+            !request_ext.is_finished(),
+            "happy path must NOT mark the request finished",
+        );
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_scheme_is_accepted() {
+        // RFC 7235 §2.1 declares the auth-scheme name case-insensitive, so
+        // `bearer <token>` and `BEARER <token>` are accepted as semantically
+        // identical to `Bearer <token>`. Pin both lowercase and uppercase
+        // variants so a future iteration that drifts to a strict-case match
+        // gets caught.
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            let layer = AuthBearerLayer::new();
+            let inner = tower::service_fn(|req: AxumRequest| async move {
+                let token = req
+                    .extensions()
+                    .get::<BearerToken>()
+                    .expect("case-insensitive scheme must still extract the token")
+                    .clone();
+                Ok::<Response, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(token.as_str().to_owned()))
+                        .unwrap(),
+                )
+            });
+            let svc = layer.layer(inner);
+
+            let header_value = format!("{scheme} eyJ.payload.sig");
+            let req = AxumRequest::builder()
+                .method(HttpMethod::GET)
+                .uri("/api/protected")
+                .header(AUTHORIZATION, header_value)
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = svc.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "scheme '{scheme}' must be accepted as semantically Bearer"
+            );
+            let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+            assert_eq!(
+                &body_bytes[..],
+                b"eyJ.payload.sig",
+                "extracted token bytes must match the value past 'Bearer ' regardless of scheme casing",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_request_ext_is_injected_when_no_upstream_layer_set_one() {
+        // Mirrors ParseBodyService's preserve-or-inject contract: when no
+        // upstream Arc<RequestExt> is present, the layer injects a fresh one
+        // before flipping mark_finished. Without this, a malformed-header
+        // request that didn't go through Router/CorsLayer first would have
+        // no observable handle on the finished latch — the contract would
+        // exist but be unreachable.
+        let layer = AuthBearerLayer::new();
+        let svc = layer.layer(forbid_inner());
+
+        // No request_ext insertion — let the layer inject one.
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "rejection must still produce 401 even without an upstream RequestExt",
+        );
+    }
+}
