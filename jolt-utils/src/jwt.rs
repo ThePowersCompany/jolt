@@ -42,11 +42,23 @@
 //! 4. **`exp` is required, `iat` is optional.** [`JwtClaims`] models `sub` +
 //!    `exp` + optional `iat`; jsonwebtoken's
 //!    [`Validation::required_spec_claims`] keeps the upstream "`exp` must be
-//!    present" default. JOLT-RS-074 (auth test bundle) can extend the surface
-//!    with a generic `JwtClaims<C>` if custom claims are needed there.
+//!    present" default.
+//!
+//! 5. **Custom claims land in [`JwtClaims::extra`] via `#[serde(flatten)]`
+//!    (JOLT-RS-074).** Any JWT payload key that isn't one of the explicit
+//!    fields (`sub`, `exp`, `iat`) is collected into a
+//!    [`serde_json::Map`] keyed by claim name. Callers reach role / scopes /
+//!    arbitrary application claims via `claims.extra.get("role")` without
+//!    having to redefine the struct. The flattened-map shape was chosen over
+//!    a generic `JwtClaims<C: DeserializeOwned>` because it preserves
+//!    JOLT-RS-072/073's existing callers (no breakage of struct-literal
+//!    constructions beyond a new field) while still surfacing every custom
+//!    claim through the typed [`JwtClaims`] extension key downstream
+//!    handlers use.
 
 use jsonwebtoken::{decode as jwt_decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// Verification-side JWT configuration. Carries the symmetric secret bytes and
 /// the expected algorithm; the same instance is reused across requests by
@@ -77,8 +89,9 @@ impl JwtConfig {
 }
 
 /// Standard JWT claims surfaced by [`decode`] on success. The standard
-/// `sub` + `exp` are required; `iat` is optional. See module docs decision 4
-/// for the scope rationale.
+/// `sub` + `exp` are required; `iat` is optional; any further keys land in
+/// [`extra`](JwtClaims::extra) via `#[serde(flatten)]`. See module docs
+/// decisions 4 and 5 for the scope rationale.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
     /// Subject (typically a user identifier). Required.
@@ -90,6 +103,14 @@ pub struct JwtClaims {
     /// this field, present otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iat: Option<usize>,
+    /// Custom (application-defined) claims captured by `#[serde(flatten)]`.
+    /// Any JWT payload key that isn't one of the explicit fields above
+    /// (`sub`, `exp`, `iat`) is collected here. Callers reach a custom
+    /// claim via `claims.extra.get("role")`; minting a token with custom
+    /// claims is symmetric (populate `extra` before passing the struct to
+    /// the encoder). An empty map serializes to no additional JSON fields.
+    #[serde(flatten)]
+    pub extra: JsonMap<String, JsonValue>,
 }
 
 /// Reason a JWT decode call rejected the token. Dedicated variants so a
@@ -209,6 +230,7 @@ mod tests {
             sub: "alice".to_owned(),
             exp: now_secs() + 3600,
             iat: Some(now_secs()),
+            extra: JsonMap::new(),
         };
         let token = sign_hs256(secret, &claims);
         let config = JwtConfig::new(secret.to_vec(), Algorithm::HS256);
@@ -217,6 +239,10 @@ mod tests {
         assert_eq!(out.sub, "alice");
         assert_eq!(out.exp, claims.exp);
         assert_eq!(out.iat, claims.iat);
+        assert!(
+            out.extra.is_empty(),
+            "minting a token without custom claims must leave extra empty after round-trip"
+        );
     }
 
     #[test]
@@ -227,6 +253,7 @@ mod tests {
             sub: "alice".to_owned(),
             exp: 1_000,
             iat: None,
+            extra: JsonMap::new(),
         };
         let token = sign_hs256(secret, &claims);
         let config = JwtConfig::new(secret.to_vec(), Algorithm::HS256);
@@ -241,6 +268,7 @@ mod tests {
             sub: "alice".to_owned(),
             exp: now_secs() + 3600,
             iat: None,
+            extra: JsonMap::new(),
         };
         let token = sign_hs256(b"signed-with-this-secret", &claims);
         let config = JwtConfig::new(b"verify-with-DIFFERENT-secret".to_vec(), Algorithm::HS256);
@@ -264,6 +292,7 @@ mod tests {
             sub: "alice".to_owned(),
             exp: now_secs() + 3600,
             iat: None,
+            extra: JsonMap::new(),
         };
         // Sign with HS384 but configure validation for HS256.
         let token = encode(
@@ -276,5 +305,61 @@ mod tests {
 
         let err = decode(&token, &config).expect_err("algorithm mismatch must reject");
         assert_eq!(err, JwtDecodeError::InvalidAlgorithm);
+    }
+
+    #[test]
+    fn decode_token_with_custom_claims_surfaces_them_in_extra() {
+        // PRD-mandated 074 verification (custom claims): minting a token with
+        // application-defined claims like `role` and `scopes` must round-trip
+        // verbatim through the `extra` flattened map. Pins the contract that
+        // the explicit fields (sub/exp/iat) are NOT also duplicated into
+        // `extra` — the flatten target only captures keys serde didn't bind
+        // to an explicit field.
+        let secret = b"jolt-rs-074-custom-claims-secret";
+        let mut extra = JsonMap::new();
+        extra.insert("role".to_owned(), JsonValue::String("admin".to_owned()));
+        extra.insert(
+            "scopes".to_owned(),
+            serde_json::json!(["read", "write", "admin"]),
+        );
+        extra.insert("tenant_id".to_owned(), serde_json::json!(42));
+        let claims = JwtClaims {
+            sub: "user-074".to_owned(),
+            exp: now_secs() + 3600,
+            iat: Some(now_secs()),
+            extra,
+        };
+        let token = sign_hs256(secret, &claims);
+        let config = JwtConfig::new(secret.to_vec(), Algorithm::HS256);
+
+        let out = decode(&token, &config).expect("valid custom-claims token must decode");
+        assert_eq!(out.sub, "user-074");
+        assert_eq!(
+            out.extra.get("role"),
+            Some(&JsonValue::String("admin".to_owned())),
+            "custom `role` claim must surface in extra after decode round-trip",
+        );
+        assert_eq!(
+            out.extra.get("scopes"),
+            Some(&serde_json::json!(["read", "write", "admin"])),
+            "array-valued custom claim must round-trip verbatim",
+        );
+        assert_eq!(
+            out.extra.get("tenant_id"),
+            Some(&serde_json::json!(42)),
+            "numeric custom claim must round-trip verbatim",
+        );
+        assert!(
+            out.extra.get("sub").is_none(),
+            "explicit `sub` field must NOT double-up in the flatten target",
+        );
+        assert!(
+            out.extra.get("exp").is_none(),
+            "explicit `exp` field must NOT double-up in the flatten target",
+        );
+        assert!(
+            out.extra.get("iat").is_none(),
+            "explicit `iat` field must NOT double-up in the flatten target",
+        );
     }
 }

@@ -3955,6 +3955,7 @@ mod auth_jwt {
             sub: "alice".to_owned(),
             exp,
             iat: Some(now_secs()),
+            extra: serde_json::Map::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4010,6 +4011,7 @@ mod auth_jwt {
             sub: "alice".to_owned(),
             exp: 1_000,
             iat: None,
+            extra: serde_json::Map::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4071,6 +4073,7 @@ mod auth_jwt {
             sub: "alice".to_owned(),
             exp: now_secs() + 3600,
             iat: None,
+            extra: serde_json::Map::new(),
         };
         let token = sign_hs256(b"signed-with-this-secret", &claims);
 
@@ -4192,6 +4195,7 @@ mod auth_jwt {
             sub: minted_sub.to_owned(),
             exp: minted_exp,
             iat: Some(minted_iat),
+            extra: serde_json::Map::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4249,6 +4253,101 @@ mod auth_jwt {
             observed.iat,
             Some(minted_iat),
             "iat field (Option<usize>) must round-trip verbatim, preserving the Some discriminant"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_jwt_with_custom_claims_surfaces_extra_in_extension() {
+        // PRD-mandated 074 verification (custom claims half): the closing
+        // slice of phase16's test bundle. The five sibling cases (missing
+        // header, malformed header, wrong algorithm, expired token, valid
+        // token) are pinned upstream:
+        //   * missing header  — 071's `missing_authorization_header_short_circuits_with_401`
+        //   * malformed header — 071's `non_bearer_authorization_header_short_circuits_with_401`
+        //   * wrong algorithm  — jolt-utils' `decode_algorithm_mismatch_yields_invalid_algorithm_variant`
+        //   * expired token    — 072's `expired_jwt_short_circuits_with_401`
+        //   * valid token      — 072's `valid_jwt_passes_through_and_inner_runs`
+        //                        + 073's `valid_jwt_stashes_typed_claims_via_extension_key_jwtclaims`
+        // This test closes phase16 by pinning the custom-claims contract end-
+        // to-end through the AuthJwtLayer (rather than at the jolt-utils
+        // decode call alone): a token minted with `role`/`scopes` custom
+        // claims must surface those claims via `JwtClaims::extra` on the
+        // request-extensions handle used by downstream handlers.
+        let secret = b"jolt-rs-074-auth-jwt-custom-claims-secret";
+        let mut minted_extra = serde_json::Map::new();
+        minted_extra.insert(
+            "role".to_owned(),
+            serde_json::Value::String("admin".to_owned()),
+        );
+        minted_extra.insert(
+            "scopes".to_owned(),
+            serde_json::json!(["read", "write", "admin"]),
+        );
+        let claims = JwtClaims {
+            sub: "user-074".to_owned(),
+            exp: now_secs() + 3600,
+            iat: Some(now_secs()),
+            extra: minted_extra,
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+
+        // Side-channel capture mirrors the 073 test's pattern: keep the
+        // assertion focused on the extension-key contract rather than on
+        // serialization-through-HTTP.
+        let captured: Arc<std::sync::Mutex<Option<JwtClaims>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_for_inner = Arc::clone(&captured);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured_for_inner);
+            async move {
+                let claims = req
+                    .extensions()
+                    .get::<JwtClaims>()
+                    .expect(
+                        "valid custom-claims token must surface JwtClaims via the typed key",
+                    )
+                    .clone();
+                *captured.lock().unwrap() = Some(claims);
+                Ok::<Response, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token(&token, Arc::clone(&request_ext));
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid custom-claims token must allow the inner handler to run"
+        );
+
+        let observed = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("inner service must have observed the stashed JwtClaims");
+        assert_eq!(observed.sub, "user-074");
+        assert_eq!(
+            observed.extra.get("role"),
+            Some(&serde_json::Value::String("admin".to_owned())),
+            "string-valued custom claim `role` must surface verbatim through extra"
+        );
+        assert_eq!(
+            observed.extra.get("scopes"),
+            Some(&serde_json::json!(["read", "write", "admin"])),
+            "array-valued custom claim `scopes` must surface verbatim through extra"
+        );
+        assert!(
+            !request_ext.is_finished(),
+            "custom-claims happy path must NOT mark the request finished"
         );
     }
 }
