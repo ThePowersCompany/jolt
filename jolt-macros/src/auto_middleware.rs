@@ -1,12 +1,16 @@
 //! `#[derive(AutoMiddleware)]` proc-macro derive — phase10 field parsing.
 //!
 //! Phase10 ladder:
-//! - JOLT-RS-046 (this iteration): parse the struct's fields and their types
-//!   into [`AutoMiddlewareInput`] + [`AutoMiddlewareField`]. The derive emits a
+//! - JOLT-RS-046: parsed the struct's fields and their types into
+//!   [`AutoMiddlewareInput`] + [`AutoMiddlewareField`]. The derive emits a
 //!   minimal hidden marker so an integration test can verify the derive
 //!   compiled and parsed without depending on later codegen.
-//! - JOLT-RS-047 will mark body-candidate fields (`T: DeserializeOwned` and not
-//!   `Request`/`QueryParams`).
+//! - JOLT-RS-047 (this iteration): classify each parsed field with a
+//!   [`FieldKind`]. The body-candidate rule fires when `field.ident == "body"`
+//!   per the spec ("auto-applies body parsing if `body: T` field exists"); the
+//!   field's type is captured verbatim so the body-extraction codegen in 053
+//!   can name `T` in `__req.json::<T>()`. JOLT-RS-048/049 extend [`FieldKind`]
+//!   with the `QueryParams` and `Request` variants.
 //! - JOLT-RS-048 will mark query-extraction fields (`QueryParams<T>` or
 //!   `HashMap<String, String>`).
 //! - JOLT-RS-049 will mark request-injection fields (`&Request` or `Request`).
@@ -38,11 +42,43 @@ pub(crate) struct AutoMiddlewareInput {
 /// `syn::Field` — the ident lets later passes match on `body`, `query_params`,
 /// `req` etc., and the type lets them inspect for `&Request`, `QueryParams<T>`,
 /// or `HashMap<String, String>` shapes.
+///
+/// JOLT-RS-047 added [`FieldKind`] classification at parse time so later phase10
+/// passes can iterate the parsed input once, dispatch on `kind`, and emit the
+/// per-kind extraction code in 053. The `ty` stays verbatim because codegen
+/// will splice it into `__req.json::<#ty>()` (Body) and similar shapes.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields are read by tests this iteration; JOLT-RS-047+ reads them in kind detection.
+#[allow(dead_code)] // fields are read by tests this iteration; JOLT-RS-051+ reads them in layer codegen.
 pub(crate) struct AutoMiddlewareField {
     pub(crate) ident: Ident,
     pub(crate) ty: Type,
+    pub(crate) kind: FieldKind,
+}
+
+/// Per-field classification used by the layer codegen in JOLT-RS-051+ to emit
+/// the right extraction call per field.
+///
+/// Detection is name-based per the spec ("auto-applies body parsing if
+/// `body: T` field exists"). 048 will add `QueryParams` (matching `query_params`
+/// by name and `QueryParams<T>` / `HashMap<String, String>` by type); 049 will
+/// add `Request` (matching `req` by name and `Request` / `&Request` by type).
+/// Until those land, every non-`body` field falls through to [`FieldKind::Other`]
+/// — including ones the spec eventually marks as Query/Request — which is the
+/// correct behavior for 047 in isolation: those fields aren't body-candidates,
+/// and their final classification is 048/049's responsibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FieldKind {
+    /// Body-candidate. The spec triggers JSON body parsing when a field named
+    /// `body: T` is present; codegen in 053 will emit `__req.json::<T>()` and
+    /// assign the result into the `body` field of the constructed middleware.
+    Body,
+    /// Catch-all for fields not yet classified. 048/049 narrow this further by
+    /// adding `QueryParams` and `Request` variants. After phase10 closes, an
+    /// `Other` field is one the user added that doesn't trigger any framework
+    /// extraction — codegen treats it as `Default::default()` per-request (the
+    /// same default-construction contract used by `#[endpoint]` wrappers; see
+    /// JOLT-RS-043's progress notes).
+    Other,
 }
 
 /// Parse a `DeriveInput` into [`AutoMiddlewareInput`].
@@ -90,9 +126,11 @@ fn parse_struct_fields(
                     .ident
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
+                let kind = classify_field(&field_ident);
                 out.push(AutoMiddlewareField {
                     ident: field_ident,
                     ty: field.ty.clone(),
+                    kind,
                 });
             }
             Ok(out)
@@ -103,6 +141,14 @@ fn parse_struct_fields(
             "#[derive(AutoMiddleware)] requires named fields (tuple structs aren't supported; \
              field-kind detection in JOLT-RS-047+ keys on field names like `body`, `query_params`, `req`)",
         )),
+    }
+}
+
+fn classify_field(ident: &Ident) -> FieldKind {
+    if ident == "body" {
+        FieldKind::Body
+    } else {
+        FieldKind::Other
     }
 }
 
@@ -332,6 +378,167 @@ mod tests {
             !rendered.contains("__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT"),
             "must NOT emit marker impl when parse fails, rendered: {rendered}"
         );
+    }
+
+    #[test]
+    fn parses_body_field_with_custom_type_as_body_kind() {
+        // PRD-mandated verification: "field body: CreateUserRequest → detected
+        // as body field." The detection rule is name-based (per the spec:
+        // "auto-applies body parsing if `body: T` field exists"). The captured
+        // type is preserved verbatim so the body-extraction codegen in 053 can
+        // splice it into `__req.json::<T>()`.
+        let input = parse_derive(
+            r#"
+            struct WithBody {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("body-bearing struct parses");
+        assert_eq!(parsed.fields.len(), 1);
+        assert_eq!(parsed.fields[0].ident, "body");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Body);
+        let ty = &parsed.fields[0].ty;
+        let ty_tokens = quote::quote!(#ty).to_string();
+        assert!(
+            ty_tokens.contains("CreateUserRequest"),
+            "body field type must round-trip for codegen in 053, got: {ty_tokens}"
+        );
+    }
+
+    #[test]
+    fn parses_body_field_with_primitive_type_as_body_kind() {
+        // A `body: String` field is still a body-candidate. Detection is
+        // name-based, not type-based — the spec says ANY `body: T` field
+        // triggers body parsing. The codegen in 053 will emit
+        // `__req.json::<String>()`, which is valid (serde_json deserializes
+        // into String for a JSON string body).
+        let input = parse_derive(
+            r#"
+            struct WithStringBody {
+                body: String,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("body-bearing struct parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Body);
+    }
+
+    #[test]
+    fn parses_non_body_named_field_as_other_kind() {
+        // Fields not named `body` fall through to `Other` for 047. 048/049 will
+        // narrow `query_params` and `req` further, but until then a `count`
+        // field stays `Other` — the layer codegen treats `Other` as
+        // `Default::default()` per-request.
+        let input = parse_derive(
+            r#"
+            struct WithCount {
+                count: usize,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("count-bearing struct parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Other);
+    }
+
+    #[test]
+    fn classifies_body_field_only_in_mixed_struct() {
+        // In a multi-field struct, only the `body` field is marked Body; every
+        // other field is Other (until 048/049 narrow further). This pins the
+        // ordering-independence of the classification — the body field can
+        // appear anywhere in the field list and still be the only Body.
+        let input = parse_derive(
+            r#"
+            struct Mixed {
+                count: usize,
+                body: CreateUserRequest,
+                flag: bool,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("mixed struct parses");
+        let kinds: Vec<FieldKind> = parsed.fields.iter().map(|f| f.kind).collect();
+        assert_eq!(kinds, vec![FieldKind::Other, FieldKind::Body, FieldKind::Other]);
+    }
+
+    #[test]
+    fn classifies_body_field_at_arbitrary_position() {
+        // The `body` field can be the first OR last field; classification
+        // depends only on the ident, not on the position.
+        let first = parse_derive(
+            r#"
+            struct First {
+                body: T,
+                trailing: bool,
+            }
+            "#,
+        );
+        let last = parse_derive(
+            r#"
+            struct Last {
+                leading: bool,
+                body: T,
+            }
+            "#,
+        );
+        let first_parsed = parse_auto_middleware_input(first).expect("first-position parses");
+        let last_parsed = parse_auto_middleware_input(last).expect("last-position parses");
+        assert_eq!(
+            first_parsed.fields[0].kind,
+            FieldKind::Body,
+            "body at position 0 is Body"
+        );
+        assert_eq!(
+            first_parsed.fields[1].kind,
+            FieldKind::Other,
+            "trailing field is Other"
+        );
+        assert_eq!(
+            last_parsed.fields[0].kind,
+            FieldKind::Other,
+            "leading field is Other"
+        );
+        assert_eq!(
+            last_parsed.fields[1].kind,
+            FieldKind::Body,
+            "body at last position is Body"
+        );
+    }
+
+    #[test]
+    fn unit_struct_has_no_body_field() {
+        // Unit structs have zero fields → there's nothing to classify, and the
+        // body-candidate iterator should yield nothing. Pinned here because
+        // 053's codegen will iterate `parsed.fields.iter().filter(|f| f.kind
+        // == Body)` and a unit struct must produce zero extraction calls.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("unit struct parses");
+        let body_count = parsed
+            .fields
+            .iter()
+            .filter(|f| f.kind == FieldKind::Body)
+            .count();
+        assert_eq!(body_count, 0);
+    }
+
+    #[test]
+    fn body_field_classification_does_not_depend_on_type() {
+        // Detection is name-based: even if the user writes `body: Request`
+        // (where `Request` is the framework type 049 will detect), 047 still
+        // marks it as Body because the field is NAMED `body`. 048/049 are
+        // free to add a precedence rule later (e.g. a Request-typed `body`
+        // field is treated as Request, not Body) — but that's their call,
+        // not 047's. Pinning the name-only behavior so a future change is
+        // explicit.
+        let input = parse_derive(
+            r#"
+            struct WithRequestNamedBody {
+                body: Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Body);
     }
 
     #[test]

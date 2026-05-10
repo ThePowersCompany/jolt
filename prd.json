@@ -699,7 +699,7 @@
       "verification": [
         "Unit test: field body: CreateUserRequest \u2192 detected as body field."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-048",
