@@ -1245,7 +1245,7 @@
       "verification": [
         "Unit test: query_as::<TestRow>(\"SELECT 1 AS id\") \u2192 fetch_one returns TestRow { id: 1 }."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-087",
