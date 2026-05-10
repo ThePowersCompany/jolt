@@ -45,6 +45,18 @@ struct MixedMiddleware {
     req: Option<Request>,
 }
 
+/// JOLT-RS-050: a struct that opts into the CORS layer via the helper
+/// `#[cors]` attribute. The integration test verifies the
+/// `attributes(cors)` opt-in on the derive (so rustc accepts the attribute at
+/// the source site) AND that the parsed flag flows through to the
+/// `__JOLT_AUTO_MIDDLEWARE_CORS` marker const.
+#[derive(AutoMiddleware)]
+#[cors]
+#[allow(dead_code)]
+struct CorsEnabledMiddleware {
+    body: CreateUserRequest,
+}
+
 #[allow(dead_code)]
 struct CreateUserRequest {
     name: String,
@@ -62,4 +74,28 @@ fn mixed_middleware_derive_emits_correct_field_count() {
     // that mis-counted (e.g. by skipping a field with a non-trivial generic
     // path or by dropping the trailing field) would surface here.
     assert_eq!(MixedMiddleware::__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT, 6);
+}
+
+#[test]
+fn middleware_without_cors_attribute_emits_cors_false() {
+    // JOLT-RS-050: a struct WITHOUT the `#[cors]` attribute has the cors
+    // marker const set to false. Both `UnitMiddleware` and `MixedMiddleware`
+    // exercise this — neither carries `#[cors]`. Wrapped in `const { ... }`
+    // so the const-value comparison happens at compile time (a regression
+    // that emitted `true` here would fail to build the test binary).
+    const { assert!(!UnitMiddleware::__JOLT_AUTO_MIDDLEWARE_CORS) }
+    const { assert!(!MixedMiddleware::__JOLT_AUTO_MIDDLEWARE_CORS) }
+}
+
+#[test]
+fn middleware_with_cors_attribute_emits_cors_true() {
+    // JOLT-RS-050: a struct WITH the `#[cors]` attribute has the cors marker
+    // const set to true. The `CorsEnabledMiddleware` declaration above is the
+    // source-site witness that `#[cors]` is accepted by rustc (via the
+    // derive's `attributes(cors)` opt-in); the const-block assertion is the
+    // parse-witness that the derive observed the attribute and propagated it
+    // to codegen. Same const-block rationale as the false-case test.
+    const { assert!(CorsEnabledMiddleware::__JOLT_AUTO_MIDDLEWARE_CORS) }
+    // The field-count const still works alongside the cors const.
+    assert_eq!(CorsEnabledMiddleware::__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT, 1);
 }

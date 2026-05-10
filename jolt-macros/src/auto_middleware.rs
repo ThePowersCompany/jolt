@@ -16,17 +16,23 @@
 //!   `HashMap<String, String>` (last path segment `HashMap` with two `String`
 //!   generic args, covering bare `HashMap` and `std::collections::HashMap`
 //!   variants) is also [`FieldKind::QueryParams`].
-//! - JOLT-RS-049 (this iteration): mark request-injection fields. Type-based
-//!   rule, regardless of name: any field whose type is `Request` or `&Request`
-//!   (with or without an explicit lifetime) is [`FieldKind::Request`]. Mutable
-//!   references (`&mut Request`) are NOT matched — middleware injection is the
+//! - JOLT-RS-049: mark request-injection fields. Type-based rule, regardless
+//!   of name: any field whose type is `Request` or `&Request` (with or without
+//!   an explicit lifetime) is [`FieldKind::Request`]. Mutable references
+//!   (`&mut Request`) are NOT matched — middleware injection is the
 //!   shared-reference shape per the spec, and excluding mut refs keeps the
 //!   surface narrow. Path qualification on the inner type is allowed
 //!   (`crate::Request`, `&::jolt_core::Request`) via last-path-segment
 //!   matching. The Request rule lives between QueryParams and the body-name
 //!   rule so a hypothetical `body: &Request` classifies as Request, pinning
 //!   type-before-name precedence consistently with 048's QueryParams rule.
-//! - JOLT-RS-050 will detect the `#[cors]` struct-level attribute.
+//! - JOLT-RS-050 (this iteration): detect the struct-level `#[cors]` attribute
+//!   and stash it as [`AutoMiddlewareInput::cors`]. The derive opts the
+//!   compiler into recognising `#[cors]` as a helper attribute via
+//!   `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`. The
+//!   expansion emits a second hidden marker
+//!   `__JOLT_AUTO_MIDDLEWARE_CORS: bool` so an integration test (and 051+'s
+//!   layer codegen) can observe whether the CORS layer should be wired in.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
 //! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
@@ -34,20 +40,29 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type};
+use syn::{
+    Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type,
+};
 
 /// Parsed shape of a `#[derive(AutoMiddleware)]` input.
 ///
-/// JOLT-RS-046 only captures the struct identifier and per-field metadata;
-/// later phase10/11 items extend [`AutoMiddlewareField`] with kind
-/// classification (body, query, req) and append struct-level attribute parsing
-/// (e.g. `#[cors]`). The struct ident is kept verbatim from the source so
-/// codegen can emit `impl <ident>` blocks targeting the user's type.
+/// JOLT-RS-046 captured the struct identifier and per-field metadata; 047-049
+/// extended [`AutoMiddlewareField`] with kind classification (body, query,
+/// req); 050 added struct-level attribute parsing for `#[cors]` via
+/// [`AutoMiddlewareInput::cors`]. The struct ident is kept verbatim from the
+/// source so codegen can emit `impl <ident>` blocks targeting the user's type.
 #[derive(Debug)]
-#[allow(dead_code)] // ident is consumed by expand_auto_middleware; fields are read by tests this iteration. JOLT-RS-047+ wires kind classification on top.
+#[allow(dead_code)] // ident is consumed by expand_auto_middleware; the rest are read by tests this iteration. JOLT-RS-051+ wires layer codegen on top.
 pub(crate) struct AutoMiddlewareInput {
     pub(crate) ident: Ident,
     pub(crate) fields: Vec<AutoMiddlewareField>,
+    /// `true` iff the struct carries a bare `#[cors]` attribute. JOLT-RS-051+
+    /// will use this flag to splice the CORS layer into the generated
+    /// middleware call chain. The attribute is opted-in as a derive helper via
+    /// `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`;
+    /// without that opt-in the compiler would reject `#[cors]` as an unknown
+    /// macro at the user's source site before the derive ever runs.
+    pub(crate) cors: bool,
 }
 
 /// One field on a `#[derive(AutoMiddleware)]` struct. Captured verbatim from
@@ -138,10 +153,15 @@ pub(crate) fn parse_auto_middleware_input(
     input: DeriveInput,
 ) -> syn::Result<AutoMiddlewareInput> {
     let ident = input.ident.clone();
+    let cors = parse_struct_attrs(&input.attrs);
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
-            Ok(AutoMiddlewareInput { ident, fields })
+            Ok(AutoMiddlewareInput {
+                ident,
+                fields,
+                cors,
+            })
         }
         Data::Enum(e) => Err(syn::Error::new_spanned(
             e.enum_token,
@@ -152,6 +172,22 @@ pub(crate) fn parse_auto_middleware_input(
             "#[derive(AutoMiddleware)] can only be applied to structs, not unions",
         )),
     }
+}
+
+/// Inspect the struct-level attributes for the `#[cors]` opt-in.
+///
+/// Matches a bare `#[cors]` (path attribute with no arguments). 050 doesn't
+/// parse any sub-arguments — the CORS configuration shape lands later in
+/// JOLT-RS-055+ (`CorsConfig { allow_origins, allow_methods, ... }`). For now
+/// a presence-or-absence flag is enough for 051+'s layer codegen to decide
+/// whether to wire in the CORS layer.
+///
+/// Other unrelated attributes (`#[derive(...)]` itself, `#[doc = "..."]`,
+/// custom user attributes) are ignored. If a user writes `#[cors]` multiple
+/// times the function still returns `true` — duplicates are a no-op rather
+/// than an error, mirroring how rustc treats repeated zero-arg attributes.
+fn parse_struct_attrs(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("cors"))
 }
 
 fn parse_struct_fields(
@@ -272,16 +308,19 @@ fn is_hashmap_string_string(ty: &Type) -> bool {
 /// impl <Struct> {
 ///     #[doc(hidden)]
 ///     pub const __JOLT_AUTO_MIDDLEWARE_FIELD_COUNT: usize = N;
+///     #[doc(hidden)]
+///     pub const __JOLT_AUTO_MIDDLEWARE_CORS: bool = <true if #[cors] present>;
 /// }
 /// ```
 ///
-/// The const is the minimal observable artifact for the 046-mandated
-/// "derive compiles on a struct with various field types" verification: an
-/// integration test can `assert_eq!(MyStruct::__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT, N)`
-/// to confirm the derive ran AND the field count matches what the user wrote.
-/// JOLT-RS-051+ will replace this marker with the real `tower::Layer` impl;
-/// the const can stay as a `cfg(test)`-gated parse witness or be removed at
-/// that point.
+/// The two consts are the minimal observable artifacts for parse-witness:
+/// 046's `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT` proves the derive ran AND saw
+/// the user's field count; 050's `__JOLT_AUTO_MIDDLEWARE_CORS` proves the
+/// derive observed the struct-level `#[cors]` attribute (the integration test
+/// in `auto_middleware_derive.rs` asserts the bool value on a `#[cors]`-bearing
+/// vs bare struct). JOLT-RS-051+ will replace these markers with the real
+/// `tower::Layer` impl; the consts can stay as `cfg(test)`-gated witnesses or
+/// be removed at that point.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. This keeps
@@ -294,11 +333,14 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
     };
     let ident = &parsed.ident;
     let field_count = parsed.fields.len();
+    let cors = parsed.cors;
     quote! {
         #[automatically_derived]
         impl #ident {
             #[doc(hidden)]
             pub const __JOLT_AUTO_MIDDLEWARE_FIELD_COUNT: usize = #field_count;
+            #[doc(hidden)]
+            pub const __JOLT_AUTO_MIDDLEWARE_CORS: bool = #cors;
         }
     }
 }
@@ -1039,5 +1081,136 @@ mod tests {
         );
         let parsed = parse_auto_middleware_input(input).expect("parses");
         assert_eq!(parsed.fields[0].kind, FieldKind::Request);
+    }
+
+    #[test]
+    fn parses_struct_with_cors_attribute_sets_cors_true() {
+        // PRD-mandated verification: "#[cors] on struct → CORS flag set to
+        // true in generated code." Detection is a bare path-attribute check
+        // on the struct's attribute list; arguments (if any) are ignored for
+        // 050 — JOLT-RS-055 introduces the CorsConfig shape.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct CorsMw {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert!(parsed.cors, "#[cors] struct attr must flip cors to true");
+        assert_eq!(parsed.fields[0].kind, FieldKind::Body);
+    }
+
+    #[test]
+    fn parses_struct_without_cors_attribute_leaves_cors_false() {
+        // Bare struct (no struct-level attrs) → cors is false. Field-level
+        // attributes don't count; the spec is explicit that `#[cors]` is a
+        // struct-level opt-in.
+        let input = parse_derive(
+            r#"
+            struct PlainMw {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert!(!parsed.cors, "no #[cors] attr leaves cors false");
+    }
+
+    #[test]
+    fn unrelated_struct_attributes_do_not_set_cors() {
+        // The cors check matches only on `path().is_ident("cors")`. Other
+        // attributes — `#[doc = "..."]`, `#[allow(...)]`, user-defined
+        // attributes that happen to be on the struct — must not flip the flag.
+        let input = parse_derive(
+            r#"
+            #[doc = "a middleware"]
+            #[allow(dead_code)]
+            struct Mw {
+                body: T,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert!(!parsed.cors, "unrelated attrs must not flip cors");
+    }
+
+    #[test]
+    fn duplicate_cors_attributes_are_a_no_op() {
+        // Multiple `#[cors]` attrs on the same struct still mean cors=true.
+        // 050 doesn't error on duplicates — mirrors how rustc treats repeated
+        // zero-arg helper attributes. If a future PRD wants to reject
+        // duplicates (e.g. once `#[cors(...)]` takes config), this test will
+        // need to be updated alongside the new rule.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            #[cors]
+            struct Mw;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert!(parsed.cors, "duplicate #[cors] still means cors=true");
+    }
+
+    #[test]
+    fn cors_attribute_on_unit_struct() {
+        // Unit struct + #[cors] is a valid combination: the user wants the
+        // CORS layer wired in but has no body/query/req extraction. Pinned so
+        // 051+'s layer codegen can treat this as a "CORS-only middleware"
+        // shape.
+        let input = parse_derive("#[cors] struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert!(parsed.cors);
+        assert!(parsed.fields.is_empty());
+    }
+
+    #[test]
+    fn expand_emits_cors_const_true_when_attribute_present() {
+        // End-to-end shape: the marker impl block carries
+        // `__JOLT_AUTO_MIDDLEWARE_CORS: bool = true` when `#[cors]` is on the
+        // struct. The integration test in `auto_middleware_derive.rs` will
+        // assert this directly.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct CorsMw {
+                body: T,
+            }
+            "#,
+        );
+        let rendered = expand_auto_middleware(input).to_string();
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_CORS"),
+            "expected hidden cors-flag const, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(": bool = true"),
+            "expected cors = true literal, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_cors_const_false_when_attribute_absent() {
+        // Parallel to the true case: bare struct → cors = false in the marker
+        // impl. Both consts are always emitted so consumers don't need to
+        // probe for the attribute's presence via cfg.
+        let input = parse_derive(
+            r#"
+            struct PlainMw {
+                body: T,
+            }
+            "#,
+        );
+        let rendered = expand_auto_middleware(input).to_string();
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_CORS"),
+            "expected hidden cors-flag const even when false, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(": bool = false"),
+            "expected cors = false literal, rendered: {rendered}"
+        );
     }
 }

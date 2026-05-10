@@ -52,13 +52,18 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   HashMap<String, String>` as `FieldKind::QueryParams`,
 /// - 049 (landed): classifies `Request` and `&Request` (any name, with or
 ///   without lifetime) as `FieldKind::Request`,
-/// - 050 detects struct-level `#[cors]` attributes,
+/// - 050 (landed): detects the struct-level `#[cors]` attribute and emits a
+///   second hidden marker `__JOLT_AUTO_MIDDLEWARE_CORS: bool`. The
+///   `attributes(cors)` opt-in tells the compiler to treat `#[cors]` as a
+///   helper attribute owned by this derive (without it, the compiler would
+///   reject `#[cors]` as an unknown macro at the user's source site before
+///   the derive runs).
 /// - 051-053 generate the `tower::Layer` impl + extraction code in `call()`.
 ///
 /// On parse failure the emission is a single `compile_error!` token (no
 /// partial codegen), so the user gets a single targeted diagnostic instead of
 /// a cascade of "use of undeclared type" errors from later code.
-#[proc_macro_derive(AutoMiddleware)]
+#[proc_macro_derive(AutoMiddleware, attributes(cors))]
 pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     auto_middleware::expand_auto_middleware(input).into()
