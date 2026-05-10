@@ -43,3 +43,25 @@ Files changed:
 Notes for next iterations:
 - JOLT-RS-003 (jolt-macros): set proc-macro = true and pull syn/quote/proc-macro2 from workspace; stub a #[proc_macro_attribute] and a #[proc_macro_derive] so `cargo check -p jolt-macros` exercises both attribute paths.
 - JOLT-RS-007 (Method enum) will be the first jolt-core module — likely create src/method.rs and `pub mod method;` in lib.rs.
+
+## 2026-05-10 — JOLT-RS-003: jolt-macros crate deps + stub proc-macros
+
+PRD item: JOLT-RS-003 (priority 3, phase00-workspace-scaffold) — Add syn 2, quote, proc-macro2 deps to jolt-macros and stub lib.rs with #[proc_macro_attribute] and #[proc_macro_derive] placeholders.
+
+Verification: `cargo check -p jolt-macros` → succeeds (compiled clean in 1.61s; resolved syn 2.0.117, quote 1.0.45, proc-macro2 1.0.106).
+
+Key decisions:
+- Pulled syn/quote/proc-macro2 via { workspace = true } — same thin-shim pattern as jolt-core. syn already gets full+extra-traits from the workspace pin, so no per-crate feature additions.
+- proc-macro = true was already set in the stub from JOLT-RS-001; left it untouched.
+- Placeholder names use `jolt_placeholder` / `JoltPlaceholder` rather than guessing at final names (e.g. #[endpoint], #[derive(JoltBody)]). Future PRD items in phase04+ (endpoint registration), phase07 (patch queries), and phase11 (typegen) will introduce the real macros and likely delete these stubs.
+- Both placeholders actually exercise parse_macro_input + quote! (parsing an ItemFn for the attribute, a DeriveInput for the derive) so the dep wiring is proven, not just declared.
+
+Files changed:
+- jolt-macros/Cargo.toml (added [dependencies] block)
+- jolt-macros/src/lib.rs (added crate-level doc + two placeholder proc-macros; was 0 bytes)
+- prd.json — JOLT-RS-003 passes: true
+
+Notes for next iterations:
+- JOLT-RS-004 (jolt-db): add sqlx (postgres, runtime-tokio-rustls — workspace pin already has these features), tokio, sha2 deps; keep lib.rs as a doc-comment stub.
+- When real endpoint/derive macros land, delete jolt_placeholder + JoltPlaceholder rather than renaming — they exist only to prove the dep graph compiles.
+

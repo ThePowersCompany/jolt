@@ -83,7 +83,7 @@
       "verification": [
         "cargo check -p jolt-macros succeeds."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-004",
