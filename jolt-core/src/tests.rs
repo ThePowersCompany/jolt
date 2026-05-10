@@ -863,6 +863,70 @@ mod endpoint {
     }
 }
 
+mod endpoint_registry {
+    //! PRD JOLT-RS-029 verification ("register two endpoints, registry has
+    //! length 2") plus the empty-registry contract that JOLT-RS-031's
+    //! build_router() will rely on.
+
+    use crate::{Endpoint, EndpointFuture, EndpointRegistry, Method, Request};
+    use axum::body::Body;
+
+    struct Stub {
+        path: &'static str,
+        method: Method,
+    }
+
+    impl Endpoint for Stub {
+        fn path(&self) -> &str {
+            self.path
+        }
+
+        fn method(&self) -> Method {
+            self.method
+        }
+
+        fn handler(&self, _req: Request) -> EndpointFuture {
+            Box::pin(async {
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .body(Body::empty())
+                    .unwrap()
+            })
+        }
+    }
+
+    #[test]
+    fn new_registry_is_empty() {
+        let registry = EndpointRegistry::new();
+        assert_eq!(registry.len(), 0);
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn register_two_endpoints_yields_length_two() {
+        // PRD-mandated verification for JOLT-RS-029.
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/a",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/b",
+            method: Method::Post,
+        });
+        assert_eq!(registry.len(), 2);
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        // Default impl is what `JoltServer` will use to embed an empty
+        // registry without an explicit `EndpointRegistry::new()` call.
+        let registry = EndpointRegistry::default();
+        assert!(registry.is_empty());
+    }
+}
+
 mod server {
     use crate::{CorsConfig, JoltServer};
 
