@@ -542,3 +542,45 @@ Notes for next iterations:
 - `RequestExt` is currently `Send + Sync` automatically (AtomicBool is both). When 021 stores it in axum::http::Extensions, the `'static + Send + Sync` bound is satisfied. No PhantomData or unsafe needed.
 - JsonBody openness lock from 018 is unaffected by this change. Phase04 doesn't touch the response surface.
 - The `body_bytes` test helper is private to `tests::response` (same module). If `tests::request` or future test modules need similar bytes-extraction helpers, factor up to `mod tests` (sibling to `mod response`) — but only if a second consumer materializes; YAGNI applies.
+
+## 2026-05-10 — JOLT-RS-020: RequestExt mark_finished() + is_finished()
+
+PRD item: JOLT-RS-020 (priority 20, phase04-requestext-flag) — Implement RequestExt::mark_finished() and RequestExt::is_finished().
+
+Verification:
+- `cargo test -p jolt-core -- tests::request_ext` → 7/7 passed (2 prior + 5 new), 0 failed, 54 filtered out; finished in 0.00s.
+- `cargo test -p jolt-core --lib` → 61 passed total (up from 56); 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.30s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..019 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Picked `Ordering::Relaxed` for both store and load per JOLT-RS-019 progress notes recommendation. `finished` is a one-way latch (false → true), no other state hangs off it, no acquire/release relationship to another datum. If a future requirement adds state that must be visible alongside the flip (e.g. a "finished_by" middleware-id), upgrade to Release/Acquire then — and update this comment so the next agent doesn't have to re-derive the choice.
+- Both methods take `&self` (not `&mut self`). Locked in by `mark_finished_takes_shared_reference` test. The whole point of `AtomicBool` over `bool` is shared mutation across middleware layers without threading `&mut` through every call site; switching to `&mut self` would silently negate that.
+- `mark_finished()` is `store(true, Relaxed)` not `compare_exchange(false, true, ..)`. Idempotent latch semantics are sufficient — there's no caller-visible difference between "first finisher" and "second finisher". A CAS would let middleware detect "I was the one who finished it," but no such caller exists yet and adding the API now would be premature. If JOLT-RS-021's middleware integration shows that detection matters, swap in `swap()` or a new `mark_finished_first() -> bool` then.
+- Did NOT add `unmark_finished()` / reset semantics. The PRD treats this as a one-way latch (per JOLT-RS-019's notes: "false → true"). A reset method would invite middleware to un-finish a request, which contradicts the semantic. If a use case emerges (e.g. retry logic), a separate explicit `reset()` or a fresh `RequestExt::new()` is the right shape, not bidirectional toggling.
+- Doc comment on `mark_finished()` explicitly states "Idempotent; subsequent calls are no-ops" — locked in by `mark_finished_is_idempotent` test. No doc on `is_finished()`: the name is self-explanatory and a docstring would just restate it.
+- Did NOT introduce a `Finished` newtype or builder pattern. Bare AtomicBool with two methods is the minimal surface; adding wrappers would be premature abstraction the PRD doesn't request.
+- Did NOT touch Request.finished (the deferred migration from JOLT-RS-014). That's JOLT-RS-021's scope when RequestExt gets wired through axum::http::Extensions.
+
+Tests added (5 in `tests::request_ext`):
+- `is_finished_is_false_after_construction` — `RequestExt::new().is_finished()` is false. Symmetric to the existing `new_constructs_with_finished_defaulting_to_false`, but exercises the new public method instead of the field.
+- `mark_finished_flips_is_finished_to_true` — the PRD-mandated verification ("mark_finished() → is_finished() returns true").
+- `mark_finished_is_idempotent` — calls mark_finished() twice; locks in latch semantics. Without this test, a future swap to `compare_exchange` that returns `Err` on already-set could pass silently if no one reasoned about the second-call path.
+- `mark_finished_takes_shared_reference` — calls through `&ext` rather than `ext`; locks in the &self signature so a refactor to &mut self fails to compile.
+- `is_finished_observes_direct_field_store` — stores via the public `finished` field with Ordering::Relaxed and reads via `is_finished()`. Proves the method reads the same atomic the field exposes; a refactor that introduces a shadow `cached_finished: bool` would fail this.
+
+Files changed:
+- jolt-core/src/request_ext.rs — added `mark_finished(&self)` and `is_finished(&self) -> bool`; imported `Ordering`.
+- jolt-core/src/tests.rs — added 5 unit tests in `mod request_ext`.
+- prd.json — JOLT-RS-020 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-021 (priority 21, closes phase04): "Register RequestExt as an axum request extension type; test insertion + retrieval through Extensions." The deferred Request.finished migration from JOLT-RS-014 lands here. Two options for the integration shape:
+  * (a) Add `extensions: axum::http::Extensions` field to Request, store `Arc<RequestExt>` (or `RequestExt` directly) via `Extensions::insert`. Aligns with PRD step's "axum request extension" language and the product_decision (`req.markAsFinished → finished: AtomicBool`). The `pub finished: bool` field on Request gets deleted at that point.
+  * (b) Keep RequestExt as a separate parameter alongside Request in handlers. Simpler but less idiomatic — axum's typed Extensions are the canonical place.
+  Recommend (a). When implementing, the JOLT-RS-014 `has_finished_reflects_finished_flag` test rewrites from `req.finished = true` to `req.extensions().get::<RequestExt>().unwrap().mark_finished()` (or whatever lookup shape lands).
+- Storage shape inside Extensions: `axum::http::Extensions::insert<T: 'static + Send + Sync>(t: T)` requires `T: Clone` for `.get()` to return a reference (it doesn't actually need Clone for insert, but `Extensions` clones internally on some paths). RequestExt is `!Clone` (AtomicBool is !Clone by design — see JOLT-RS-019 notes). Two ways out: (i) wrap in `Arc<RequestExt>` so the Arc is what's stored; `.get::<Arc<RequestExt>>()` gives `&Arc<RequestExt>`, and `.mark_finished()` works through Deref. (ii) implement `Clone for RequestExt` via per-field `.load(Relaxed)` — but that loses the shared-state invariant the type exists for. Recommend (i): `Arc<RequestExt>` in Extensions.
+- The Cargo.toml dependency surface for 021 needs `axum::http::Extensions` — already available transitively through axum (which is already a dep). No new crate needed.
+- If JOLT-RS-022+ (server builder phase) ends up needing `Default for RequestExt`, derive it then; AtomicBool::default() is false, so it's safe — just hold off until a consumer actually asks per JOLT-RS-019's "overspecified" guidance.
+- Latch ordering choice (Relaxed for both) is now a load-bearing decision. The progress entry above documents the reasoning so a future agent reviewing memory ordering doesn't re-derive from scratch.

@@ -8,7 +8,7 @@
 //!
 //! [`Request`]: crate::Request
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct RequestExt {
@@ -20,5 +20,14 @@ impl RequestExt {
         Self {
             finished: AtomicBool::new(false),
         }
+    }
+
+    /// Latches `finished` to `true`. Idempotent; subsequent calls are no-ops.
+    pub fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Relaxed)
     }
 }

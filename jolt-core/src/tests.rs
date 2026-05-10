@@ -685,4 +685,45 @@ mod request_ext {
         let ext = RequestExt::new();
         assert!(!ext.finished.into_inner());
     }
+
+    #[test]
+    fn is_finished_is_false_after_construction() {
+        let ext = RequestExt::new();
+        assert!(!ext.is_finished());
+    }
+
+    #[test]
+    fn mark_finished_flips_is_finished_to_true() {
+        let ext = RequestExt::new();
+        ext.mark_finished();
+        assert!(ext.is_finished());
+    }
+
+    #[test]
+    fn mark_finished_is_idempotent() {
+        // Latch semantics: repeated calls must not regress the flag.
+        let ext = RequestExt::new();
+        ext.mark_finished();
+        ext.mark_finished();
+        assert!(ext.is_finished());
+    }
+
+    #[test]
+    fn mark_finished_takes_shared_reference() {
+        // Locks in &self (not &mut self): the whole point of AtomicBool is
+        // shared mutation across middleware layers without &mut threading.
+        let ext = RequestExt::new();
+        let shared = &ext;
+        shared.mark_finished();
+        assert!(shared.is_finished());
+    }
+
+    #[test]
+    fn is_finished_observes_direct_field_store() {
+        // Proves is_finished() reads the same atomic the public field exposes —
+        // a future refactor that introduces a shadow field would fail this.
+        let ext = RequestExt::new();
+        ext.finished.store(true, Ordering::Relaxed);
+        assert!(ext.is_finished());
+    }
 }
