@@ -1301,7 +1301,7 @@
       "verification": [
         "Dedicated connection opens without error."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-091",

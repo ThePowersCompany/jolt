@@ -170,6 +170,56 @@
 //!     at the connection level, so a failed explicit rollback is rarely
 //!     load-bearing. On the commit path the commit error *is* the reason the
 //!     txn didn't take effect, so propagating it directly is correct.
+//!
+//! [`JoltDb::listen_connection`] (JOLT-RS-090) opens phase21's LISTEN/NOTIFY
+//! layer. Returns a dedicated [`sqlx::postgres::PgListener`] — a single
+//! Postgres connection allocated outside the regular pool and reserved for
+//! `LISTEN <channel>` + notification streaming. JOLT-RS-091 (`listen`) and
+//! JOLT-RS-092 (`notify`) build on top of this opener.
+//!
+//! 15. **Dedicated connection is a `sqlx::postgres::PgListener`, not a
+//!     `tokio_postgres::Connection` (JOLT-RS-090).** The PRD's task wording
+//!     ("dedicated tokio-postgres connection") describes what kind of
+//!     connection LISTEN/NOTIFY needs (a single long-lived TCP connection
+//!     dedicated to receiving async notifications, *not* a pool-checked-out
+//!     connection that gets returned between calls). It does not mandate
+//!     adding `tokio-postgres` as a sibling driver to sqlx. sqlx's
+//!     [`PgListener`](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgListener.html)
+//!     is exactly this shape — built on tokio-postgres-style async
+//!     mechanics internally but exposed through sqlx's existing trait stack,
+//!     producing the same `sqlx::Error` shape as the rest of jolt-db
+//!     (decision 6) and the same
+//!     [`PgNotification`](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgNotification.html)
+//!     type that JOLT-RS-091's stream will surface. Adding `tokio-postgres`
+//!     as a second driver would force the LISTEN/NOTIFY surface to use a
+//!     foreign error type and `Notification` struct, double the workspace's
+//!     async Postgres dependency footprint, and create a second connection
+//!     URL / TLS / SCRAM-auth code path. Using sqlx end-to-end keeps the
+//!     whole jolt-db crate on one driver stack.
+//!
+//! 16. **`listen_connection` allocates a fresh connection via
+//!     [`PgListener::connect_with`](https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgListener.html#method.connect_with),
+//!     reusing the pool's configured connection options (JOLT-RS-090).** This
+//!     gives the listener the same URL / TLS / credentials the pool was built
+//!     with (so a deployment configures Postgres exactly once via
+//!     [`DbConfig`]) while still allocating a *new* connection outside the
+//!     pool — the PRD-mandated "separate from pool" property holds. The
+//!     alternative (`PgListener::connect(url_string)`) would require
+//!     re-storing the URL on `JoltDb` after `connect` consumed it, which
+//!     breaks the existing decision-5 "JoltDb owns just the pool" shape.
+//!     `connect_with` sidesteps the storage question entirely by reading the
+//!     options off the pool handle directly.
+//!
+//! 17. **Returns the `PgListener` to the caller by value rather than storing
+//!     it on `JoltDb` (JOLT-RS-090).** `PgListener` is `&mut self`-driven for
+//!     `listen` / `recv` / `into_stream`, so a single shared `PgListener`
+//!     stored on `JoltDb` would force all listeners through one connection
+//!     and serialize them behind a `Mutex`. Returning a fresh listener per
+//!     call lets each subscriber own its own dedicated connection (matching
+//!     the spec's per-channel listen model) and avoids cross-subscriber
+//!     interference. JOLT-RS-091's `listen(channel)` will be a convenience
+//!     wrapper that calls `listen_connection()` + `listener.listen(channel)`
+//!     + `listener.into_stream()` internally.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -366,6 +416,37 @@ impl JoltDb {
                 Err(err)
             }
         }
+    }
+
+    /// Open a dedicated [`sqlx::postgres::PgListener`] connection for
+    /// LISTEN/NOTIFY (JOLT-RS-090).
+    ///
+    /// Allocates a fresh Postgres connection outside the pool, using the
+    /// pool's existing connection options (URL, TLS, credentials) via
+    /// [`PgListener::connect_with`]. The returned listener is the caller's
+    /// to own — call `.listen(channel)` to subscribe, then drive notifications
+    /// with `.recv()`, `.try_recv()`, or `.into_stream()`.
+    ///
+    /// Each call allocates a brand-new connection so concurrent subscribers
+    /// do not contend on a shared `PgListener` (decision 17). The pool
+    /// continues to serve regular pooled queries unaffected.
+    ///
+    /// Errors mirror [`PgListener::connect_with`]: returns the raw
+    /// [`sqlx::Error`] from the connection attempt (decision 6).
+    ///
+    /// [`PgListener::connect_with`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgListener.html#method.connect_with
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut listener = db.listen_connection().await?;
+    /// listener.listen("orders").await?;
+    /// while let Some(note) = listener.try_recv().await? {
+    ///     println!("got {} on {}", note.payload(), note.channel());
+    /// }
+    /// ```
+    pub async fn listen_connection(&self) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
+        sqlx::postgres::PgListener::connect_with(&self.pool).await
     }
 }
 
@@ -964,5 +1045,54 @@ mod tests {
             .execute(db.pool())
             .await
             .expect("drop table (teardown)");
+    }
+
+    // ---- JOLT-RS-090: JoltDb::listen_connection ----
+
+    /// Compile-time pin: `db.listen_connection()` resolves to
+    /// `Result<sqlx::postgres::PgListener, sqlx::Error>` (decisions 15–17).
+    /// The explicit return annotation forces the typecheck — a regression
+    /// that wraps the listener in a foreign type (e.g. `tokio_postgres::
+    /// Connection`) or changes the error shape would break this build pin
+    /// without ever needing a live Postgres.
+    #[test]
+    fn listen_connection_signature_returns_pg_listener() {
+        async fn _pin(db: &JoltDb) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
+            db.listen_connection().await
+        }
+    }
+
+    /// PRD-mandated success-path verification for JOLT-RS-090: "Dedicated
+    /// connection opens without error." Env-gated on `JOLT_TEST_DATABASE_URL`
+    /// (same convention as 083/084/086/088); without a live Postgres the
+    /// test skips trivially so the default `cargo test -p jolt-db` flow
+    /// stays runnable.
+    ///
+    /// Also pins decision 17 by opening two listeners back-to-back: each
+    /// call yields its own connection, neither blocks the other. The pool's
+    /// regular `health_check` is exercised in between to confirm the pool
+    /// path is unaffected by the listener allocations.
+    #[tokio::test]
+    async fn listen_connection_opens_dedicated_connection_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        let _listener_a = db
+            .listen_connection()
+            .await
+            .expect("first listen_connection should open without error");
+
+        // Pool is unaffected by the listener allocation.
+        db.health_check()
+            .await
+            .expect("pool still healthy after listen_connection");
+
+        let _listener_b = db
+            .listen_connection()
+            .await
+            .expect("second listen_connection should also open without error");
     }
 }
