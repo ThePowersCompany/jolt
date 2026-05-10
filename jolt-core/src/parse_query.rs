@@ -1,4 +1,5 @@
-//! Query string parsing `tower::Layer` (JOLT-RS-063).
+//! Query string parsing `tower::Layer` (JOLT-RS-063) plus typed field-level
+//! extractors (JOLT-RS-064+).
 //!
 //! [`ParseQueryLayer`] reads the inbound request's URI query string, splits it
 //! into key/value pairs, and stashes the resulting
@@ -6,6 +7,14 @@
 //! extensions so a downstream service (or the AutoMiddleware-derived struct
 //! consuming the request) can pull it back out with
 //! `req.extensions().get::<QueryParams>()`.
+//!
+//! [`extract`] (JOLT-RS-064) consumes the parsed map: given a key and a
+//! target type `T: FromStr`, it returns `Result<T, QueryExtractError>` so
+//! callers can route a missing-key or unparseable-value case to a
+//! `400 Bad Request` via [`bad_request_for_query_error`]. The extractor is a
+//! free function rather than another tower layer because the typed shape only
+//! exists once a specific field's `T` is known — the natural caller is the
+//! AutoMiddleware codegen, which knows the per-field type at compile time.
 //!
 //! Architectural decisions pinned here for JOLT-RS-064..067 to build on:
 //!
@@ -50,11 +59,16 @@
 //!    inject dance; this foundational layer does not.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::task::{Context, Poll};
 
+use axum::body::Body;
 use axum::extract::Request as AxumRequest;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use tower::{Layer, Service};
 
@@ -174,4 +188,110 @@ fn parse_query(query: Option<&str>) -> HashMap<String, String> {
             Some((k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+/// Typed extraction error returned by [`extract`] (JOLT-RS-064).
+///
+/// Two variants kept distinct so a future caller can map them differently
+/// (e.g., `Missing` → `"required parameter X missing"`,
+/// `Invalid` → `"invalid value Y for X"`). Collapsing them into a single
+/// variant would force every consumer to re-derive which case fired from the
+/// message text. Both round-trip to a `400 Bad Request` via
+/// [`bad_request_for_query_error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryExtractError {
+    /// The requested key was not present in the parsed query map.
+    Missing {
+        /// The key the caller asked for.
+        key: String,
+    },
+    /// The key was present but its value failed `T::from_str` (or the
+    /// equivalent typed parser used by a sibling extractor).
+    Invalid {
+        /// The key whose value failed to parse.
+        key: String,
+        /// The raw string value that was rejected.
+        value: String,
+        /// Human-readable detail from the underlying parser
+        /// (e.g., `ParseIntError::Display`).
+        message: String,
+    },
+}
+
+impl fmt::Display for QueryExtractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing { key } => {
+                write!(f, "Missing query parameter '{key}'")
+            }
+            Self::Invalid {
+                key,
+                value,
+                message,
+            } => {
+                write!(
+                    f,
+                    "Invalid query parameter '{key}'='{value}': {message}",
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for QueryExtractError {}
+
+/// Look up `key` in the parsed query map and parse the associated value as
+/// `T` via [`FromStr`] (JOLT-RS-064).
+///
+/// Works for any `T: FromStr` whose error implements [`Display`](fmt::Display)
+/// — covers the integer types the PRD calls out (`i32`, `i64`, `u32`,
+/// `u64`, `usize`) and the float types (`f32`, `f64`) without per-type
+/// boilerplate. The error variants in [`QueryExtractError`] distinguish a
+/// missing key from a present-but-unparseable value so the caller can decide
+/// how to surface each (the typical path is
+/// [`bad_request_for_query_error`] for both).
+///
+/// The function is field-level (not another `tower::Layer`): the
+/// AutoMiddleware codegen will call it from inside the per-field extraction
+/// block emitted for a `query: T` field, and the typed-error result lets the
+/// codegen route both shapes through the same 400-response path. A future
+/// PRD that needs custom typed parsers for surfaces that aren't `FromStr`
+/// (booleans with `"1"/"0"` aliases — JOLT-RS-065 — or enum aliasing via
+/// `TryFrom<&str>`) will add sibling helpers rather than parameterizing this
+/// one.
+pub fn extract<T>(params: &QueryParams, key: &str) -> Result<T, QueryExtractError>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let value = params.get(key).ok_or_else(|| QueryExtractError::Missing {
+        key: key.to_string(),
+    })?;
+    value
+        .parse::<T>()
+        .map_err(|err| QueryExtractError::Invalid {
+            key: key.to_string(),
+            value: value.clone(),
+            message: err.to_string(),
+        })
+}
+
+/// Build the `400 Bad Request` response surfaced when a typed query
+/// extractor (JOLT-RS-064+) rejects a value or finds a missing key. Mirrors
+/// [`parse_body::bad_request_for_parse_error`](crate::parse_body) in shape:
+/// `text/plain` body, `Display` impl of the error as the payload.
+///
+/// The AutoMiddleware codegen path is the expected caller — it will invoke
+/// [`extract`] (or a sibling typed parser) on each `query: T` field and
+/// short-circuit with this response on `Err`.
+pub fn bad_request_for_query_error(err: &QueryExtractError) -> Response {
+    let body = err.to_string();
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(Body::from(body))
+        .expect("400 response builder always succeeds with static headers + owned body")
 }

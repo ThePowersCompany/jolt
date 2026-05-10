@@ -21,7 +21,10 @@ pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
 pub use method::{Method, ParseMethodError};
 pub use parse_body::{ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService};
-pub use parse_query::{ParseQueryLayer, ParseQueryService, QueryParams};
+pub use parse_query::{
+    bad_request_for_query_error, extract as extract_query, ParseQueryLayer, ParseQueryService,
+    QueryExtractError, QueryParams,
+};
 pub use registered_endpoint::RegisteredEndpoint;
 pub use request::Request;
 pub use request_ext::RequestExt;

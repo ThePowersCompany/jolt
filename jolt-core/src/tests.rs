@@ -3054,3 +3054,142 @@ mod parse_query {
         assert_eq!(params.len(), 3);
     }
 }
+
+mod parse_query_typed {
+    //! PRD-mandated verification for JOLT-RS-064: "Unit test: ?count=5 →
+    //! `i32::from_str("5") == 5`. ?count=abc → 400."
+    //!
+    //! The 064 surface is a field-level extractor (`extract::<T>(params, key)`)
+    //! that consumes the [`QueryParams`] map produced by JOLT-RS-063. Tests
+    //! pin:
+    //! - The PRD success path (`?count=5` → `Ok(5_i32)`).
+    //! - The PRD failure path (`?count=abc` → `Err(Invalid …)` whose
+    //!   `bad_request_for_query_error` rendering is a 400).
+    //! - Float `FromStr` round-trip (the second half of the 064 mandate).
+    //! - Missing key surfaces as the distinct `Missing` variant (load-bearing
+    //!   for whichever 065+/codegen path wants to map it differently from
+    //!   `Invalid`).
+    //! - The 400 response body carries the typed-error `Display` payload so
+    //!   downstream callers can read the failing key + value off the response.
+    //!
+    //! 065's bool/enum extractors are explicitly NOT covered here — they need
+    //! their own helpers (bool's `FromStr` rejects `"1"`/`"0"`; enums need
+    //! `TryFrom<&str>`). Those will land in a sibling test module when the
+    //! PRD item ships.
+    use std::collections::HashMap;
+
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    use crate::{
+        bad_request_for_query_error, extract_query, QueryExtractError, QueryParams,
+    };
+
+    fn params_from(pairs: &[(&str, &str)]) -> QueryParams {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        QueryParams::from(map)
+    }
+
+    #[test]
+    fn int_value_parses_via_from_str() {
+        // PRD: ?count=5 → i32::from_str("5") == 5.
+        let params = params_from(&[("count", "5")]);
+        let parsed: i32 =
+            extract_query(&params, "count").expect("?count=5 must parse as i32");
+        assert_eq!(parsed, 5);
+    }
+
+    #[tokio::test]
+    async fn non_numeric_int_value_yields_invalid_error_and_400_response() {
+        // PRD: ?count=abc → 400. The extractor returns `Invalid` carrying the
+        // failing key, the rejected value, and the underlying ParseIntError's
+        // message. `bad_request_for_query_error` renders that into a
+        // `text/plain` 400 whose body includes the same detail so an HTTP
+        // caller can see the failing field without having to introspect the
+        // response code.
+        let params = params_from(&[("count", "abc")]);
+        let err = extract_query::<i32>(&params, "count")
+            .expect_err("?count=abc must NOT parse as i32");
+
+        match &err {
+            QueryExtractError::Invalid {
+                key,
+                value,
+                message,
+            } => {
+                assert_eq!(key, "count", "key field must echo the requested key");
+                assert_eq!(value, "abc", "value field must echo the rejected raw value");
+                assert!(
+                    !message.is_empty(),
+                    "message must carry the underlying parser's detail (got empty)",
+                );
+            }
+            other => panic!("expected QueryExtractError::Invalid, got {other:?}"),
+        }
+
+        let resp = bad_request_for_query_error(&err);
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "PRD: ?count=abc → 400",
+        );
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("400 response carries Content-Type")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "400 body content-type should be text/plain, got {content_type}",
+        );
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(
+            body_text.starts_with("Invalid query parameter 'count'='abc': "),
+            "400 body must echo key+value+detail, got {body_text}",
+        );
+        assert!(
+            body_text.len() > "Invalid query parameter 'count'='abc': ".len(),
+            "400 body must include the underlying parser's detail (got bare prefix)",
+        );
+    }
+
+    #[test]
+    fn float_value_parses_via_from_str() {
+        // The second half of the 064 mandate: floats use `.parse()` the same
+        // way ints do. A single test pins both `f32` and `f64` so the generic
+        // shape doesn't quietly regress to int-only.
+        let params = params_from(&[("ratio", "1.5"), ("speed", "2.5")]);
+        let ratio: f64 =
+            extract_query(&params, "ratio").expect("?ratio=1.5 must parse as f64");
+        assert!((ratio - 1.5).abs() < 1e-9, "f64 round-trip");
+
+        let speed: f32 =
+            extract_query(&params, "speed").expect("?speed=2.5 must parse as f32");
+        assert!((speed - 2.5_f32).abs() < 1e-6, "f32 round-trip");
+    }
+
+    #[test]
+    fn missing_key_yields_missing_variant_distinct_from_invalid() {
+        // The Missing/Invalid split is load-bearing for 065+/codegen paths
+        // that may want to map them differently (e.g., Missing → required-
+        // field error message, Invalid → type-mismatch message). Asserting on
+        // the variant here pins the contract; collapsing to a single variant
+        // would silently break that future routing.
+        let params = params_from(&[("other", "1")]);
+        let err = extract_query::<i32>(&params, "count")
+            .expect_err("absent key must NOT yield a parsed value");
+        match err {
+            QueryExtractError::Missing { key } => {
+                assert_eq!(key, "count", "key field must echo the requested key");
+            }
+            other => panic!("expected QueryExtractError::Missing, got {other:?}"),
+        }
+    }
+}
