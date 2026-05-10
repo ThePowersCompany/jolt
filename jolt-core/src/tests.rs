@@ -1148,6 +1148,102 @@ mod endpoint_registry {
     }
 }
 
+mod router {
+    //! PRD JOLT-RS-033 verification ("Service impl compiles") plus a behavioral
+    //! check that the wrapper attaches a fresh `Arc<RequestExt>` to every
+    //! incoming request before the inner axum router sees it. The injection
+    //! contract is what JOLT-RS-035's finished-flag short-circuit reads from;
+    //! locking it down here means a regression in 033 surfaces as a focused
+    //! failure rather than a confusing 035 test break later.
+
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    use crate::router::Router;
+    use crate::RequestExt;
+
+    #[tokio::test]
+    async fn service_call_injects_request_ext_into_extensions() {
+        // The probe handler returns 200 if the extension is present and 500
+        // otherwise — turns the assertion into the response status so the test
+        // exercises the full Service::call path (not just a side-channel poke).
+        let inner = axum::Router::new().route(
+            "/probe",
+            axum::routing::get(|req: AxumRequest| async move {
+                match req.extensions().get::<Arc<RequestExt>>() {
+                    Some(ext) => {
+                        assert!(!ext.is_finished(), "freshly-injected RequestExt must default to not-finished");
+                        StatusCode::OK
+                    }
+                    None => StatusCode::INTERNAL_SERVER_ERROR,
+                }
+            }),
+        );
+        let router = Router::from_axum(inner);
+
+        let req = AxumRequest::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_call_overwrites_caller_supplied_request_ext() {
+        // If a caller pre-populated `Arc<RequestExt>` (e.g. a test fixture),
+        // Router::call must replace it with a freshly minted, not-finished
+        // instance. Otherwise a finished-flag set upstream would leak into the
+        // handler and break the JOLT-RS-035 contract.
+        let inner = axum::Router::new().route(
+            "/probe",
+            axum::routing::get(|req: AxumRequest| async move {
+                let ext = req
+                    .extensions()
+                    .get::<Arc<RequestExt>>()
+                    .expect("RequestExt must be present");
+                if ext.is_finished() {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::OK
+                }
+            }),
+        );
+        let router = Router::from_axum(inner);
+
+        let stale = Arc::new(RequestExt::new());
+        stale.mark_finished();
+
+        let mut req = AxumRequest::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(stale);
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_call_forwards_to_inner_axum_router_for_unmatched_paths() {
+        // The wrapper is supposed to be transparent on the routing dimension:
+        // unmatched paths still 404 via the inner axum Router, not bypassed.
+        let inner = axum::Router::new();
+        let router = Router::from_axum(inner);
+
+        let req = AxumRequest::builder()
+            .uri("/missing")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
 mod server {
     use crate::{CorsConfig, Endpoint, EndpointFuture, JoltServer, Method, Request};
     use axum::body::Body;
