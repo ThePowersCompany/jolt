@@ -531,7 +531,7 @@
       "verification": [
         "Unit test: auth middleware sets finished \u2192 handler body is never invoked, response is 401."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-036",

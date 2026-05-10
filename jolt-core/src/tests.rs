@@ -726,6 +726,120 @@ mod request_ext {
         ext.finished.store(true, Ordering::Relaxed);
         assert!(ext.is_finished());
     }
+
+    #[test]
+    fn take_response_returns_none_when_no_response_stashed() {
+        // JOLT-RS-035: the stash defaults to empty so a finished-without-stash
+        // request can be distinguished from a finished-with-stash one. The
+        // caller (Router::call) decides what fallback to send when the stash
+        // is empty.
+        let ext = RequestExt::new();
+        assert!(ext.take_response().is_none());
+    }
+
+    #[test]
+    fn set_response_then_take_response_yields_the_stashed_response() {
+        use axum::body::Body;
+        use axum::http::StatusCode;
+
+        let ext = RequestExt::new();
+        let response = axum::response::Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .unwrap();
+        ext.set_response(response);
+
+        let taken = ext.take_response().expect("response was stashed");
+        assert_eq!(taken.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn take_response_drains_the_stash() {
+        // Take is destructive: a second take must observe an empty stash so
+        // the Router doesn't accidentally reuse a response that has already
+        // been emitted.
+        use axum::body::Body;
+        use axum::http::StatusCode;
+
+        let ext = RequestExt::new();
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let _first = ext.take_response().expect("first take returns response");
+        assert!(
+            ext.take_response().is_none(),
+            "second take must observe an empty stash"
+        );
+    }
+
+    #[test]
+    fn set_response_replaces_a_previously_stashed_response() {
+        // Locks in last-writer-wins semantics so a later layer that wants to
+        // override an earlier layer's stash (e.g. an error mapper running
+        // after auth) doesn't have to reach into the option directly.
+        use axum::body::Body;
+        use axum::http::StatusCode;
+
+        let ext = RequestExt::new();
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let taken = ext.take_response().expect("response was stashed");
+        assert_eq!(taken.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn set_response_does_not_implicitly_mark_finished() {
+        // mark_finished and set_response are deliberately independent so a
+        // middleware can pre-stash a response (e.g. a default body) without
+        // committing to short-circuit.
+        use axum::body::Body;
+        use axum::http::StatusCode;
+
+        let ext = RequestExt::new();
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        assert!(!ext.is_finished());
+    }
+
+    #[test]
+    fn mark_finished_does_not_clear_a_previously_stashed_response() {
+        // Symmetric to the set_response/mark_finished independence above:
+        // marking finished must preserve any stash so the canonical pattern
+        // (set_response(..); mark_finished();) does not race the latch
+        // against the stash.
+        use axum::body::Body;
+        use axum::http::StatusCode;
+
+        let ext = RequestExt::new();
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        ext.mark_finished();
+        assert!(ext.is_finished());
+        let taken = ext.take_response().expect("stash survived mark_finished");
+        assert_eq!(taken.status(), StatusCode::UNAUTHORIZED);
+    }
 }
 
 mod request_ext_extensions {
@@ -1194,36 +1308,83 @@ mod router {
     }
 
     #[tokio::test]
-    async fn service_call_overwrites_caller_supplied_request_ext() {
-        // If a caller pre-populated `Arc<RequestExt>` (e.g. a test fixture),
-        // Router::call must replace it with a freshly minted, not-finished
-        // instance. Otherwise a finished-flag set upstream would leak into the
-        // handler and break the JOLT-RS-035 contract.
+    async fn service_call_preserves_caller_supplied_request_ext() {
+        // JOLT-RS-035 inverted the JOLT-RS-033 contract: Router now PRESERVES a
+        // caller-supplied `Arc<RequestExt>` so an outer tower layer's
+        // `mark_finished()` is observable by Router's dispatch loop. The
+        // identity check (`Arc::ptr_eq`) is the load-bearing assertion; without
+        // it, a regression that re-introduces the overwrite would still
+        // produce a not-finished latch (the value is correct by coincidence)
+        // and pass a value-only assertion.
+        let captured: Arc<std::sync::Mutex<Option<Arc<RequestExt>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_in_handler = Arc::clone(&captured);
         let inner = axum::Router::new().route(
             "/probe",
-            axum::routing::get(|req: AxumRequest| async move {
-                let ext = req
-                    .extensions()
-                    .get::<Arc<RequestExt>>()
-                    .expect("RequestExt must be present");
-                if ext.is_finished() {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                } else {
+            axum::routing::get(move |req: AxumRequest| {
+                let captured = Arc::clone(&captured_in_handler);
+                async move {
+                    let ext = req
+                        .extensions()
+                        .get::<Arc<RequestExt>>()
+                        .expect("RequestExt must be present")
+                        .clone();
+                    *captured.lock().unwrap() = Some(ext);
                     StatusCode::OK
                 }
             }),
         );
         let router = Router::from_axum(inner);
 
-        let stale = Arc::new(RequestExt::new());
-        stale.mark_finished();
+        let outer_handle = Arc::new(RequestExt::new());
+        let outer_ptr = Arc::as_ptr(&outer_handle);
 
         let mut req = AxumRequest::builder()
             .uri("/probe")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(stale);
+        req.extensions_mut().insert(Arc::clone(&outer_handle));
 
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let handler_handle = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("handler must observe a RequestExt");
+        assert!(
+            std::ptr::eq(Arc::as_ptr(&handler_handle), outer_ptr),
+            "Router::call must preserve the caller-supplied Arc<RequestExt> so middleware mark_finished() is observable downstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_call_inserts_fresh_request_ext_when_none_supplied() {
+        // The other half of the preserve-or-inject contract: when no upstream
+        // layer has placed an `Arc<RequestExt>` in extensions, Router must
+        // insert one so handlers can rely on the extension being present.
+        let inner = axum::Router::new().route(
+            "/probe",
+            axum::routing::get(|req: AxumRequest| async move {
+                match req.extensions().get::<Arc<RequestExt>>() {
+                    Some(ext) => {
+                        assert!(
+                            !ext.is_finished(),
+                            "freshly-injected RequestExt must default to not-finished"
+                        );
+                        StatusCode::OK
+                    }
+                    None => StatusCode::INTERNAL_SERVER_ERROR,
+                }
+            }),
+        );
+        let router = Router::from_axum(inner);
+
+        let req = AxumRequest::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -1253,6 +1414,8 @@ mod router {
         //! method mismatches both surface as 404 here. The
         //! `method_mismatch_returns_404` test pins that contract so the 037
         //! refinement is intentional rather than accidental.
+
+        use std::sync::Arc;
 
         use axum::body::{to_bytes, Body};
         use axum::extract::Request as AxumRequest;
@@ -1372,6 +1535,199 @@ mod router {
                 .unwrap();
             let resp = router.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn finished_flag_with_stashed_response_short_circuits_handler() {
+            // PRD-mandated verification for JOLT-RS-035: an "auth middleware"
+            // (simulated here as a pre-inserted Arc<RequestExt> with a stashed
+            // 401 + the finished latch set) → Router takes the stash and
+            // returns it without invoking the matched endpoint's handler.
+            // The handler tracks invocation via an AtomicBool so the test
+            // distinguishes "handler skipped" from "handler ran but returned
+            // 401."
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            use crate::request_ext::RequestExt;
+
+            struct TrackingEndpoint {
+                invoked: Arc<AtomicBool>,
+            }
+
+            impl Endpoint for TrackingEndpoint {
+                fn path(&self) -> &str {
+                    "/protected"
+                }
+
+                fn method(&self) -> Method {
+                    Method::Get
+                }
+
+                fn handler(&self, _req: Request) -> EndpointFuture {
+                    let invoked = Arc::clone(&self.invoked);
+                    Box::pin(async move {
+                        invoked.store(true, Ordering::Relaxed);
+                        axum::response::Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::empty())
+                            .unwrap()
+                    })
+                }
+            }
+
+            let invoked = Arc::new(AtomicBool::new(false));
+            let mut registry = EndpointRegistry::new();
+            registry.register(TrackingEndpoint {
+                invoked: Arc::clone(&invoked),
+            });
+            let router = Router::from_registry(registry);
+
+            let ext = Arc::new(RequestExt::new());
+            ext.set_response(
+                axum::response::Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Body::from("auth required"))
+                    .unwrap(),
+            );
+            ext.mark_finished();
+
+            let mut req = AxumRequest::builder()
+                .method("GET")
+                .uri("/protected")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(Arc::clone(&ext));
+
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(body_string(resp).await, "auth required");
+            assert!(
+                !invoked.load(Ordering::Relaxed),
+                "handler must not be invoked when RequestExt is finished"
+            );
+        }
+
+        #[tokio::test]
+        async fn finished_flag_without_stashed_response_falls_back_to_500() {
+            // Defensive contract: a middleware that calls mark_finished()
+            // without stashing a response leaves Router with no body to send.
+            // Surfacing 500 (rather than 200 or whatever the handler would
+            // have returned) makes the bug visible at the boundary instead of
+            // letting it propagate as a misleading success.
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            use crate::request_ext::RequestExt;
+
+            struct TrackingEndpoint {
+                invoked: Arc<AtomicBool>,
+            }
+
+            impl Endpoint for TrackingEndpoint {
+                fn path(&self) -> &str {
+                    "/protected"
+                }
+
+                fn method(&self) -> Method {
+                    Method::Get
+                }
+
+                fn handler(&self, _req: Request) -> EndpointFuture {
+                    let invoked = Arc::clone(&self.invoked);
+                    Box::pin(async move {
+                        invoked.store(true, Ordering::Relaxed);
+                        axum::response::Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::empty())
+                            .unwrap()
+                    })
+                }
+            }
+
+            let invoked = Arc::new(AtomicBool::new(false));
+            let mut registry = EndpointRegistry::new();
+            registry.register(TrackingEndpoint {
+                invoked: Arc::clone(&invoked),
+            });
+            let router = Router::from_registry(registry);
+
+            let ext = Arc::new(RequestExt::new());
+            ext.mark_finished();
+
+            let mut req = AxumRequest::builder()
+                .method("GET")
+                .uri("/protected")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(Arc::clone(&ext));
+
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(
+                !invoked.load(Ordering::Relaxed),
+                "handler must not be invoked when RequestExt is finished"
+            );
+        }
+
+        #[tokio::test]
+        async fn caller_supplied_not_finished_request_ext_dispatches_normally() {
+            // The third leaf of the JOLT-RS-035 contract: a caller-supplied
+            // not-finished RequestExt must NOT short-circuit. Otherwise the
+            // preserve-existing semantics would silently break every request
+            // that flows through middleware in the not-failed case.
+            use crate::request_ext::RequestExt;
+
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let ext = Arc::new(RequestExt::new());
+
+            let mut req = AxumRequest::builder()
+                .method("GET")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(Arc::clone(&ext));
+
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "hi");
+        }
+
+        #[tokio::test]
+        async fn finished_flag_short_circuits_even_when_path_does_not_match() {
+            // Pins the early-out: the finished check runs BEFORE the registry
+            // walk so a finishing middleware's response is the source of truth
+            // regardless of which (or whether) a route would have matched. The
+            // alternative (walk-then-check) would leak a 404 in any
+            // finishing-middleware-without-route path.
+            use crate::request_ext::RequestExt;
+
+            let registry = EndpointRegistry::new();
+            let router = Router::from_registry(registry);
+
+            let ext = Arc::new(RequestExt::new());
+            ext.set_response(
+                axum::response::Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+            ext.mark_finished();
+
+            let mut req = AxumRequest::builder()
+                .method("GET")
+                .uri("/no-route")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(Arc::clone(&ext));
+
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         }
 
         #[tokio::test]
