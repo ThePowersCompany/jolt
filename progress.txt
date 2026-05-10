@@ -65,3 +65,24 @@ Notes for next iterations:
 - JOLT-RS-004 (jolt-db): add sqlx (postgres, runtime-tokio-rustls — workspace pin already has these features), tokio, sha2 deps; keep lib.rs as a doc-comment stub.
 - When real endpoint/derive macros land, delete jolt_placeholder + JoltPlaceholder rather than renaming — they exist only to prove the dep graph compiles.
 
+## 2026-05-10 — JOLT-RS-004: jolt-db crate deps + stub lib.rs
+
+PRD item: JOLT-RS-004 (priority 4, phase00-workspace-scaffold) — Add deps to jolt-db/Cargo.toml (sqlx with postgres + runtime-tokio-rustls, tokio, sha2) and stub lib.rs.
+
+Verification: `cargo check -p jolt-db` → succeeds (compiled clean in 24.99s; resolved sqlx 0.8.6 with sqlx-postgres + sqlx-macros, plus tokio and sha2 transitive graph).
+
+Key decisions:
+- All deps via { workspace = true } — same thin-shim pattern as jolt-core/jolt-macros. Workspace pin already declares sqlx with default-features=off plus runtime-tokio-rustls, postgres, macros, migrate, chrono, uuid, so no per-crate feature additions.
+- lib.rs is a single-line crate doc comment; no modules yet. Future PRD items in phase08+ (db pool, migrations, query builder) will add `pub mod` declarations.
+- Did NOT add chrono/uuid directly even though the workspace sqlx pin enables those features — they belong to jolt-utils per PRD scope. jolt-db consumes them transitively through sqlx::types but does not need them in its own [dependencies].
+
+Files changed:
+- jolt-db/Cargo.toml (added [dependencies] block)
+- jolt-db/src/lib.rs (added crate-level doc string; was 0 bytes)
+- prd.json — JOLT-RS-004 passes: true
+
+Notes for next iterations:
+- JOLT-RS-005 (jolt-utils): add jsonwebtoken, pbkdf2, sha2, rand, uuid, chrono, serde, serde_json — all already in workspace.dependencies. Same pattern: thin shim Cargo.toml + doc-only lib.rs.
+- JOLT-RS-006 (jolt-templates): add handlebars, serde, serde_json. Same pattern.
+- After 005 + 006 land, phase00 closes and phase01 (Method/StatusCode in jolt-core) begins — that's where real module code starts.
+
