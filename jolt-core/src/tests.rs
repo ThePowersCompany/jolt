@@ -1242,6 +1242,167 @@ mod router {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+
+    mod registry_dispatch {
+        //! PRD JOLT-RS-034 verification: `Router::call` parses path + method
+        //! from the inbound request, walks the (sorted) endpoint registry, and
+        //! either dispatches to a matching handler or returns 404.
+        //!
+        //! 405 method-mismatch differentiation is JOLT-RS-037's territory; per
+        //! 034's step text ("On no match, return 404."), unknown paths AND
+        //! method mismatches both surface as 404 here. The
+        //! `method_mismatch_returns_404` test pins that contract so the 037
+        //! refinement is intentional rather than accidental.
+
+        use axum::body::{to_bytes, Body};
+        use axum::extract::Request as AxumRequest;
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+
+        use crate::router::Router;
+        use crate::{Endpoint, EndpointFuture, EndpointRegistry, Method, Request};
+
+        struct EchoEndpoint {
+            path: &'static str,
+            method: Method,
+            body: &'static str,
+        }
+
+        impl Endpoint for EchoEndpoint {
+            fn path(&self) -> &str {
+                self.path
+            }
+
+            fn method(&self) -> Method {
+                self.method
+            }
+
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let body = self.body;
+                Box::pin(async move {
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(body))
+                        .unwrap()
+                })
+            }
+        }
+
+        async fn body_string(resp: axum::response::Response) -> String {
+            let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn registered_get_hello_returns_200() {
+            // PRD-mandated verification (verbatim half 1): registered GET
+            // /hello → GET /hello returns 200, with the handler body flowing
+            // through.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "hi");
+        }
+
+        #[tokio::test]
+        async fn unknown_path_returns_404() {
+            // PRD-mandated verification (verbatim half 2): GET /unknown → 404.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/unknown")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn empty_registry_returns_404_for_any_request() {
+            // The walk-and-miss path with zero entries is structurally
+            // distinct from "walked all entries, none matched"; both must
+            // produce the same 404 outcome.
+            let router = Router::from_registry(EndpointRegistry::new());
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/anything")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn method_mismatch_on_registered_path_returns_404() {
+            // 034 step text says "On no match, return 404." — both wrong path
+            // AND wrong method on a registered path are "no match" at this
+            // layer. JOLT-RS-037 will refine method-mismatch to 405 once the
+            // sorted-walk learns to distinguish path-hit-from-verb-miss.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("POST")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn longest_path_wins_when_multiple_registered() {
+            // `from_registry` calls `sort()` internally so longer paths match
+            // first. This test pins that contract: register `/api` first and
+            // `/api/hello` second; a request to `/api/hello` must hit the
+            // longer route, not the shorter one.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/api",
+                method: Method::Get,
+                body: "API",
+            });
+            registry.register(EchoEndpoint {
+                path: "/api/hello",
+                method: Method::Get,
+                body: "API_HELLO",
+            });
+            let router = Router::from_registry(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/api/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "API_HELLO");
+        }
+    }
 }
 
 mod server {

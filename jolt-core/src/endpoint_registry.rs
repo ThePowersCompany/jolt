@@ -104,7 +104,12 @@ fn method_router_for(method: Method, endpoint: Arc<dyn Endpoint + Send + Sync>) 
     }
 }
 
-async fn build_jolt_request(req: AxumRequest) -> Request {
+/// Convert an inbound [`AxumRequest`] into a Jolt [`Request`] snapshot. Used by
+/// [`EndpointRegistry::build_router`]'s per-route closures and by
+/// [`crate::router::Router`]'s registry-driven dispatch path (JOLT-RS-034). The
+/// extraction is currently minimal — see the body for caveats around URL
+/// decoding and the temporary `u32::MAX` body cap.
+pub(crate) async fn build_jolt_request(req: AxumRequest) -> Request {
     let (parts, body) = req.into_parts();
     let method = parts
         .method
