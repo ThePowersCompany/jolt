@@ -220,6 +220,57 @@
 //!     interference. JOLT-RS-091's `listen(channel)` will be a convenience
 //!     wrapper that calls `listen_connection()` + `listener.listen(channel)`
 //!     + `listener.into_stream()` internally.
+//!
+//! [`JoltDb::listen`] (JOLT-RS-091) builds the high-level streaming verb on
+//! top of [`Self::listen_connection`]. Returns a `Stream` of
+//! [`sqlx::postgres::PgNotification`] items, each wrapped in
+//! `Result<_, sqlx::Error>` because the underlying connection can drop
+//! mid-stream and the auto-reconnect machinery surfaces the failure as an
+//! item rather than ending the stream silently.
+//!
+//! 18. **Two error tiers: outer `Result` for setup, per-item `Result` for
+//!     mid-stream failures (JOLT-RS-091).** `listen` is `async fn -> Result<
+//!     impl Stream<Item = Result<PgNotification, sqlx::Error>> + Unpin,
+//!     sqlx::Error>`. The outer `Result` covers the two upfront failure modes
+//!     (the [`PgListener::connect_with`] dial inherited from decision 16, and
+//!     the `LISTEN <channel>` round trip that subscribes to the channel) —
+//!     callers can `?`-propagate these at startup. The inner per-item
+//!     `Result` mirrors [`sqlx::postgres::PgListener::into_stream`]'s native
+//!     shape verbatim: each delivered notification is `Ok(PgNotification)`,
+//!     and a connection drop / reconnect-failure surfaces as `Err(sqlx::
+//!     Error)` so the subscriber can decide whether to log, retry, or
+//!     abandon the subscription. Squashing the two tiers (e.g. returning a
+//!     stream whose first item carries the setup error) would force every
+//!     subscriber to write the same "peek the first item to find out if
+//!     setup worked" boilerplate. Keeping them separate matches the rest of
+//!     the crate's "fail-fast on misconfiguration" stance (decision 7) for
+//!     the setup half while preserving the canonical `Stream` shape for the
+//!     hot path. The named `Stream` trait is imported from
+//!     [`tokio_stream::Stream`] (a re-export of `futures_core::Stream`),
+//!     pulled in via the `tokio-stream` workspace dep so the public surface
+//!     does not pin callers to any specific futures runtime.
+//!
+//! 19. **`listen` consumes the channel name as `&str` and propagates it
+//!     unmodified to [`PgListener::listen`] (JOLT-RS-091).** No quoting,
+//!     escaping, or validation happens at the jolt-db layer — sqlx's
+//!     `PgListener::listen` already does the right thing (it issues a
+//!     parameterized `LISTEN` via the wire protocol, so SQL-injection
+//!     vectors via channel name are sqlx's concern, not ours). Channel
+//!     name semantics (case folding, identifier length limits) are
+//!     Postgres's concern and would be the same whether or not jolt-db
+//!     wrapped this call. Future overloads for `listen_all(channels:
+//!     &[&str])` can be added without disturbing this single-channel
+//!     contract.
+//!
+//! 20. **Each `listen` call allocates a fresh dedicated connection
+//!     (JOLT-RS-091, inherits from decision 17).** A pair of
+//!     `db.listen("ch_a")` and `db.listen("ch_b")` calls produces two
+//!     independent streams backed by two independent connections; one
+//!     stream's connection drop does not affect the other. Callers who
+//!     want multi-channel multiplexing on a single connection should
+//!     reach for [`Self::listen_connection`] directly and call
+//!     `listener.listen_all(...)` themselves — that primitive remains
+//!     available exactly for this case.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -447,6 +498,48 @@ impl JoltDb {
     /// ```
     pub async fn listen_connection(&self) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
         sqlx::postgres::PgListener::connect_with(&self.pool).await
+    }
+
+    /// Subscribe to a Postgres `LISTEN` channel and stream notifications
+    /// (JOLT-RS-091).
+    ///
+    /// Composes [`Self::listen_connection`] + [`PgListener::listen`] +
+    /// [`PgListener::into_stream`]: opens a fresh dedicated connection,
+    /// issues `LISTEN <channel>`, and surfaces the resulting notification
+    /// stream. See module docs decisions 18–20 for the two-tier error
+    /// shape, the unmodified channel-name propagation, and the
+    /// per-subscriber-connection isolation.
+    ///
+    /// The outer `Result` reports setup failures (the listener-connection
+    /// dial or the `LISTEN` round trip itself). Each item on the returned
+    /// stream is itself a `Result`: `Ok(PgNotification)` for a delivered
+    /// notification, `Err(sqlx::Error)` if the auto-reconnecting backing
+    /// connection finally surfaces a failure.
+    ///
+    /// [`PgListener::listen`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgListener.html#method.listen
+    /// [`PgListener::into_stream`]: https://docs.rs/sqlx/latest/sqlx/postgres/struct.PgListener.html#method.into_stream
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let mut stream = db.listen("orders").await?;
+    /// while let Some(item) = stream.next().await {
+    ///     let note = item?;
+    ///     println!("got {} on {}", note.payload(), note.channel());
+    /// }
+    /// ```
+    pub async fn listen(
+        &self,
+        channel: &str,
+    ) -> Result<
+        impl tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>>
+            + Unpin,
+        sqlx::Error,
+    > {
+        let mut listener = self.listen_connection().await?;
+        listener.listen(channel).await?;
+        Ok(listener.into_stream())
     }
 }
 
@@ -1094,5 +1187,73 @@ mod tests {
             .listen_connection()
             .await
             .expect("second listen_connection should also open without error");
+    }
+
+    // ---- JOLT-RS-091: JoltDb::listen ----
+
+    /// Compile-time pin: `db.listen(channel)` resolves to
+    /// `Result<impl Stream<Item = Result<PgNotification, sqlx::Error>> +
+    /// Unpin, sqlx::Error>` (decision 18). The explicit return annotation
+    /// forces the typecheck — a regression that drops the outer `Result`,
+    /// changes the per-item shape, swaps in a foreign `Stream` trait, or
+    /// removes `Unpin` would break this pin without ever needing a live
+    /// Postgres. The `_assert_stream` helper additionally asserts the
+    /// returned value satisfies the `Stream<Item = ...>` bound at the
+    /// trait level (catches a regression that returns `impl Future`,
+    /// `Vec<_>`, or any other type that happens to typecheck as a return
+    /// value but breaks the streaming contract).
+    #[test]
+    fn listen_signature_yields_stream() {
+        fn _assert_stream<S: tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>> + Unpin>(
+            _: &S,
+        ) {
+        }
+        async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
+            let stream = db.listen("test_ch").await?;
+            _assert_stream(&stream);
+            Ok(())
+        }
+    }
+
+    /// PRD-mandated verification for JOLT-RS-091: "listen("test_ch") yields
+    /// a Stream." Env-gated on `JOLT_TEST_DATABASE_URL` (same convention as
+    /// 083/084/086/088/090): without a live Postgres the test skips
+    /// trivially so the default `cargo test -p jolt-db` flow stays runnable.
+    ///
+    /// With the env var set: calls `listen("_jolt_listen_smoke_ch")` and
+    /// asserts the outer `Result` is `Ok` (setup succeeded — the dedicated
+    /// connection opened and the `LISTEN` round trip completed). The
+    /// returned stream itself is dropped without driving it, which (a)
+    /// keeps this slice scoped to the JOLT-RS-091 verification (the
+    /// LISTEN/NOTIFY end-to-end notification round-trip is JOLT-RS-093's
+    /// closing test) and (b) pins decision 20: a `listen` whose backing
+    /// connection is allocated outside the pool drops cleanly without
+    /// affecting subsequent pool queries.
+    #[tokio::test]
+    async fn listen_yields_stream_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        let stream = db
+            .listen("_jolt_listen_smoke_ch")
+            .await
+            .expect("listen on a fresh channel should succeed");
+
+        // Drop the stream explicitly to make the lifecycle test intent
+        // visible — the goal is "listen() returns Ok with a Stream", not
+        // "we consumed any items from it". JOLT-RS-093 will exercise the
+        // notification delivery path.
+        drop(stream);
+
+        // Decision 20: the listener uses its own connection, so the pool
+        // remains healthy after the listen+drop cycle. Catches a
+        // regression that accidentally checks out a pool connection (e.g.
+        // by switching `PgListener::connect_with` to a pool-acquire shape).
+        db.health_check()
+            .await
+            .expect("pool still healthy after listen() + drop");
     }
 }

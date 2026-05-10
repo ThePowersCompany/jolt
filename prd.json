@@ -1315,7 +1315,7 @@
       "verification": [
         "Unit test: listen(\"test_ch\") yields a Stream."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-092",
