@@ -212,6 +212,18 @@ where
         // Same pattern as `CorsService::call` (JOLT-RS-056).
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
+
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip the body buffering + JSON
+        // parse and delegate to inner. Read-only check; preserve-or-inject
+        // runs on the active path inside the async block for the
+        // parse-failure mark_finished branch.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         Box::pin(async move {
             let (mut parts, body) = req.into_parts();
             let bytes = buffer_body(body).await;
@@ -366,6 +378,17 @@ where
         // (JOLT-RS-059) and `CorsService::call` (JOLT-RS-056).
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
+
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip the body buffer + UTF-8 decode
+        // and delegate to inner so the already-determined response
+        // propagates.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         Box::pin(async move {
             let (mut parts, body) = req.into_parts();
             let bytes = buffer_body(body).await;

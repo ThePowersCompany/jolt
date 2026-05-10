@@ -120,6 +120,26 @@ where
     }
 
     fn call(&mut self, mut req: AxumRequest) -> Self::Future {
+        // Standard tower delegation pattern: poll_ready was driven on the
+        // *current* `self.inner`, so `call` must use that same instance —
+        // not a fresh clone. Replace the inner with a clone we DON'T call;
+        // the caller's next poll_ready will ready THAT cloned slot before
+        // their next call. Hoisted ABOVE the early-termination check so the
+        // skip-when-finished branch shares the same swap discipline.
+        let cloned = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, cloned);
+
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip BOTH the OPTIONS preflight
+        // branch AND the post-response CORS-header injection. Read-only
+        // check; preserve-or-inject runs on the active path below for the
+        // OPTIONS-side mark_finished.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         // Mirror Router's preserve-or-inject contract from JOLT-RS-035 so the
         // finished flag we set is observable to whoever holds the same Arc
         // (callers, tests, or downstream layers). Inserting a fresh ext when
@@ -146,13 +166,6 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
-        // Standard tower delegation pattern: poll_ready was driven on the
-        // *current* `self.inner`, so `call` must use that same instance —
-        // not a fresh clone. Replace the inner with a clone we DON'T call;
-        // the caller's next poll_ready will ready THAT cloned slot before
-        // their next call.
-        let cloned = self.inner.clone();
-        let mut inner = std::mem::replace(&mut self.inner, cloned);
         let config = self.config.clone();
         Box::pin(async move {
             let mut response = inner.call(req).await?;

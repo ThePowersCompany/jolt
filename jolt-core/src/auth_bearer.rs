@@ -158,6 +158,17 @@ where
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
 
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip this layer's auth check and
+        // delegate to inner so the already-determined response propagates.
+        // Read-only check — no preserve-or-inject here because there is no
+        // mark_finished side effect to observe on this branch.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         // Mirror ParseBodyService/CorsService's preserve-or-inject contract
         // for `Arc<RequestExt>`: reuse an upstream-supplied ext so a flipped
         // `finished` latch is observable to whoever holds the same Arc; inject

@@ -4903,3 +4903,485 @@ mod auth_ws_jwt {
         );
     }
 }
+
+mod early_termination {
+    //! PRD-mandated verification for JOLT-RS-078: "Each middleware layer
+    //! (auth, cors, body, query, log) checks
+    //! `req.extensions().get::<RequestExt>()?.is_finished()` before
+    //! proceeding. If finished, return current response unchanged."
+    //!
+    //! Each test pre-flips the `finished` latch on a caller-supplied
+    //! [`Arc<RequestExt>`](crate::RequestExt), wires the layer with an inner
+    //! stub that returns a unique 200 marker body, and asserts:
+    //!   1. The layer delegated straight to inner (the stub's marker body is
+    //!      surfaced verbatim — no 401/400/204/CORS-header decoration).
+    //!   2. The layer's own work-side mutation did NOT fire (no extension
+    //!      key inserted, no header injected, no body buffered).
+    //!
+    //! The contract is uniform across all six layers exposed at the
+    //! `jolt_core` crate root: AuthBearerLayer, AuthJwtLayer, AuthWsJwtLayer,
+    //! CorsLayer, ParseBodyLayer, ParseBodyStringLayer, and ParseQueryLayer.
+    //! The future logging layer (phase15 069/070) will follow the same shape
+    //! when it lands.
+    //!
+    //! Marker-body-and-header strategy: the inner stub returns
+    //! `Response::new(Body::from("__marker__"))` plus a unique header value
+    //! per test so a layer that *did* fire would produce a different shape
+    //! (different status code, different body, additional headers). Reading
+    //! the response back and asserting the marker round-trips proves the
+    //! layer's own logic was bypassed.
+    //!
+    //! Each test also asserts the layer's normal work-side extension key
+    //! (BearerToken / JwtClaims / QueryParams / parsed-T) is ABSENT from
+    //! request extensions on the inner-side. Since `service_fn` consumes the
+    //! request, the assertion happens INSIDE the inner stub via a side-channel
+    //! `Arc<Mutex<...>>` that captures whether the work-side key was set.
+
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::header::{
+        ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE, HeaderName,
+        SEC_WEBSOCKET_PROTOCOL,
+    };
+    use axum::http::{HeaderValue, Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use jolt_utils::jwt::JwtConfig;
+    use jsonwebtoken::Algorithm;
+    use tower::{Layer, ServiceExt};
+
+    use crate::auth_bearer::BearerToken;
+    use crate::auth_websocket::WsJwtToken;
+    use crate::parse_query::QueryParams;
+    use crate::{
+        AuthBearerLayer, AuthJwtLayer, AuthWsJwtLayer, CorsConfig, CorsLayer, ParseBodyLayer,
+        ParseBodyStringLayer, ParseQueryLayer, RequestExt,
+    };
+    use jolt_utils::jwt::JwtClaims;
+
+    const MARKER_BODY: &str = "__inner_marker__";
+    static MARKER_HEADER: HeaderName = HeaderName::from_static("x-inner-marker");
+
+    /// Build an inner stub service that:
+    ///   - Returns 200 with a marker body and a marker header so a layer that
+    ///     decorated/short-circuited would produce a different response.
+    ///   - Captures (via a side-channel `Arc<Mutex<bool>>`) whether the
+    ///     given work-side extension key `T` was present at inner-call time.
+    ///     Used to assert the layer DID NOT do its own work (which is what
+    ///     would normally insert that key).
+    fn marker_inner_capturing<T>(
+        captured: Arc<Mutex<bool>>,
+    ) -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+           + Send
+           + 'static
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured);
+            async move {
+                let saw_extension = req.extensions().get::<T>().is_some();
+                *captured
+                    .lock()
+                    .expect("inner-stub capture mutex poisoned") = saw_extension;
+                let mut resp = Response::new(Body::from(MARKER_BODY));
+                resp.headers_mut()
+                    .insert(MARKER_HEADER.clone(), HeaderValue::from_static("present"));
+                Ok::<Response, Infallible>(resp)
+            }
+        })
+    }
+
+    /// Inner stub for layers whose work-side key is none we want to assert
+    /// against (e.g. CorsLayer doesn't insert anything; just confirms the
+    /// marker round-trips). Returns 200 with the marker body + header.
+    fn marker_inner_only() -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+           + Send
+           + 'static {
+        tower::service_fn(|_req: AxumRequest| async move {
+            let mut resp = Response::new(Body::from(MARKER_BODY));
+            resp.headers_mut()
+                .insert(MARKER_HEADER.clone(), HeaderValue::from_static("present"));
+            Ok::<Response, Infallible>(resp)
+        })
+    }
+
+    async fn read_body(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("response body should buffer cleanly in tests");
+        String::from_utf8(bytes.to_vec()).expect("marker body must be UTF-8")
+    }
+
+    fn pre_finished_request_ext() -> Arc<RequestExt> {
+        let ext = Arc::new(RequestExt::new());
+        ext.mark_finished();
+        ext
+    }
+
+    #[tokio::test]
+    async fn auth_bearer_skips_when_finished() {
+        // Pre-flipped finished latch. The request carries an EXPLICITLY
+        // malformed Authorization header that AuthBearerLayer would normally
+        // reject as 401 — a regression that ignored the early-termination
+        // check would surface that 401 instead of the inner's 200 marker.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let svc =
+            AuthBearerLayer::new().layer(marker_inner_capturing::<BearerToken>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/x")
+            // Malformed header: NO 'Bearer ' scheme prefix. AuthBearerLayer's
+            // normal path returns 401 with "Invalid Authorization header
+            // format: expected 'Bearer <token>'".
+            .header(AUTHORIZATION, "NotABearerHeader")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "AuthBearerLayer must skip auth check when RequestExt is already finished"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(&MARKER_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("present"),
+            "inner stub's marker header must round-trip on the skip path"
+        );
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "AuthBearerLayer must NOT insert BearerToken when skipping (auth check did not run)"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_jwt_skips_when_finished() {
+        // Pre-flipped finished latch. AuthJwtLayer would normally reject a
+        // request lacking a BearerToken extension as 401 (MissingBearerToken).
+        // The early-termination check must bypass that decode path.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let layer = AuthJwtLayer::new(JwtConfig::new(b"secret".to_vec(), Algorithm::HS256));
+        let svc = layer.layer(marker_inner_capturing::<JwtClaims>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/x")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "AuthJwtLayer must NOT insert JwtClaims when skipping"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_ws_jwt_skips_when_finished() {
+        // Pre-flipped finished latch. AuthWsJwtLayer would normally reject a
+        // request lacking the Sec-WebSocket-Protocol header as 401
+        // (MissingHeader). The early-termination check must bypass.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let layer = AuthWsJwtLayer::new(JwtConfig::new(b"secret".to_vec(), Algorithm::HS256));
+        let svc = layer.layer(marker_inner_capturing::<WsJwtToken>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/ws")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "AuthWsJwtLayer must NOT insert WsJwtToken when skipping"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_skips_when_finished_on_options() {
+        // Pre-flipped finished latch on an OPTIONS request. The layer's
+        // normal OPTIONS path produces a 204 preflight; the skip-when-finished
+        // path must instead pass through to inner (which returns the 200
+        // marker). Also confirms the layer does NOT inject CORS headers when
+        // skipping.
+        let config = CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let layer = CorsLayer::new(config);
+        let svc = layer.layer(marker_inner_only());
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::OPTIONS)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "CorsLayer must skip preflight branch when RequestExt is finished — got the inner 200, not the 204 preflight"
+        );
+        assert!(
+            resp.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "CorsLayer must NOT inject CORS headers on the skip path"
+        );
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+    }
+
+    #[tokio::test]
+    async fn cors_skips_when_finished_on_non_options() {
+        // Pre-flipped finished latch on a GET. The layer's normal non-OPTIONS
+        // path delegates to inner and INJECTS CORS headers on the response;
+        // the skip path must NOT inject those headers.
+        let config = CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            expose_headers: vec!["x-something".to_string()],
+            ..Default::default()
+        };
+        let layer = CorsLayer::new(config);
+        let svc = layer.layer(marker_inner_only());
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "CorsLayer must NOT inject Allow-Origin on the skip path"
+        );
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+    }
+
+    #[tokio::test]
+    async fn parse_body_skips_when_finished() {
+        // Pre-flipped finished latch on a request whose body is INVALID JSON.
+        // The layer's normal path would return 400 ("Invalid JSON: ..."); the
+        // early-termination skip path must delegate to inner and produce the
+        // marker 200.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let layer = ParseBodyLayer::<serde_json::Value>::new();
+        let svc =
+            layer.layer(marker_inner_capturing::<serde_json::Value>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/x")
+            .header(CONTENT_TYPE, "application/json")
+            // Deliberately invalid JSON so the normal path's 400 fires if the
+            // skip check is broken.
+            .body(Body::from("this is not json"))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "ParseBodyLayer must skip body parse when finished — got the inner 200, not the 400"
+        );
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "ParseBodyLayer must NOT insert parsed-T extension on the skip path"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_body_string_skips_when_finished() {
+        // Pre-flipped finished latch on a request whose body is INVALID UTF-8.
+        // The layer's normal path would return 400 ("Invalid UTF-8: ..."); the
+        // skip path must delegate to inner.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let layer = ParseBodyStringLayer::new();
+        let svc = layer.layer(marker_inner_capturing::<String>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        // 0xFF is not valid UTF-8. Without the skip, parse_body_string returns
+        // 400; with the skip, the inner stub's 200 surfaces.
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/x")
+            .body(Body::from(vec![0xFFu8, 0xFE, 0xFD]))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "ParseBodyStringLayer must NOT insert String extension on the skip path"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_query_skips_when_finished() {
+        // Pre-flipped finished latch. ParseQueryLayer normally inserts a
+        // QueryParams extension key unconditionally; the skip path must NOT
+        // insert it. (The layer doesn't fail, so this slice of the contract
+        // is purely "the layer's own work-side mutation did not fire" rather
+        // than "the layer didn't surface its own error".)
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let svc = ParseQueryLayer::new()
+            .layer(marker_inner_capturing::<QueryParams>(Arc::clone(&captured)));
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/x?foo=bar&baz=qux")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "ParseQueryLayer must NOT insert QueryParams when skipping"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_bearer_does_not_skip_when_not_finished() {
+        // Negative half: with an Arc<RequestExt> present but `finished == false`,
+        // the layer's normal logic must run (here, fail with 401 on the
+        // malformed Authorization header). Confirms the skip predicate is
+        // gated on the latch state and not triggered by mere presence of an
+        // Arc<RequestExt>.
+        let svc = AuthBearerLayer::new().layer(marker_inner_only());
+
+        let ext = Arc::new(RequestExt::new()); // NOT finished
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/x")
+            .header(AUTHORIZATION, "NotABearerHeader")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "AuthBearerLayer's skip path must be gated on finished == true; a non-finished latch must NOT skip"
+        );
+        assert!(
+            ext.is_finished(),
+            "AuthBearerLayer must flip the latch on its rejection path (which is what the skip check observes for downstream layers)"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_path_is_observable_to_outer_layer() {
+        // End-to-end skip-propagation test: stack ParseBodyLayer (outer) →
+        // AuthBearerLayer (inner of parse) → marker stub. Pre-finish the
+        // RequestExt; the OUTER ParseBodyLayer should skip its body parse,
+        // delegate to AuthBearerLayer which ALSO skips its auth check, and
+        // the inner stub's 200 marker surfaces unchanged. Without the skip
+        // contract, ParseBodyLayer would buffer + reject the (invalid) body
+        // OR AuthBearerLayer would reject the (missing) header — either way
+        // the marker would not round-trip.
+        let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let inner = marker_inner_capturing::<BearerToken>(Arc::clone(&captured));
+        let auth = AuthBearerLayer::new().layer(inner);
+        let stack = ParseBodyLayer::<serde_json::Value>::new().layer(auth);
+
+        let ext = pre_finished_request_ext();
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/x")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("not json at all"))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = stack.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "stacked layers must all skip; inner stub's 200 must surface verbatim"
+        );
+        assert_eq!(read_body(resp).await, MARKER_BODY);
+        assert!(
+            !*captured.lock().unwrap(),
+            "neither layer must run its work-side path on the skip propagation"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_path_works_without_any_request_ext() {
+        // Negative half for the skip predicate: a request with NO
+        // Arc<RequestExt> in extensions must NOT skip (the predicate's
+        // get::<Arc<RequestExt>>() lookup returns None, so the layer falls
+        // through to its normal path). Wire AuthBearerLayer with a malformed
+        // header; the layer must run its rejection branch (401) rather than
+        // delegating to inner.
+        let svc = AuthBearerLayer::new().layer(marker_inner_only());
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/x")
+            .header(AUTHORIZATION, "NotABearerHeader")
+            .body(Body::empty())
+            .unwrap();
+        // Deliberately NO request_ext insertion here.
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "no RequestExt in extensions → predicate is None → fall through to normal logic (401 on malformed header)"
+        );
+    }
+
+    // Sec-WebSocket-Protocol header reference kept in scope so the
+    // auth_ws_jwt skip test can mirror the helper-based shape used by other
+    // suite members. The test above (auth_ws_jwt_skips_when_finished) does
+    // not actually emit this header — that is the point: a request without
+    // it would normally be rejected as MissingHeader; the skip path bypasses
+    // that rejection.
+    #[allow(dead_code)]
+    fn _ws_protocol_header_ref() -> HeaderName {
+        SEC_WEBSOCKET_PROTOCOL
+    }
+}

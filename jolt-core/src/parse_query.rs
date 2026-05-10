@@ -77,12 +77,21 @@
 //!    request flows through unchanged except for the inserted extension.
 //!    064+ typed extractors that DO surface 400s will need the preserve-or-
 //!    inject dance; this foundational layer does not.
+//!
+//!    Note (JOLT-RS-078): the layer still *reads* an upstream
+//!    [`Arc<RequestExt>`](crate::RequestExt)'s `finished` latch — if an
+//!    earlier layer has already finished the request, this layer skips the
+//!    query parse + extension insert and delegates to inner so the
+//!    already-determined response propagates. The check is read-only; the
+//!    layer does not inject a fresh ext when none is present (no
+//!    mark_finished side effect to observe on the active path).
 
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::Body;
@@ -91,6 +100,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use tower::{Layer, Service};
+
+use crate::request_ext::RequestExt;
 
 /// Newtype wrapper over `HashMap<String, String>` used as the request-extension
 /// key for the parsed query map (JOLT-RS-063). The newtype shields downstream
@@ -178,6 +189,18 @@ where
         // `CorsService::call` (JOLT-RS-056).
         let cloned = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, cloned);
+
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip the query parse + extension
+        // insert and delegate to inner. Read-only check — this layer never
+        // flips the latch itself (decision 5 in the module rustdoc), but it
+        // still observes the latch so a finished request avoids the wasted
+        // map allocation.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
 
         let params = QueryParams(parse_query(req.uri().query()));
         req.extensions_mut().insert(params);

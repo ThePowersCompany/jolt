@@ -179,6 +179,17 @@ where
         let mut inner = std::mem::replace(&mut self.inner, cloned);
         let config = Arc::clone(&self.config);
 
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip the JWT decode and delegate to
+        // inner so the already-determined response propagates. Read-only
+        // check — preserve-or-inject still runs on the active branch below
+        // for the rejection-side mark_finished.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         // Mirror AuthBearerService / ParseBodyService / CorsService's
         // preserve-or-inject contract for `Arc<RequestExt>`: reuse an
         // upstream-supplied ext so a flipped `finished` latch is observable

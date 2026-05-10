@@ -185,6 +185,17 @@ where
         let mut inner = std::mem::replace(&mut self.inner, cloned);
         let config = Arc::clone(&self.config);
 
+        // JOLT-RS-078 early-termination check: if an upstream layer has
+        // already finished the request, skip the WS JWT precheck and delegate
+        // to inner so the already-determined response propagates. Read-only
+        // check — preserve-or-inject still runs on the active branch for the
+        // rejection-side mark_finished.
+        if let Some(ext) = req.extensions().get::<Arc<RequestExt>>() {
+            if ext.is_finished() {
+                return Box::pin(async move { inner.call(req).await });
+            }
+        }
+
         // Mirror AuthJwtService's preserve-or-inject contract so a flipped
         // `finished` latch on rejection is observable to whoever holds the
         // same Arc (and the rejection-branch mark_finished call is always
