@@ -8,31 +8,29 @@ mod endpoint;
 
 /// `#[endpoint("/path")]` attribute macro.
 ///
-/// JOLT-RS-038 lands path parsing only: this iteration validates that the
-/// attribute argument is a string literal and re-emits the annotated item
-/// unchanged. Method discovery (JOLT-RS-039), signature validation
-/// (JOLT-RS-040), and handler-match codegen (JOLT-RS-041) layer on top in
-/// subsequent PRD items.
+/// As of JOLT-RS-042 the macro:
+/// 1. parses the route-path string literal from the attribute (038),
+/// 2. scans the impl block for `#[get]`/`#[post]`/`#[put]`/`#[patch]`/
+///    `#[delete]` methods (039),
+/// 3. validates each method's signature is `&self -> Response<T>` /
+///    `Result<Response<T>, E>` (040),
+/// 4. strips the magic-marker verb attributes from the re-emitted impl, and
+/// 5. emits one `::jolt_core::inventory::submit!` block per discovered method
+///    so `JoltServer::start` (JOLT-RS-044) can collect the routes via
+///    `inventory::iter::<RegisteredEndpoint>()`.
 ///
-/// On parse failure the original item is preserved AND a `compile_error!`
-/// is appended, so the user gets a single targeted diagnostic instead of a
-/// cascade of "use of undeclared type" errors from later code that names the
-/// item.
+/// Handler-wrapper codegen (043) and full e2e dispatch (044, 045) layer on top
+/// in subsequent PRD items.
+///
+/// On any parse / scan / validate failure the original item is preserved AND
+/// a `compile_error!` is appended, so the user gets a single targeted
+/// diagnostic instead of a cascade of "use of undeclared type" errors from
+/// later code that names the item.
 #[proc_macro_attribute]
 pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr2: proc_macro2::TokenStream = attr.into();
     let item2: proc_macro2::TokenStream = item.into();
-    match endpoint::parse_endpoint_attr(attr2) {
-        Ok(_parsed) => item2.into(),
-        Err(err) => {
-            let err_tokens = err.to_compile_error();
-            quote! {
-                #item2
-                #err_tokens
-            }
-            .into()
-        }
-    }
+    endpoint::expand_endpoint(attr2, item2).into()
 }
 
 /// Placeholder attribute macro. Future PRD items will expand this into

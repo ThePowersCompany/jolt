@@ -13,3 +13,5 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+inventory = { workspace = true }
+jolt-macros = { path = "../jolt-macros" }

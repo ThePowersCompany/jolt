@@ -1,4 +1,4 @@
-//! `#[endpoint("/path")]` attribute macro — phase08 parsing surface.
+//! `#[endpoint("/path")]` attribute macro — phase08 parsing + phase09 codegen.
 //!
 //! Phase08 ladder:
 //! - JOLT-RS-038: parse the path string literal from the attribute tokens. (landed)
@@ -6,7 +6,17 @@
 //!   `#[patch]`/`#[delete]` methods, collect their signatures. (landed)
 //! - JOLT-RS-040: validate handler signatures — first arg is `&self`, return
 //!   type is `Response<T>` or `Result<Response<T>, E>`. (landed)
-//! - JOLT-RS-041 (this iteration): emit the (Method, path) -> handler match.
+//! - JOLT-RS-041: emit the (Method, path) -> handler match. (landed)
+//!
+//! Phase09 ladder:
+//! - JOLT-RS-042 (this iteration): wire the parsing + codegen pipeline into
+//!   the proc-macro entry point and emit one `inventory::submit!` block per
+//!   discovered method, registering a [`jolt_core::RegisteredEndpoint`] so
+//!   `JoltServer::start` (JOLT-RS-044) can collect them via
+//!   `inventory::iter::<RegisteredEndpoint>()`.
+//! - JOLT-RS-043: generate the per-endpoint handler wrapper (axum-compatible
+//!   async fn). The dispatch match emitted by [`generate_dispatch_match`] is
+//!   the seed for that wrapper.
 //!
 //! The parsing entry points are split out from `lib.rs` so they can be
 //! unit-tested against a `proc_macro2::TokenStream` / parsed `syn::ItemImpl`
@@ -14,8 +24,8 @@
 //!
 //! Verb attributes (`#[get]`, `#[post]`, ...) are treated as **magic markers**:
 //! `#[endpoint]` recognizes them when scanning, but they are not registered as
-//! their own proc-macro attributes. JOLT-RS-041 will strip them from the
-//! re-emitted impl so rustc never sees them.
+//! their own proc-macro attributes. JOLT-RS-042 wires [`strip_verb_attrs`] into
+//! the proc-macro entry point so rustc never sees them on the re-emitted impl.
 
 use proc_macro2::Ident;
 use quote::{format_ident, quote};
@@ -308,6 +318,103 @@ fn last_path_segment(ty: &Type) -> Option<&syn::PathSegment> {
     match ty {
         Type::Path(tp) => tp.path.segments.last(),
         _ => None,
+    }
+}
+
+/// Strip the magic-marker verb attributes (`#[get]`, `#[post]`, `#[put]`,
+/// `#[patch]`, `#[delete]`) from every `ImplItem::Fn` in `item`. Called from
+/// the proc-macro entry point before re-emitting the impl block: rustc would
+/// otherwise error with "cannot find attribute `get` in this scope" because
+/// the verb attributes are recognized only by `#[endpoint]`'s scanner — they
+/// are not registered as their own proc-macros (see 039's progress notes).
+///
+/// Non-fn impl items (consts, types) are untouched. Non-verb attributes
+/// (`#[inline]`, `#[doc]`, ...) on methods are preserved.
+pub(crate) fn strip_verb_attrs(item: &mut ItemImpl) {
+    for impl_item in &mut item.items {
+        let ImplItem::Fn(method_fn) = impl_item else {
+            continue;
+        };
+        method_fn
+            .attrs
+            .retain(|attr| verb_from_attr(attr).is_none());
+    }
+}
+
+/// Emit `::jolt_core::inventory::submit! { ... }` blocks — one per discovered
+/// method — that register a [`::jolt_core::RegisteredEndpoint`] for the
+/// (path, method) pair. JOLT-RS-044 will iterate
+/// `inventory::iter::<RegisteredEndpoint>()` from `JoltServer::start` to
+/// register every entry across all linked crates into an
+/// [`::jolt_core::EndpointRegistry`].
+///
+/// This iteration emits the path + method only; JOLT-RS-043's handler-wrapper
+/// codegen will extend the record (or supplement it with a sibling submit) with
+/// the handler fn pointer. Splitting the metadata-only submit from the handler
+/// submit keeps 042 testable in isolation: the integration test asserts
+/// `inventory::iter::<RegisteredEndpoint>()` sees one entry per `#[get]` /
+/// `#[post]` / etc. method, with no dependency on handler-wrapper codegen.
+fn generate_inventory_submits(
+    path: &LitStr,
+    methods: &[DiscoveredMethod],
+) -> proc_macro2::TokenStream {
+    let submits = methods.iter().map(|m| {
+        let variant = m.http_method.as_jolt_core_variant_ident();
+        quote! {
+            ::jolt_core::inventory::submit! {
+                ::jolt_core::RegisteredEndpoint {
+                    path: #path,
+                    method: ::jolt_core::Method::#variant,
+                }
+            }
+        }
+    });
+    quote! { #(#submits)* }
+}
+
+/// Top-level driver invoked by the proc-macro entry point in `lib.rs`. Parses
+/// the attribute and impl block, runs the phase08 scan + validate passes,
+/// strips magic-marker verb attributes from the re-emitted impl, and appends
+/// one `inventory::submit!` block per discovered method.
+///
+/// Returns the combined token stream (re-emitted impl + submits). On failure
+/// returns the original `item` tokens plus a `compile_error!` so the user
+/// gets a single targeted diagnostic — the same shape JOLT-RS-038 used for
+/// attribute-parse failures.
+pub(crate) fn expand_endpoint(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let attr_parsed = match parse_endpoint_attr(attr) {
+        Ok(a) => a,
+        Err(err) => {
+            let err_tokens = err.to_compile_error();
+            return quote! { #item #err_tokens };
+        }
+    };
+    let mut impl_block: ItemImpl = match parse2(item.clone()) {
+        Ok(i) => i,
+        Err(err) => {
+            let err_tokens = err.to_compile_error();
+            return quote! { #item #err_tokens };
+        }
+    };
+    let methods = match scan_methods(&impl_block) {
+        Ok(m) => m,
+        Err(err) => {
+            let err_tokens = err.to_compile_error();
+            return quote! { #item #err_tokens };
+        }
+    };
+    if let Err(err) = validate_methods(&methods) {
+        let err_tokens = err.to_compile_error();
+        return quote! { #item #err_tokens };
+    }
+    strip_verb_attrs(&mut impl_block);
+    let submits = generate_inventory_submits(&attr_parsed.path, &methods);
+    quote! {
+        #impl_block
+        #submits
     }
 }
 
@@ -900,6 +1007,217 @@ mod tests {
         assert_eq!(
             count, 3,
             "path literal must appear once per arm, got {count}; rendered: {rendered}"
+        );
+    }
+
+    // ----- JOLT-RS-042: strip_verb_attrs / generate_inventory_submits / expand_endpoint -----
+
+    #[test]
+    fn strip_verb_attrs_removes_get_and_post_keeps_others() {
+        // Input has a mix of verb attrs (must be stripped) and non-verb attrs
+        // (`#[inline]`, `#[doc = ...]` — must survive). Verifies the strip is
+        // attribute-name-narrow, not attribute-class-broad.
+        let mut item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[inline]
+                fn list(&self) -> Response<()> { todo!() }
+
+                #[doc = "create a thing"]
+                #[post]
+                fn create(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        strip_verb_attrs(&mut item);
+        // Re-scan: no more verb attrs should be discoverable (since they're
+        // gone from the impl block).
+        let still_discovered = scan_methods(&item).expect("scan succeeds");
+        assert!(
+            still_discovered.is_empty(),
+            "verb attrs should be gone after strip, got {} methods",
+            still_discovered.len()
+        );
+        // Non-verb attrs survive: each method's remaining attrs list is
+        // exactly the non-verb ones.
+        let surviving_attr_names: Vec<Vec<String>> = item
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImplItem::Fn(f) => Some(
+                    f.attrs
+                        .iter()
+                        .map(|a| {
+                            a.path()
+                                .get_ident()
+                                .map(|i| i.to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            surviving_attr_names,
+            vec![
+                vec!["inline".to_string()],
+                vec!["doc".to_string()],
+            ],
+        );
+    }
+
+    #[test]
+    fn strip_verb_attrs_does_not_touch_non_fn_items() {
+        // Strip walks `item.items` looking for `ImplItem::Fn` only. Non-fn
+        // items (`const`, `type`) must be left alone — including any
+        // attributes attached to them.
+        let mut item = parse_impl(
+            r#"
+            impl Mixed {
+                #[doc = "max"]
+                const MAX: usize = 32;
+
+                type Output = String;
+
+                #[get]
+                fn handler(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        strip_verb_attrs(&mut item);
+        // Find the const and check its attribute survived.
+        let const_attr_count = item
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImplItem::Const(c) => Some(c.attrs.len()),
+                _ => None,
+            })
+            .next()
+            .expect("const item present");
+        assert_eq!(const_attr_count, 1, "const's #[doc] must survive strip");
+    }
+
+    #[test]
+    fn generate_inventory_submits_one_per_method() {
+        // PRD-mandated verification axis: each discovered method produces an
+        // independent inventory::submit! block, so JOLT-RS-044's iter() will
+        // see one entry per (path, method) pair.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn list(&self) -> Response<()> { todo!() }
+                #[post] fn create(&self) -> Response<()> { todo!() }
+                #[delete] fn destroy(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = parse_path_lit(r#""/api/test""#);
+        let rendered = generate_inventory_submits(&path, &methods).to_string();
+        // One submit per method.
+        let submit_count = rendered.matches(":: jolt_core :: inventory :: submit").count();
+        assert_eq!(submit_count, 3, "expected 3 submits, rendered: {rendered}");
+        // Each submit references the correct method variant.
+        for variant in ["Get", "Post", "Delete"] {
+            let needle = format!(":: jolt_core :: Method :: {variant}");
+            assert!(
+                rendered.contains(&needle),
+                "missing variant {variant} in rendered submits: {rendered}"
+            );
+        }
+        // Path literal appears once per submit.
+        let path_count = rendered.matches(r#""/api/test""#).count();
+        assert_eq!(path_count, 3, "path should appear once per submit");
+    }
+
+    #[test]
+    fn generate_inventory_submits_empty_methods_emits_nothing() {
+        // No verb-tagged methods → no submits. (The impl block is still
+        // re-emitted by expand_endpoint, but the submits stream is empty.)
+        let path = parse_path_lit(r#""/empty""#);
+        let rendered = generate_inventory_submits(&path, &[]).to_string();
+        assert_eq!(rendered, "", "empty methods must emit zero submits");
+    }
+
+    #[test]
+    fn expand_endpoint_emits_impl_plus_submit_for_single_method() {
+        // PRD-mandated verification (042): `#[endpoint("/test")]` on an impl
+        // with one verb-tagged method emits the re-stripped impl AND one
+        // inventory::submit! block. The integration test in
+        // jolt-core/tests/inventory_registration.rs runs the same shape end-
+        // to-end through cargo's compile pipeline; this unit test pins the
+        // token-stream shape so a regression surfaces here first.
+        let attr = proc_macro2::TokenStream::from_str(r#""/test""#).unwrap();
+        let item = proc_macro2::TokenStream::from_str(
+            r#"
+            impl Probe {
+                #[get]
+                fn ping(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        )
+        .unwrap();
+        let rendered = expand_endpoint(attr, item).to_string();
+        // Submit emitted.
+        assert!(
+            rendered.contains(":: jolt_core :: inventory :: submit"),
+            "expected inventory::submit!, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: Method :: Get"),
+            "expected Method::Get, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#""/test""#),
+            "expected /test path literal, rendered: {rendered}"
+        );
+        // Verb attribute stripped from re-emitted impl.
+        assert!(
+            !rendered.contains("# [get]"),
+            "verb attribute should be stripped, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_endpoint_surfaces_compile_error_on_bad_signature() {
+        // A method with `&self -> String` (non-Response return) must produce
+        // a compile_error! token rather than silently emitting an inventory
+        // submit. The user-visible diagnostic comes from validate_signature.
+        let attr = proc_macro2::TokenStream::from_str(r#""/bad""#).unwrap();
+        let item = proc_macro2::TokenStream::from_str(
+            r#"
+            impl Bad {
+                #[get]
+                fn handler(&self) -> String { todo!() }
+            }
+            "#,
+        )
+        .unwrap();
+        let rendered = expand_endpoint(attr, item).to_string();
+        assert!(
+            rendered.contains("compile_error"),
+            "expected compile_error! for bad signature, rendered: {rendered}"
+        );
+        assert!(
+            !rendered.contains(":: jolt_core :: inventory :: submit"),
+            "must NOT emit inventory submit when validation fails"
+        );
+    }
+
+    #[test]
+    fn expand_endpoint_surfaces_compile_error_on_non_impl_item() {
+        // The `#[endpoint("/path")]` macro expects an impl block. A free fn
+        // is not parseable as ItemImpl — expand_endpoint must surface a
+        // compile_error! pointing at the bad item shape rather than panicking.
+        let attr = proc_macro2::TokenStream::from_str(r#""/path""#).unwrap();
+        let item = proc_macro2::TokenStream::from_str("fn not_an_impl() {}").unwrap();
+        let rendered = expand_endpoint(attr, item).to_string();
+        assert!(
+            rendered.contains("compile_error"),
+            "expected compile_error! for non-impl item, rendered: {rendered}"
         );
     }
 }
