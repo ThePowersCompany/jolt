@@ -77,11 +77,46 @@
 //!    variant, which exposes the upstream error via [`std::error::Error`]
 //!    so the JOLT-RS-109 closing-test bundle can pin specific failure
 //!    classes without re-implementing the wrapper.
+//!
+//! 7. **Custom helpers are registered in [`TemplateEngine::new`], not opt-in.**
+//!    The PRD-108 helper set (`eq`, `ne`, `gt`, `lt`, `json`) is the
+//!    framework default — every Jolt deployment gets the same surface so
+//!    templates are portable across services. Of those five, `eq`/`ne`/`gt`/
+//!    `lt` are already registered by handlebars 6's
+//!    [`Handlebars::new`](handlebars::Handlebars::new) builtin setup (see
+//!    `handlebars-6.4.0/src/registry.rs` `setup_builtins` lines 180–186), so
+//!    the only NEW helper Jolt registers is `json` — a
+//!    [`serde_json::to_string`] wrapper for embedding a value as a JSON
+//!    literal inside a template (`<script>const data = {{json payload}};
+//!    </script>`). The registration runs once at construction time inside
+//!    [`TemplateEngine::new`]: pulling it out into an opt-in
+//!    `with_default_helpers()` builder method would create a foot-gun where
+//!    a template that references `{{json data}}` renders successfully on
+//!    one deployment and fails on another with the same `.hbs` source.
+//!    Callers that need to register additional custom helpers reach through
+//!    [`TemplateEngine::registry_mut`]; callers that need to remove a
+//!    default helper can call
+//!    [`handlebars::Handlebars::unregister_helper`] through the same
+//!    accessor.
 
 use std::path::Path;
 
-use handlebars::{DirectorySourceOptions, Handlebars};
+use handlebars::{handlebars_helper, DirectorySourceOptions, Handlebars};
 use serde::Serialize;
+
+// `json`: serialize the supplied JSON value to its canonical string form
+// (`serde_json::to_string`). Intended for embedding server-side data inside
+// `<script>` blocks or other contexts where the consumer needs a parseable
+// JSON literal rather than handlebars' default string coercion.
+//
+// On serialization failure (which `serde_json::Value` → `String` shouldn't
+// produce in practice, since every `Value` is by construction serializable)
+// the helper falls back to the JSON `null` literal so the template still
+// renders. The fallback is unreachable in practice; it exists so the helper
+// matches the upstream `handlebars_helper!` signature (which requires an
+// expression, not a `Result`) without forcing every template author through
+// an `unwrap` panic.
+handlebars_helper!(json: |v: Json| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
 
 /// Failure modes for [`TemplateEngine::new`].
 #[derive(Debug)]
@@ -192,6 +227,7 @@ impl TemplateEngine {
         }
         let mut registry = Handlebars::new();
         registry.register_templates_directory(dir, DirectorySourceOptions::default())?;
+        register_default_helpers(&mut registry);
         Ok(Self { registry })
     }
 
@@ -239,6 +275,18 @@ impl TemplateEngine {
         }
         Ok(self.registry.render(template, data)?)
     }
+}
+
+// Register Jolt's framework-default helper set on a [`Handlebars`] registry
+// (decision 7). Currently a single helper (`json`) — the comparison helpers
+// (`eq`, `ne`, `gt`, `lt`) are provided by handlebars 6's own
+// [`Handlebars::new`] builtin setup and do not need re-registering. Pulled
+// out as a free function (not a method on [`TemplateEngine`]) so the same
+// helper set can be applied to a bare [`Handlebars`] registry constructed
+// outside the framework path (e.g. by integration tests that bypass
+// [`TemplateEngine::new`]).
+fn register_default_helpers(registry: &mut Handlebars<'static>) {
+    registry.register_helper("json", Box::new(json));
 }
 
 #[cfg(test)]
@@ -645,5 +693,179 @@ mod tests {
             wrapped.source().is_some(),
             "Render variant exposes upstream source"
         );
+    }
+
+    /// PRD-mandated verification for JOLT-RS-108: `{{#if (eq status "active")}}`
+    /// renders the inner block when `status` is `"active"`. Pins that the
+    /// `eq` helper is wired up to a [`TemplateEngine`] constructed via
+    /// [`TemplateEngine::new`] (decision 7) without the caller having to
+    /// opt in. A regression that stripped `eq` from the default helper set
+    /// (or that built the registry via a path that bypasses handlebars'
+    /// `setup_builtins`) would fail this test with either a
+    /// `HelperNotFound` render error or an empty-string render.
+    #[test]
+    fn eq_helper_renders_block_when_value_matches_in_if_subexpression() {
+        let dir = TestDir::new("eq-helper");
+        dir.write_file(
+            "status.hbs",
+            r#"{{#if (eq status "active")}}active{{/if}}"#,
+        );
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("status", &serde_json::json!({ "status": "active" }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "active");
+    }
+
+    /// Companion to the PRD-verification test: the `else` branch fires when
+    /// the comparison is false. Pins both halves of the `eq` contract so a
+    /// regression that hard-wired `eq` to always return `true` (or always
+    /// `false`) is caught.
+    #[test]
+    fn eq_helper_renders_else_block_when_value_does_not_match() {
+        let dir = TestDir::new("eq-helper-else");
+        dir.write_file(
+            "status.hbs",
+            r#"{{#if (eq status "active")}}yes{{else}}no{{/if}}"#,
+        );
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("status", &serde_json::json!({ "status": "inactive" }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "no");
+    }
+
+    /// `ne`, `gt`, and `lt` (the other three comparison helpers named in the
+    /// PRD-108 step) are likewise available without explicit registration.
+    /// Pins decision 7's claim that the handlebars-6 builtin set covers all
+    /// four comparison operators — if a future handlebars upgrade dropped
+    /// any of them, this test would fail and force the framework to either
+    /// hold the dependency at 6 or re-register the dropped helper.
+    #[test]
+    fn ne_gt_lt_helpers_available_in_default_engine() {
+        let dir = TestDir::new("comparison-helpers");
+        dir.write_file(
+            "ne.hbs",
+            r#"{{#if (ne a b)}}different{{else}}same{{/if}}"#,
+        );
+        dir.write_file("gt.hbs", r#"{{#if (gt n 10)}}big{{else}}small{{/if}}"#);
+        dir.write_file("lt.hbs", r#"{{#if (lt n 10)}}small{{else}}big{{/if}}"#);
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        assert_eq!(
+            engine
+                .render("ne", &serde_json::json!({ "a": 1, "b": 2 }))
+                .expect("ne renders"),
+            "different",
+        );
+        assert_eq!(
+            engine
+                .render("gt", &serde_json::json!({ "n": 42 }))
+                .expect("gt renders"),
+            "big",
+        );
+        assert_eq!(
+            engine
+                .render("lt", &serde_json::json!({ "n": 3 }))
+                .expect("lt renders"),
+            "small",
+        );
+    }
+
+    /// The `json` helper (the only NEW helper added by JOLT-RS-108 — the
+    /// comparison helpers come from handlebars' builtin set) serializes a
+    /// value via [`serde_json::to_string`]. Pins that an object renders as
+    /// a JSON object literal suitable for embedding inside a `<script>` tag
+    /// or other JSON-consuming context. Default handlebars HTML escaping
+    /// would otherwise turn `"` into `&quot;`, so the test uses the triple-
+    /// brace `{{{json data}}}` form to bypass HTML escaping (the standard
+    /// idiom for `<script>` blocks).
+    #[test]
+    fn json_helper_serializes_object_to_json_literal() {
+        let dir = TestDir::new("json-helper-object");
+        dir.write_file("payload.hbs", r#"{{{json data}}}"#);
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render(
+                "payload",
+                &serde_json::json!({ "data": { "name": "World", "count": 3 } }),
+            )
+            .expect("render succeeds");
+
+        // serde_json's object key order matches insertion order for
+        // `serde_json::Map<String, Value>` with the default preserve_order
+        // off, but key ordering is BTreeMap-alphabetical when the value
+        // is constructed via the `json!` macro. Assert against the
+        // alphabetical form.
+        assert_eq!(out, r#"{"count":3,"name":"World"}"#);
+    }
+
+    /// `json` on a string produces a quoted JSON string (i.e. wraps the
+    /// value in `"` characters and escapes interior quotes). Pins that the
+    /// helper does NOT short-circuit on the string case to the bare string
+    /// — a regression that special-cased strings would silently produce
+    /// unquoted output that fails to parse as JSON in the consuming
+    /// `<script>` block.
+    #[test]
+    fn json_helper_quotes_string_value() {
+        let dir = TestDir::new("json-helper-string");
+        dir.write_file("name.hbs", r#"const n = {{{json name}}};"#);
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render("name", &serde_json::json!({ "name": "Alice" }))
+            .expect("render succeeds");
+
+        assert_eq!(out, r#"const n = "Alice";"#);
+    }
+
+    /// `json` round-trips numeric, boolean, and null literals to their JSON
+    /// forms. Pins that the helper preserves the underlying JSON type
+    /// rather than coercing everything to a string representation —
+    /// `{{json count}}` for `count: 3` must produce `3`, not `"3"`.
+    #[test]
+    fn json_helper_preserves_scalar_types() {
+        let dir = TestDir::new("json-helper-scalars");
+        dir.write_file(
+            "values.hbs",
+            "n={{{json n}}}|b={{{json b}}}|x={{{json x}}}",
+        );
+        let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+        let out = engine
+            .render(
+                "values",
+                &serde_json::json!({ "n": 3, "b": true, "x": null }),
+            )
+            .expect("render succeeds");
+
+        assert_eq!(out, "n=3|b=true|x=null");
+    }
+
+    /// Helper registration is visible on templates registered AFTER
+    /// construction (e.g. via [`TemplateEngine::registry_mut`]). Pins that
+    /// the helper lookup happens at render time against the engine's
+    /// shared registry, not at template-compile time against a snapshot —
+    /// a regression that captured the helper set into each template's
+    /// compiled AST would silently fail this test.
+    #[test]
+    fn default_helpers_visible_to_templates_registered_after_construction() {
+        let dir = TestDir::new("post-register-helpers");
+        let mut engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+        engine
+            .registry_mut()
+            .register_template_string("dynamic", r#"{{{json payload}}}"#)
+            .expect("register dynamic template");
+
+        let out = engine
+            .render("dynamic", &serde_json::json!({ "payload": [1, 2, 3] }))
+            .expect("render succeeds");
+
+        assert_eq!(out, "[1,2,3]");
     }
 }

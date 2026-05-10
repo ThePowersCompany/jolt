@@ -1553,7 +1553,7 @@
       "verification": [
         "Unit test: {{#if (eq status \"active\")}}active{{/if}} renders \"active\" when status is \"active\"."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-109",
