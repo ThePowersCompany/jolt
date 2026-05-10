@@ -993,6 +993,8 @@ dependencies = [
  "futures-util",
  "inventory",
  "jolt-macros",
+ "jolt-utils",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "tokio",

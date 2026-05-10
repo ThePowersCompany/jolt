@@ -3853,3 +3853,324 @@ mod auth_bearer {
         );
     }
 }
+
+mod auth_jwt {
+    //! PRD-mandated verification for JOLT-RS-072: "Unit test: valid token →
+    //! passes, expired token → 401."
+    //!
+    //! The structural surface is wider than the two PRD-mandated cases:
+    //! 072's contract is the JWT validator that consumes the [`BearerToken`]
+    //! stashed by [`AuthBearerLayer`] (071), calls
+    //! [`jolt_utils::jwt::decode`], and short-circuits with 401 + the
+    //! `mark_finished` latch on failure. The tests below pin each rejection
+    //! path's distinct body so 073+'s downstream consumers can rely on a
+    //! stable contract.
+    //!
+    //! Module is named `auth_jwt` so `cargo test -p jolt-core -- tests::auth_jwt`
+    //! filters cleanly; matches the established `auth_bearer` / `parse_body` /
+    //! `parse_query` naming convention.
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use axum::body::{to_bytes, Body};
+    use axum::extract::Request as AxumRequest;
+    use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use tower::{Layer, ServiceExt};
+
+    use crate::auth_bearer::BearerToken;
+    use crate::request_ext::RequestExt;
+    use crate::{AuthJwtLayer, JwtClaims, JwtConfig};
+
+    /// Inner service that panics if invoked. Used by every rejection-path
+    /// test so a regression that accidentally delegates past a failed JWT
+    /// decode (instead of short-circuiting) crashes loudly rather than
+    /// passing silently. Mirrors the `forbid_inner()` helper in the
+    /// sibling `auth_bearer` test module.
+    fn forbid_inner() -> impl tower::Service<
+        AxumRequest,
+        Response = Response,
+        Error = Infallible,
+        Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+        >,
+    > + Clone {
+        tower::service_fn(|_req: AxumRequest| {
+            Box::pin(async move {
+                panic!("AuthJwtService must short-circuit on rejection and never call inner");
+                #[allow(unreachable_code)]
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<Response, Infallible>> + Send>,
+                >
+        })
+    }
+
+    fn now_secs() -> usize {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is sane")
+            .as_secs() as usize
+    }
+
+    fn sign_hs256(secret: &[u8], claims: &JwtClaims) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .expect("HS256 encode with static secret never fails")
+    }
+
+    /// Build an Authorization-bearing request whose `BearerToken` extension
+    /// is already populated (simulating an upstream `AuthBearerLayer` having
+    /// run). The `request_ext` Arc is also planted so the test can observe
+    /// the `finished` latch.
+    fn request_with_bearer_token(
+        token: &str,
+        request_ext: Arc<RequestExt>,
+    ) -> AxumRequest {
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+        req.extensions_mut().insert(BearerToken(token.to_owned()));
+        req
+    }
+
+    #[tokio::test]
+    async fn valid_jwt_passes_through_and_inner_runs() {
+        // PRD-mandated half 1: valid token → passes. Also pins that the
+        // parsed JwtClaims lands in extensions and the finished latch is
+        // UNTOUCHED on the happy path.
+        let secret = b"jolt-rs-072-auth-jwt-test-secret";
+        let exp = now_secs() + 3600;
+        let claims = JwtClaims {
+            sub: "alice".to_owned(),
+            exp,
+            iat: Some(now_secs()),
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+        let inner = tower::service_fn(|req: AxumRequest| async move {
+            // Inner observes the parsed JwtClaims in extensions and echoes
+            // the sub in the response body so the test can pin the shape.
+            let sub = req
+                .extensions()
+                .get::<JwtClaims>()
+                .expect("valid token must surface JwtClaims in extensions")
+                .sub
+                .clone();
+            Ok::<Response, Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(sub))
+                    .unwrap(),
+            )
+        });
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token(&token, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid JWT must allow the inner service to run"
+        );
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        assert_eq!(
+            &body_bytes[..],
+            b"alice",
+            "parsed JwtClaims must land in extensions for the inner handler"
+        );
+        assert!(
+            !request_ext.is_finished(),
+            "happy path must NOT mark the request finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_jwt_short_circuits_with_401() {
+        // PRD-mandated half 2: expired token → 401. Also pins the body
+        // shape, the WWW-Authenticate challenge with the invalid_token
+        // error parameter (RFC 6750 §3), the finished latch, and the
+        // inner-never-invoked guarantee.
+        let secret = b"jolt-rs-072-auth-jwt-test-secret";
+        // exp = 1000 → 1970; well in the past.
+        let claims = JwtClaims {
+            sub: "alice".to_owned(),
+            exp: 1_000,
+            iat: None,
+        };
+        let token = sign_hs256(secret, &claims);
+
+        let layer = AuthJwtLayer::new(JwtConfig::new(secret.to_vec(), Algorithm::HS256));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token(&token, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "expired JWT must surface 401"
+        );
+        let www_auth = resp
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .expect("401 must carry WWW-Authenticate")
+            .to_str()
+            .expect("WWW-Authenticate is ASCII");
+        assert_eq!(
+            www_auth, r#"Bearer error="invalid_token""#,
+            "rejected JWTs use the RFC 6750 invalid_token challenge parameter"
+        );
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("401 must carry Content-Type")
+            .to_str()
+            .expect("Content-Type is ASCII");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "401 body is text/plain; got {content_type}"
+        );
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("401 body is UTF-8");
+        assert_eq!(
+            body_text, "Token has expired",
+            "expired-token rejection uses the dedicated body shape"
+        );
+
+        assert!(
+            request_ext.is_finished(),
+            "AuthJwtService must flip RequestExt::mark_finished on rejection"
+        );
+        assert!(
+            request_ext.take_response().is_none(),
+            "the 401 is returned directly from call(), not stashed in RequestExt"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_jwt_short_circuits_with_401() {
+        // A token signed with a DIFFERENT secret than the validator carries
+        // is rejected with the dedicated InvalidSignature body so callers
+        // see *why* the token was rejected (vs. a generic 401).
+        let claims = JwtClaims {
+            sub: "alice".to_owned(),
+            exp: now_secs() + 3600,
+            iat: None,
+        };
+        let token = sign_hs256(b"signed-with-this-secret", &claims);
+
+        let layer = AuthJwtLayer::new(JwtConfig::new(
+            b"verify-with-DIFFERENT-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token(&token, Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text, "Invalid token signature",
+            "wrong-secret rejection uses the dedicated body shape"
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn malformed_jwt_short_circuits_with_401() {
+        // A bearer-token-like string that isn't a real JWT (no three
+        // dot-separated segments) must reject with the Malformed body.
+        let layer = AuthJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-072-auth-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let req = request_with_bearer_token("definitely-not-a-jwt", Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(body_text, "Malformed token");
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn missing_bearer_token_short_circuits_with_401() {
+        // AuthJwtLayer requires AuthBearerLayer upstream (or some equivalent
+        // BearerToken-stashing layer). With no BearerToken in extensions,
+        // the layer rejects with the dedicated MissingBearerToken body.
+        let layer = AuthJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-072-auth-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+        // NO BearerToken inserted.
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
+        assert_eq!(
+            body_text, "Missing bearer token",
+            "no-token rejection uses the dedicated MissingBearerToken body"
+        );
+        assert!(request_ext.is_finished());
+    }
+
+    #[tokio::test]
+    async fn fresh_request_ext_is_injected_when_no_upstream_layer_set_one() {
+        // Mirrors AuthBearerService's preserve-or-inject contract: even when
+        // no upstream Arc<RequestExt> is present, the layer injects a fresh
+        // one before flipping mark_finished. Without this, a malformed-token
+        // request reaching AuthJwtLayer standalone would have no observable
+        // handle on the finished latch.
+        let layer = AuthJwtLayer::new(JwtConfig::new(
+            b"jolt-rs-072-auth-jwt-test-secret".to_vec(),
+            Algorithm::HS256,
+        ));
+        let svc = layer.layer(forbid_inner());
+
+        // No RequestExt, no BearerToken — the missing-token branch fires.
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/protected")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "rejection must still produce 401 even without an upstream RequestExt"
+        );
+    }
+}

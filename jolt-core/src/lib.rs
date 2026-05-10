@@ -1,6 +1,7 @@
 #![doc = "jolt-core: HTTP, WebSocket, SSE, tasks, and pub/sub primitives for the Jolt framework."]
 
 pub mod auth_bearer;
+pub mod auth_jwt;
 pub mod cookie;
 pub mod cors;
 pub mod endpoint;
@@ -17,6 +18,11 @@ pub mod server;
 pub mod status;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
+pub use auth_jwt::{AuthJwtLayer, AuthJwtService};
+// Re-export jolt-utils JWT types at the jolt-core surface so user crates that
+// consume `AuthJwtLayer` (JOLT-RS-072) don't need a direct `jolt-utils` dep
+// just to build a `JwtConfig` or read a `JwtClaims` from extensions.
+pub use jolt_utils::jwt::{JwtClaims, JwtConfig, JwtDecodeError};
 pub use cookie::Cookie;
 pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};

@@ -15,3 +15,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 inventory = { workspace = true }
 jolt-macros = { path = "../jolt-macros" }
+jolt-utils = { path = "../jolt-utils" }
+
+[dev-dependencies]
+# Used by the `auth_jwt` test module (JOLT-RS-072) to mint signed test tokens
+# directly. `jolt-utils` re-exports the decode side via its `jwt` module; the
+# tests here exercise that decode against tokens minted by the same upstream
+# library, which gives end-to-end coverage without forcing `jolt-utils` to
+# expose an `encode` helper on its public surface yet.
+jsonwebtoken = { workspace = true }
