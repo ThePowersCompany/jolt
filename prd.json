@@ -153,7 +153,7 @@
       "verification": [
         "Unit test: StatusCode::from_u16(200) == Ok, StatusCode::from_u16(418) == Other(418)."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-009",

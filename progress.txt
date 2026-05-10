@@ -154,3 +154,31 @@ Notes for next iterations:
 - JOLT-RS-008 (StatusCode enum): mirror the Method pattern — enum with named variants + Other(u16) catch-all, in jolt-core/src/status.rs (or status_code.rs). Verification: `from_u16(200) == Ok`, `from_u16(418) == Other(418)`. Note the verification names a `from_u16` constructor (not FromStr), so model it as an inherent associated function `fn from_u16(u16) -> StatusCode` returning the enum directly (no Result needed since Other(_) makes it total).
 - JOLT-RS-009 will then add `From<StatusCode> for axum::http::StatusCode` + Display. Same pattern is the natural template for Method↔axum bridging when that PRD item arrives.
 - JOLT-RS-010 closes phase01 with comprehensive tests for both Method and StatusCode (round-trips, all variants). Don't pre-write those now — keep JOLT-RS-007/008/009 minimal per the per-item scope rule.
+
+## 2026-05-10 — JOLT-RS-008: StatusCode enum
+
+PRD item: JOLT-RS-008 (priority 8, phase01-method-statuscode) — Define StatusCode enum with named variants (Ok=200, Created=201, NoContent=204, BadRequest=400, Unauthorized=401, Forbidden=403, NotFound=404, MethodNotAllowed=405, Conflict=409, InternalServerError=500) plus Other(u16) catch-all.
+
+Verification:
+- `cargo test -p jolt-core --lib` → 4 passed (method::tests::from_str_get_is_ok, method::tests::from_str_invalid_is_err, status::tests::from_u16_known_is_named, status::tests::from_u16_unknown_is_other); compiled clean in 0.95s.
+- `cargo check --workspace` → all 5 crates check clean in 0.33s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007 — auto-prompt's npm/Bun commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- `from_u16` is a total function returning `StatusCode` directly (not `Result<StatusCode, _>`). The PRD verification says `from_u16(418) == Other(418)`, which only works if Other(_) absorbs unknown codes — making the function infallible. This matches the prior agent's note in the JOLT-RS-007 entry.
+- Variant order matches the PRD spec exactly (Ok, Created, NoContent, BadRequest, Unauthorized, Forbidden, NotFound, MethodNotAllowed, Conflict, InternalServerError, Other) for spec traceability and to give JOLT-RS-010 a stable enumeration to round-trip-test.
+- Added an `as_u16(&self) -> u16` inherent helper symmetric with `from_u16`. Not in the PRD step list, but it's the natural pair: JOLT-RS-009's `From<StatusCode> for axum::http::StatusCode` will need exactly this lookup, and JOLT-RS-010's round-trip tests (`from_u16(x).as_u16() == x`) will rely on it. Trivial, load-bearing, and avoids JOLT-RS-009 having to add it as undeclared scope creep.
+- Did NOT add Display (JOLT-RS-009 owns it) or any axum::http::StatusCode interop. Kept this strictly to the enum + constructor.
+- Did NOT include uncommon codes (3xx redirects, 408 Timeout, 429 Too Many Requests, 503 Service Unavailable). The PRD lists exactly ten named variants — adding more would silently broaden the API surface and create ambiguity for JOLT-RS-010's all-variants test. Other(u16) catches everything else cleanly.
+- Module file is `src/status.rs` (chose over `status_code.rs` to mirror `method.rs`'s short name; module path is `jolt_core::status::StatusCode`, re-exported as `jolt_core::StatusCode`).
+- Re-exported `StatusCode` at the crate root via `pub use status::StatusCode` — same ergonomic pattern as `Method`.
+
+Files changed:
+- jolt-core/src/status.rs (new) — StatusCode enum with 10 named variants + Other(u16), from_u16, as_u16, 2 unit tests.
+- jolt-core/src/lib.rs — added `pub mod status;` and `pub use status::StatusCode;`.
+- prd.json — JOLT-RS-008 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-009 (priority 9): `impl From<StatusCode> for axum::http::StatusCode` + `impl Display for StatusCode`. The Display impl can write the numeric code (e.g. "200") or "200 OK"-style — the PRD doesn't say, but axum::http::StatusCode displays as "200 OK" so matching that gives the most user-friendly output. The From impl is mechanical: `axum::http::StatusCode::from_u16(self.as_u16()).expect("StatusCode variants are all valid HTTP codes")` — Other(u16) values from outside the standard 100-599 range would panic, which is acceptable since constructing one of those would be the bug.
+- JOLT-RS-010 (priority 10): comprehensive tests. Suggested coverage: every named variant round-trips through from_u16/as_u16; every named variant Display-formats correctly; every named variant converts to the correct axum StatusCode; Other(u16) preserves arbitrary codes; Method::from_str round-trips for all 7 verbs.
