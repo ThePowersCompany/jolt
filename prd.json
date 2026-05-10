@@ -167,7 +167,7 @@
       "verification": [
         "Unit test: StatusCode::NotFound \u2192 axum StatusCode 404."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-010",

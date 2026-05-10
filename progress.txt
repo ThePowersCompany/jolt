@@ -182,3 +182,28 @@ Files changed:
 Notes for next iterations:
 - JOLT-RS-009 (priority 9): `impl From<StatusCode> for axum::http::StatusCode` + `impl Display for StatusCode`. The Display impl can write the numeric code (e.g. "200") or "200 OK"-style — the PRD doesn't say, but axum::http::StatusCode displays as "200 OK" so matching that gives the most user-friendly output. The From impl is mechanical: `axum::http::StatusCode::from_u16(self.as_u16()).expect("StatusCode variants are all valid HTTP codes")` — Other(u16) values from outside the standard 100-599 range would panic, which is acceptable since constructing one of those would be the bug.
 - JOLT-RS-010 (priority 10): comprehensive tests. Suggested coverage: every named variant round-trips through from_u16/as_u16; every named variant Display-formats correctly; every named variant converts to the correct axum StatusCode; Other(u16) preserves arbitrary codes; Method::from_str round-trips for all 7 verbs.
+
+## 2026-05-10 — JOLT-RS-009: StatusCode → axum bridge + Display
+
+PRD item: JOLT-RS-009 (priority 9, phase01-method-statuscode) — Implement From<StatusCode> for axum::http::StatusCode and Display for StatusCode.
+
+Verification:
+- `cargo test -p jolt-core --lib` → 7 passed (5 prior + into_axum_status_not_found, display_known_includes_reason_phrase, display_other_with_known_code_uses_reason_phrase); compiled clean in 1.14s.
+- `cargo check --workspace` → all 5 crates check clean in 0.38s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007/008 — npm/Bun commands in the auto-prompt don't apply to this Rust workspace. cargo is the verification tool.
+
+Key decisions:
+- `From<StatusCode> for axum::http::StatusCode` uses `axum::http::StatusCode::from_u16(self.as_u16()).expect(...)`. The expect message names the invariant ("StatusCode variants must encode valid HTTP status numbers"). All ten named variants encode 200/201/204/400/401/403/404/405/409/500 — all in the valid 100..=999 range. Other(u16) values outside that range will panic, which is correct: constructing Other(99) or Other(1000) is a programming bug, not a recoverable runtime error. Documented this implicitly via the expect message rather than wrapping in a TryFrom — a fallible bridge would force every call site to handle an impossible-for-named-variants error.
+- `Display for StatusCode` delegates to axum's canonical_reason for the reason phrase. This matches axum::http::StatusCode's "200 OK" / "404 Not Found" output, which is what users will see in logs and error pages everywhere else in the stack. For Other(u16) codes that lack a canonical reason (or are outside 100..=999), falls back to just the numeric code. This preserves the symmetry that axum gives.
+- Did NOT implement Display in terms of as_u16 + a hand-rolled match on canonical reason strings. Letting axum own the reason-phrase mapping means we don't have to update Jolt every time IANA registers a new status code (e.g. the newer 425 Too Early), and we automatically inherit any future axum/http-crate fixes.
+- Added three tests aligned with the PRD verification ("StatusCode::NotFound → axum StatusCode 404") plus two adjacent Display tests to lock in the format choice. Other(418) → "418 I'm a teapot" verifies the canonical_reason lookup works for unnamed-but-known codes.
+- Pulled `use std::fmt;` at the top of the module rather than fully-qualifying — same style as method.rs.
+
+Files changed:
+- jolt-core/src/status.rs (added From<StatusCode> for axum::http::StatusCode, Display for StatusCode, 3 unit tests).
+- prd.json — JOLT-RS-009 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-010 (priority 10, closes phase01): comprehensive tests for Method and StatusCode (all variants, edge cases, conversion round-trips). Suggested coverage: every named StatusCode variant round-trips through from_u16/as_u16; every named StatusCode variant converts to the correct axum::http::StatusCode constant (NOT_FOUND, BAD_REQUEST, etc.); every named StatusCode Display-formats with the expected canonical reason; Other(u16) preserves arbitrary in-range codes through round-trip and Display; Method::from_str round-trips for all 7 verbs (GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD); Method::as_str/Display match for all 7 verbs. The PRD verification is `cargo test -p jolt-core -- tests::status_code passes` — note the literal string "tests::status_code", which suggests the agent should add a top-level `mod tests { mod status_code { ... } mod method { ... } }` (or similar) to give the filter a stable target. That's a structural decision worth flagging now.
+- After 010, phase02 begins (JOLT-RS-011: Request struct with method, path, headers, query_params, body, cookies fields). This is the first real domain type — likely belongs in jolt-core/src/request.rs.
