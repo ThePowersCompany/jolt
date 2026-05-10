@@ -33,16 +33,29 @@
 //!   expansion emits a second hidden marker `__JOLT_AUTO_MIDDLEWARE_CORS: bool`
 //!   so an integration test (and 051+'s layer codegen) can observe whether the
 //!   CORS layer should be wired in.
-//! - JOLT-RS-051 (this iteration): emit a real `::jolt_core::tower::Layer`
-//!   impl on the user's struct via [`expand_layer_impl`]. The layer's
-//!   `Service` is a generated wrapper struct
-//!   `__JoltAutoMiddleware<Ident>Service<S>` that delegates `poll_ready` and
-//!   `call` to the inner service for now — JOLT-RS-052/053 will splice the
-//!   middleware-ordering chain and per-field extraction into the wrapper's
-//!   `call()`. The 046 + 050 marker consts are kept alongside the new impl as
-//!   parse-witnesses; they're cheap (`usize` and `bool`), already wired into
-//!   the integration tests in `auto_middleware_derive.rs`, and trivially
-//!   removable once 053+'s codegen has its own observable surface.
+//! - JOLT-RS-051: emit a real `::jolt_core::tower::Layer` impl on the user's
+//!   struct via [`expand_layer_impl`]. The layer's `Service` is a generated
+//!   wrapper struct `__JoltAutoMiddleware<Ident>Service<S>` that delegates
+//!   `poll_ready` and `call` to the inner service. The 046 + 050 marker
+//!   consts are kept alongside the new impl as parse-witnesses; they're cheap
+//!   (`usize` and `bool`), already wired into the integration tests in
+//!   `auto_middleware_derive.rs`, and trivially removable once 053+'s codegen
+//!   has its own observable surface.
+//! - JOLT-RS-052 (this iteration): emit the canonical middleware step
+//!   ordering inside the wrapper's `call()` body via [`middleware_chain`] +
+//!   [`MiddlewareStep`]. The chain's canonical order is
+//!   `auth → cors → log → parse-query → parse-body → user → handler`; 052
+//!   handles `cors` (per `parsed.cors`), `parse-query` (per any
+//!   [`FieldKind::QueryParams`] field), and `parse-body` (per any
+//!   [`FieldKind::Body`] field). Each present step renders as a stable
+//!   string-literal marker statement (`let _: &str = "jolt::middleware::step::<name>";`)
+//!   inside `call()`, in canonical order, BEFORE the existing delegating
+//!   `<__S as Service<__Req>>::call(&mut self.inner, __req)`. The marker
+//!   statements survive tokenisation (unlike `//` comments) so 053 has a
+//!   stable splice point per step, and unit tests can pin the ordering by
+//!   substring position. Auth, log, and user-defined steps are NOT emitted at
+//!   052 — auth/log require attribute parsing landing in JOLT-RS-056+, and
+//!   user-defined middleware composition lands later still.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
 //! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
@@ -59,16 +72,18 @@ use syn::{
 /// JOLT-RS-046 captured the struct identifier and per-field metadata; 047-049
 /// extended [`AutoMiddlewareField`] with kind classification (body, query,
 /// req); 050 added struct-level attribute parsing for `#[cors]` via
-/// [`AutoMiddlewareInput::cors`]. The struct ident is kept verbatim from the
-/// source so codegen can emit `impl <ident>` blocks targeting the user's type.
+/// [`AutoMiddlewareInput::cors`]; 052 reads both `cors` and `fields[].kind`
+/// inside [`middleware_chain`] to decide which middleware-ordering steps to
+/// splice into the generated `call()` body. The struct ident is kept verbatim
+/// from the source so codegen can emit `impl <ident>` blocks targeting the
+/// user's type.
 #[derive(Debug)]
-#[allow(dead_code)] // ident is consumed by expand_auto_middleware; the rest are read by tests this iteration. JOLT-RS-051+ wires layer codegen on top.
 pub(crate) struct AutoMiddlewareInput {
     pub(crate) ident: Ident,
     pub(crate) fields: Vec<AutoMiddlewareField>,
-    /// `true` iff the struct carries a bare `#[cors]` attribute. JOLT-RS-051+
-    /// will use this flag to splice the CORS layer into the generated
-    /// middleware call chain. The attribute is opted-in as a derive helper via
+    /// `true` iff the struct carries a bare `#[cors]` attribute. 052 reads
+    /// this in [`middleware_chain`] to splice the cors step into the
+    /// generated call chain. The attribute is opted-in as a derive helper via
     /// `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`;
     /// without that opt-in the compiler would reject `#[cors]` as an unknown
     /// macro at the user's source site before the derive ever runs.
@@ -84,8 +99,12 @@ pub(crate) struct AutoMiddlewareInput {
 /// passes can iterate the parsed input once, dispatch on `kind`, and emit the
 /// per-kind extraction code in 053. The `ty` stays verbatim because codegen
 /// will splice it into `__req.json::<#ty>()` (Body) and similar shapes.
+///
+/// As of JOLT-RS-052, [`kind`] is read by [`middleware_chain`] to decide
+/// which step markers to emit; `ident` and `ty` are still parse-witnesses
+/// only — they're consumed by 053 when per-field extraction codegen lands.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields are read by tests this iteration; JOLT-RS-051+ reads them in layer codegen.
+#[allow(dead_code)] // ident + ty are parse-witnesses for 053's per-field extraction codegen; kind is consumed by middleware_chain in 052.
 pub(crate) struct AutoMiddlewareField {
     pub(crate) ident: Ident,
     pub(crate) ty: Type,
@@ -309,6 +328,98 @@ fn is_hashmap_string_string(ty: &Type) -> bool {
     })
 }
 
+/// One step in the canonical middleware call chain emitted into the wrapper
+/// service's `call()` body (JOLT-RS-052).
+///
+/// The PRD's chain order is `auth → cors → log → parse-query → parse-body →
+/// user-defined middlewares → handler`. 052 emits only the steps that are
+/// (a) present on the parsed input AND (b) implementable today; auth/log/user
+/// require future PRD items (auth + log are likely 056+ attributes; user-defined
+/// middleware composition is later still). The handler step is the existing
+/// `<__S as Service<__Req>>::call(&mut self.inner, __req)` delegation, which
+/// stays as the terminal expression of `call()` — 052's emission is purely
+/// additive in front of it.
+///
+/// Variants are listed in canonical order; [`middleware_chain`] preserves
+/// that order when assembling the per-derive chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MiddlewareStep {
+    /// Fires iff `parsed.cors` (struct-level `#[cors]` attribute, 050). 053
+    /// will replace the marker statement with the cors short-circuit + header
+    /// injection logic that 056-058 will define on `CorsConfig`.
+    Cors,
+    /// Fires iff any field is [`FieldKind::QueryParams`] (048). 053 will
+    /// replace the marker statement with the query-extraction calls — one
+    /// `__req.query_params::<T>()` per `QueryParams<T>`-typed field, plus a
+    /// raw-map copy for any `query_params: HashMap<String, String>`-typed
+    /// field. Multiple QueryParams fields collapse into a single chain entry;
+    /// 053 emits one extraction expression per matching field inside this
+    /// single step.
+    ParseQuery,
+    /// Fires iff any field is [`FieldKind::Body`] (047). 053 will replace the
+    /// marker statement with `__req.json::<T>()` for the (single) body field
+    /// — the spec defines `body: T` as the body-extraction shape. Multiple
+    /// `body`-named fields would already be a parse error from `Fields::Named`
+    /// (Rust forbids duplicate field names), so a single chain entry is
+    /// sufficient.
+    ParseBody,
+}
+
+impl MiddlewareStep {
+    /// Stable token-tag for the step. Embedded as a string literal in the
+    /// generated `call()` body so unit tests can witness the per-derive chain
+    /// shape and ordering by substring position. JOLT-RS-053 will replace
+    /// each marker statement with the real extraction body; until then the
+    /// marker IS the observable surface of the chain.
+    ///
+    /// The `jolt::middleware::step::` prefix namespaces the marker so a
+    /// substring search can't collide with unrelated string literals a user
+    /// might happen to embed in a body that flows through this macro
+    /// (extremely unlikely but cheap to defend).
+    fn token_tag(self) -> &'static str {
+        match self {
+            Self::Cors => "jolt::middleware::step::cors",
+            Self::ParseQuery => "jolt::middleware::step::parse_query",
+            Self::ParseBody => "jolt::middleware::step::parse_body",
+        }
+    }
+}
+
+/// Build the canonical middleware step chain for `parsed`.
+///
+/// Steps are emitted in the canonical PRD order
+/// (`auth → cors → log → parse-query → parse-body → user → handler`); 052
+/// implements the cors / parse-query / parse-body subset, in that order.
+///
+/// Activation rules:
+/// - [`MiddlewareStep::Cors`]: `parsed.cors == true`.
+/// - [`MiddlewareStep::ParseQuery`]: any `parsed.fields[i].kind == QueryParams`.
+/// - [`MiddlewareStep::ParseBody`]: any `parsed.fields[i].kind == Body`.
+///
+/// Each step appears at most once in the returned vector — multiple fields of
+/// the same kind coalesce to a single chain entry, and 053's per-field
+/// extraction codegen will fan out the field-level work inside the single
+/// step. The chain order is independent of the field declaration order on
+/// the source struct: a struct that lists `body` before `query_params` still
+/// gets `[ParseQuery, ParseBody]` (canonical), not `[ParseBody, ParseQuery]`.
+///
+/// An empty chain (no `#[cors]` and no Body/QueryParams fields) returns an
+/// empty `Vec` — the wrapper's `call()` body is then a pure delegation to
+/// the inner service, identical to 051's pre-chain shape.
+pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareStep> {
+    let mut chain = Vec::new();
+    if parsed.cors {
+        chain.push(MiddlewareStep::Cors);
+    }
+    if parsed.fields.iter().any(|f| f.kind == FieldKind::QueryParams) {
+        chain.push(MiddlewareStep::ParseQuery);
+    }
+    if parsed.fields.iter().any(|f| f.kind == FieldKind::Body) {
+        chain.push(MiddlewareStep::ParseBody);
+    }
+    chain
+}
+
 /// Top-level driver for `#[derive(AutoMiddleware)]`.
 ///
 /// Parses via [`parse_auto_middleware_input`] and emits, in order:
@@ -322,10 +433,11 @@ fn is_hashmap_string_string(ty: &Type) -> bool {
 /// 3. An `impl<S> ::jolt_core::tower::Layer<S> for <Ident>` (051) that pulls
 ///    the wrapper service over the inner.
 /// 4. An `impl<S, Req> ::jolt_core::tower::Service<Req> for <wrapper><S>` (051)
-///    that delegates `poll_ready` and `call` to the inner service for now.
-///    JOLT-RS-052/053 will splice the middleware-ordering chain (auth, cors,
-///    parse-query, parse-body, ...) and the per-field extraction code into the
-///    delegating `call()`.
+///    that delegates `poll_ready` and `call` to the inner service. As of 052,
+///    `call()` splices in canonical-order step markers (cors, parse-query,
+///    parse-body) for steps that fire on the parsed input. The terminal
+///    `inner.call(__req)` delegation stays as the handler step. JOLT-RS-053
+///    will replace each marker with the real extraction / short-circuit body.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. This keeps
@@ -365,7 +477,7 @@ fn service_ident_for(ident: &Ident) -> Ident {
 }
 
 /// Emit the `tower::Layer` + wrapper-service portion of the derive expansion
-/// (JOLT-RS-051).
+/// (JOLT-RS-051 + JOLT-RS-052).
 ///
 /// Shape of the emission:
 ///
@@ -395,7 +507,13 @@ fn service_ident_for(ident: &Ident) -> Ident {
 ///     type Error    = <__S as ...::Service<__Req>>::Error;
 ///     type Future   = <__S as ...::Service<__Req>>::Future;
 ///     fn poll_ready(&mut self, cx) -> Poll<Result<(), Self::Error>> { ... }
-///     fn call(&mut self, req) -> Self::Future { ... }
+///     fn call(&mut self, req) -> Self::Future {
+///         // 052: per-derive chain steps in canonical order, one stmt per active step.
+///         let _: &::core::primitive::str = "jolt::middleware::step::cors";
+///         let _: &::core::primitive::str = "jolt::middleware::step::parse_query";
+///         let _: &::core::primitive::str = "jolt::middleware::step::parse_body";
+///         <__S as ...::Service<__Req>>::call(&mut self.inner, __req)
+///     }
 /// }
 /// ```
 ///
@@ -418,12 +536,13 @@ fn service_ident_for(ident: &Ident) -> Ident {
 ///    layer slot into either a `Service<axum::extract::Request>` stack
 ///    (production) or a `Service<()>` stack (tests / type-level assertions),
 ///    without forcing a specific request type at the proc-macro layer.
-/// 4. **`call` and `poll_ready` delegate to the inner service.** No
-///    extraction logic is emitted at 051 — the `call()` body is
-///    `<__S as Service<__Req>>::call(&mut self.inner, __req)`. JOLT-RS-052
-///    will wrap this in the auth/cors/parse chain; JOLT-RS-053 will splice
-///    per-field `__req.json::<T>()` / `__req.query_params::<T>()` /
-///    `&__req` extraction calls before the `inner.call(__req)`.
+/// 4. **`call` and `poll_ready` delegate to the inner service.** The
+///    terminal expression of `call()` is
+///    `<__S as Service<__Req>>::call(&mut self.inner, __req)`. JOLT-RS-052's
+///    chain markers are statement-level splices BEFORE that terminal
+///    delegation; JOLT-RS-053 will replace each marker with per-field
+///    extraction (`__req.json::<T>()` / `__req.query_params::<T>()` /
+///    `&__req`).
 /// 5. **Wrapper derives `Clone` via a hand-written impl when `__S: Clone`.**
 ///    Tower stacks routinely clone services per-connection; a wrapper that
 ///    can't clone breaks composition. The hand-written impl avoids the
@@ -433,15 +552,46 @@ fn service_ident_for(ident: &Ident) -> Ident {
 ///    explicit about the bound, lets us add `Sync`/`Send` bounds later
 ///    without re-deriving, and matches the rest of the proc-macro emission
 ///    style.)
-/// 6. **The cors flag and per-field kinds are NOT consumed at 051.** They're
-///    parsed and stored, but the `call()` body doesn't branch on them yet.
-///    JOLT-RS-052 will read `parsed.cors` to decide whether to splice the
-///    cors layer; JOLT-RS-053 will iterate `parsed.fields` to emit
-///    extraction. The unused-field allow on `AutoMiddlewareInput` /
-///    `AutoMiddlewareField` continues to cover this.
+///
+/// Decisions pinned at 052:
+///
+/// 6. **Chain steps are statement-level string-literal markers, not function
+///    calls.** Each active step renders as
+///    `let _: &::core::primitive::str = "jolt::middleware::step::<name>";`.
+///    The marker:
+///      - is valid Rust regardless of `__Req`'s shape (no method calls on the
+///        request, no trait bounds beyond `Service<__Req>`),
+///      - survives tokenisation (unlike `//` comments, which `quote!` strips),
+///      - doesn't trigger `unused_variables` (wildcard `_` pattern) or
+///        `clippy::let_unit_value` (bound type is `&str`, not `()`),
+///      - leaves the wrapper's `Self::Future` type unchanged (still the
+///        inner service's `Future`; no `Box<dyn Future>` rewrap).
+///
+///    The marker is the splice point 053 targets — replacing the entire
+///    `let _: ... = "...";` statement with the real step body keeps the
+///    surrounding `call()` shape stable.
+/// 7. **Multiple matching fields collapse to a single chain step.** The
+///    `middleware_chain` builder pushes each step variant at most once even
+///    if many fields match (e.g. two `QueryParams<T>` fields). 053 will
+///    iterate `parsed.fields.iter().filter(|f| f.kind == ...)` inside the
+///    single step to emit per-field extraction. Keeping coalescing here
+///    means the chain ordering surface stays per-step (not per-field), which
+///    matches the PRD's chain shape exactly.
+/// 8. **Empty chain renders as the 051 pre-chain shape.** A derive with no
+///    `#[cors]` and no Body/QueryParams fields produces an empty
+///    `middleware_chain`, so `call()` is just the bare delegation — bit-for-bit
+///    identical to 051's emission. That preserves the existing
+///    integration-test contract for `UnitMiddleware`.
 fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
     let ident = &parsed.ident;
     let service_ident = service_ident_for(ident);
+    let chain = middleware_chain(parsed);
+    let chain_stmts = chain.iter().map(|step| {
+        let tag = step.token_tag();
+        quote! {
+            let _: &::core::primitive::str = #tag;
+        }
+    });
     quote! {
         #[doc(hidden)]
         pub struct #service_ident<__S> {
@@ -483,11 +633,10 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
             }
 
             fn call(&mut self, __req: __Req) -> Self::Future {
-                // JOLT-RS-052 will wrap this dispatch with the middleware
-                // ordering chain (auth → cors → parse-query → parse-body →
-                // user → handler). JOLT-RS-053 will splice per-field
-                // extraction (`__req.json::<T>()`, `__req.query_params::<T>()`,
-                // `&__req`) before the delegating call.
+                // JOLT-RS-052: canonical chain steps for this derive, one
+                // statement per active step. JOLT-RS-053 replaces each
+                // marker with the real extraction / short-circuit body.
+                #(#chain_stmts)*
                 <__S as ::jolt_core::tower::Service<__Req>>::call(&mut self.inner, __req)
             }
         }
@@ -1581,7 +1730,7 @@ mod tests {
     fn expand_emits_layer_impl_even_when_cors_attribute_present() {
         // The cors flag does NOT change the layer-impl shape at 051 — the
         // wrapper service is identical for `#[cors]`-bearing and bare structs.
-        // JOLT-RS-052 will read `parsed.cors` to splice the cors layer into
+        // JOLT-RS-052 reads `parsed.cors` to splice a cors STEP MARKER into
         // the call chain, but the outer Layer impl that 051 emits is
         // unconditional.
         let input = parse_derive(
@@ -1595,6 +1744,419 @@ mod tests {
         assert!(
             rendered.contains(":: jolt_core :: tower :: Layer < __S > for WithCors"),
             "Layer impl must be emitted for cors-attr struct too, rendered: {rendered}"
+        );
+    }
+
+    // ----- JOLT-RS-052: middleware_chain + expand_layer_impl chain splicing -----
+    //
+    // These tests pin the per-derive chain construction (`middleware_chain`)
+    // and the rendered shape of the spliced step markers in `call()`. PRD
+    // verification: "Ordering logic generates correct chained calls."
+
+    #[test]
+    fn middleware_chain_is_empty_for_bare_unit_struct() {
+        // Unit struct, no `#[cors]`, no fields → empty chain. The wrapper's
+        // call() body is then a pure delegation, identical to 051's pre-chain
+        // shape. Pinned so a regression that emits markers for a no-op
+        // middleware surfaces immediately.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(middleware_chain(&parsed), Vec::<MiddlewareStep>::new());
+    }
+
+    #[test]
+    fn middleware_chain_pushes_cors_when_attribute_present() {
+        // Single-step chain: just `#[cors]`, no extraction fields. The chain
+        // is `[Cors]` — cors is the only present step, parse-query/parse-body
+        // omitted because no QueryParams/Body field exists.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct CorsOnly;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(middleware_chain(&parsed), vec![MiddlewareStep::Cors]);
+    }
+
+    #[test]
+    fn middleware_chain_pushes_parse_query_when_query_params_field_present() {
+        // Single-step chain: just a QueryParams<T> field. ParseQuery is
+        // active; Cors/ParseBody omitted.
+        let input = parse_derive(
+            r#"
+            struct QueryOnly {
+                q: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(
+            middleware_chain(&parsed),
+            vec![MiddlewareStep::ParseQuery]
+        );
+    }
+
+    #[test]
+    fn middleware_chain_pushes_parse_body_when_body_field_present() {
+        // Single-step chain: just a `body: T` field. ParseBody is active;
+        // Cors/ParseQuery omitted.
+        let input = parse_derive(
+            r#"
+            struct BodyOnly {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(middleware_chain(&parsed), vec![MiddlewareStep::ParseBody]);
+    }
+
+    #[test]
+    fn middleware_chain_orders_steps_canonically() {
+        // PRD canonical order: auth → cors → log → parse-query → parse-body
+        // → user → handler. With all three implementable steps active
+        // (`#[cors]` + QueryParams + Body), the chain must be exactly
+        // `[Cors, ParseQuery, ParseBody]` — NOT the field declaration order.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct AllThree {
+                body: CreateUserRequest,
+                query: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(
+            middleware_chain(&parsed),
+            vec![
+                MiddlewareStep::Cors,
+                MiddlewareStep::ParseQuery,
+                MiddlewareStep::ParseBody,
+            ]
+        );
+    }
+
+    #[test]
+    fn middleware_chain_order_independent_of_field_declaration_order() {
+        // The struct lists `query` BEFORE `body`; the chain still orders
+        // ParseQuery before ParseBody — but that's not what this test
+        // verifies. What it verifies is that swapping the field order
+        // (body first, then query) does NOT swap the chain order. The
+        // chain is per-PRD canonical, not source-order.
+        let input = parse_derive(
+            r#"
+            struct BodyFirst {
+                body: CreateUserRequest,
+                query: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(
+            middleware_chain(&parsed),
+            vec![MiddlewareStep::ParseQuery, MiddlewareStep::ParseBody],
+            "ParseQuery must precede ParseBody regardless of field declaration order"
+        );
+    }
+
+    #[test]
+    fn middleware_chain_coalesces_multiple_query_params_fields() {
+        // Two QueryParams<T> fields → ParseQuery step appears ONCE in the
+        // chain. 053's per-field extraction will fan out the field-level
+        // work inside the single step; the chain itself stays per-step. A
+        // regression that pushed one chain entry per matching field would
+        // surface here.
+        let input = parse_derive(
+            r#"
+            struct TwoQueries {
+                q1: QueryParams<Filters>,
+                q2: QueryParams<Other>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(
+            middleware_chain(&parsed),
+            vec![MiddlewareStep::ParseQuery]
+        );
+    }
+
+    #[test]
+    fn middleware_chain_skips_other_kinded_fields() {
+        // `headers: HashMap<String, Vec<u8>>` and primitives classify as
+        // `Other`. A struct of only `Other` fields produces an empty chain —
+        // no extraction step is implied by a field the framework doesn't
+        // recognise.
+        let input = parse_derive(
+            r#"
+            struct AllOther {
+                headers: HashMap<String, Vec<u8>>,
+                count: usize,
+                flag: bool,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(middleware_chain(&parsed), Vec::<MiddlewareStep>::new());
+    }
+
+    #[test]
+    fn middleware_chain_request_only_field_does_not_push_a_step() {
+        // A `req: &Request` field is `FieldKind::Request` (049). Request
+        // injection is a per-field shape that 053 will splice INSIDE the
+        // existing call() body — it isn't a step in the canonical chain. So
+        // a struct with only a Request field produces an empty chain. Pinned
+        // because Request fields could plausibly have been modeled as a
+        // chain step; the decision is that they aren't.
+        let input = parse_derive(
+            r#"
+            struct ReqOnly<'a> {
+                req: &'a Request,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        assert_eq!(middleware_chain(&parsed), Vec::<MiddlewareStep>::new());
+    }
+
+    #[test]
+    fn middleware_step_token_tags_are_namespaced_and_stable() {
+        // The marker tags are public-API-like — they're the substring
+        // 053 will splice on. Pinning them here ensures a typo-rename
+        // (`step::cors` → `step::CORS`) doesn't silently break 053's splice
+        // logic across iterations.
+        assert_eq!(
+            MiddlewareStep::Cors.token_tag(),
+            "jolt::middleware::step::cors"
+        );
+        assert_eq!(
+            MiddlewareStep::ParseQuery.token_tag(),
+            "jolt::middleware::step::parse_query"
+        );
+        assert_eq!(
+            MiddlewareStep::ParseBody.token_tag(),
+            "jolt::middleware::step::parse_body"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_no_chain_markers_for_empty_chain() {
+        // Bare unit struct → no chain steps → no marker string literals in
+        // the rendered output. The wrapper's call() body is the bare
+        // delegation, bit-for-bit equivalent to 051's pre-chain shape.
+        let input = parse_derive("struct Marker;");
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            !rendered.contains("jolt::middleware::step::"),
+            "empty chain must produce no step markers, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_cors_marker_for_cors_attribute() {
+        // `#[cors]` struct → cors marker statement appears in rendered call()
+        // body. The marker is a typed-`&str` let binding to the stable tag.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct CorsOnly;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("\"jolt::middleware::step::cors\""),
+            "cors marker literal must appear, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("let _ : & :: core :: primitive :: str ="),
+            "marker statement shape (typed &str discard) must match, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_parse_query_marker_for_query_field() {
+        let input = parse_derive(
+            r#"
+            struct QueryMw {
+                q: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("\"jolt::middleware::step::parse_query\""),
+            "parse_query marker literal must appear, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_parse_body_marker_for_body_field() {
+        let input = parse_derive(
+            r#"
+            struct BodyMw {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains("\"jolt::middleware::step::parse_body\""),
+            "parse_body marker literal must appear, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_emits_chain_markers_in_canonical_order() {
+        // PRD verification: "Ordering logic generates correct chained calls."
+        // The fields are declared `body` BEFORE `query` and the struct also
+        // carries `#[cors]`. The rendered call() body MUST contain the three
+        // markers in canonical order (cors → parse_query → parse_body), NOT
+        // in field declaration order. Verified by substring position.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct AllThree {
+                body: CreateUserRequest,
+                query: QueryParams<Filters>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        let cors_pos = rendered
+            .find("\"jolt::middleware::step::cors\"")
+            .expect("cors marker present");
+        let query_pos = rendered
+            .find("\"jolt::middleware::step::parse_query\"")
+            .expect("parse_query marker present");
+        let body_pos = rendered
+            .find("\"jolt::middleware::step::parse_body\"")
+            .expect("parse_body marker present");
+        assert!(
+            cors_pos < query_pos,
+            "cors must precede parse_query, rendered: {rendered}"
+        );
+        assert!(
+            query_pos < body_pos,
+            "parse_query must precede parse_body, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_chain_markers_precede_inner_call_delegation() {
+        // The terminal expression of call() is still
+        // `<__S as Service<__Req>>::call(&mut self.inner, __req)`. The chain
+        // markers must appear BEFORE that delegation in source order — they're
+        // statements (`let _: &str = ...;`) that 053 will replace with the
+        // real step bodies executed before the inner call.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct WithCors;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        let cors_pos = rendered
+            .find("\"jolt::middleware::step::cors\"")
+            .expect("cors marker present");
+        let inner_call_pos = rendered
+            .find(":: jolt_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)")
+            .expect("inner.call delegation present");
+        assert!(
+            cors_pos < inner_call_pos,
+            "chain marker must precede inner.call, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_chain_markers_are_inside_call_function_body() {
+        // The markers must live inside `fn call(...)` — NOT inside
+        // `poll_ready`, NOT outside any fn. A regression that hoisted them
+        // to a sibling impl block would silently break 053's splice site.
+        // Verified by checking the marker's position relative to
+        // `fn call` and `fn poll_ready`.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct WithCors;
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        let call_fn_pos = rendered
+            .find("fn call (& mut self , __req : __Req)")
+            .expect("fn call signature present");
+        let cors_pos = rendered
+            .find("\"jolt::middleware::step::cors\"")
+            .expect("cors marker present");
+        assert!(
+            call_fn_pos < cors_pos,
+            "chain marker must appear after `fn call(...)` signature, rendered: {rendered}"
+        );
+        // poll_ready precedes call in our emission order; ensure the marker
+        // sits AFTER poll_ready (so it's in call's body, not poll_ready's).
+        let poll_ready_pos = rendered
+            .find("fn poll_ready")
+            .expect("fn poll_ready signature present");
+        assert!(
+            poll_ready_pos < cors_pos,
+            "chain marker must NOT be inside poll_ready, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_preserves_inner_call_delegation_with_chain_present() {
+        // With chain markers spliced in, the terminal inner.call delegation
+        // is STILL emitted — chain markers are additive, not replacements.
+        // Pinned because a regression that replaced the delegation with a
+        // chain step would break tower composition.
+        let input = parse_derive(
+            r#"
+            #[cors]
+            struct WithCors {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        assert!(
+            rendered.contains(
+                ":: jolt_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)"
+            ),
+            "inner.call delegation must still be emitted alongside chain markers, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_coalesces_multiple_body_or_query_into_single_marker() {
+        // Two QueryParams<T> fields → ParseQuery marker appears ONCE in the
+        // rendered output. Pinned because a regression that emitted one
+        // marker per matching field would silently bloat the chain. The
+        // substring count must be exactly 1.
+        let input = parse_derive(
+            r#"
+            struct TwoQueries {
+                q1: QueryParams<Filters>,
+                q2: QueryParams<Other>,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        let marker_count = rendered
+            .matches("\"jolt::middleware::step::parse_query\"")
+            .count();
+        assert_eq!(
+            marker_count, 1,
+            "ParseQuery marker must appear exactly once for two QueryParams fields, rendered: {rendered}"
         );
     }
 }

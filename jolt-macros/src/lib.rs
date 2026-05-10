@@ -63,8 +63,15 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   that delegates to the inner service. The wrapper is the seam JOLT-RS-052
 ///   (middleware-ordering chain) and JOLT-RS-053 (per-field extraction code)
 ///   slot into.
-/// - 052-053 will splice the auth/cors/parse-query/parse-body chain and the
-///   per-field extraction calls into the wrapper's `call()`.
+/// - 052 (landed): splices canonical-order step markers into the wrapper's
+///   `call()` body via `middleware_chain` + `MiddlewareStep`. Each active
+///   step (cors / parse-query / parse-body) renders as a stable
+///   `let _: &::core::primitive::str = "jolt::middleware::step::<name>";`
+///   statement in canonical order BEFORE the existing inner.call delegation.
+///   The markers are the splice points 053 will replace with per-field
+///   extraction code; auth/log/user steps are future PRD items.
+/// - 053 will replace each chain-step marker with per-field extraction
+///   (`__req.json::<T>()`, `__req.query_params::<T>()`, `&__req`).
 ///
 /// On parse failure the emission is a single `compile_error!` token (no
 /// partial codegen), so the user gets a single targeted diagnostic instead of
