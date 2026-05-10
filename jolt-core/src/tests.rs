@@ -928,13 +928,66 @@ mod endpoint_registry {
 }
 
 mod server {
-    use crate::{CorsConfig, JoltServer};
+    use crate::{CorsConfig, Endpoint, EndpointFuture, JoltServer, Method, Request};
+    use axum::body::Body;
+
+    struct StubEndpoint;
+
+    impl Endpoint for StubEndpoint {
+        fn path(&self) -> &str {
+            "/stub"
+        }
+
+        fn method(&self) -> Method {
+            Method::Get
+        }
+
+        fn handler(&self, _req: Request) -> EndpointFuture {
+            Box::pin(async {
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .body(Body::empty())
+                    .unwrap()
+            })
+        }
+    }
 
     #[test]
     fn new_uses_default_port_8080() {
         // PRD-mandated verification for JOLT-RS-023: defaults include port=8080.
         let server = JoltServer::new();
         assert_eq!(server.port, 8080);
+    }
+
+    #[test]
+    fn new_starts_with_empty_registry() {
+        // Locks in the default-empty contract that JOLT-RS-026's `endpoint`
+        // builder method extends — every increment must come from a register call.
+        let server = JoltServer::new();
+        assert!(server.registry.is_empty());
+    }
+
+    #[test]
+    fn endpoint_builder_registers_into_registry() {
+        // PRD-mandated verification for JOLT-RS-026: register an endpoint,
+        // verify it appears in the registry.
+        let server = JoltServer::new().endpoint(StubEndpoint);
+        assert_eq!(server.registry.len(), 1);
+    }
+
+    #[test]
+    fn endpoint_builder_chains_with_other_builder_methods() {
+        // The whole point of `endpoint(self) -> Self` is fluent chaining
+        // alongside `port`/`threads`/`cors`. If a future change accidentally
+        // takes `&mut self`, this test stops compiling.
+        let server = JoltServer::new()
+            .port(3000)
+            .endpoint(StubEndpoint)
+            .threads(2)
+            .endpoint(StubEndpoint);
+        assert_eq!(server.port, 3000);
+        assert_eq!(server.threads, 2);
+        assert_eq!(server.registry.len(), 2);
     }
 
     #[test]

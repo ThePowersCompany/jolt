@@ -405,7 +405,7 @@
       "verification": [
         "Unit test: register an endpoint, verify it appears in registry."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-027",
