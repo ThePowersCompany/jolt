@@ -678,6 +678,92 @@
 //!     denied". The variant accepts the original `io::Error` by
 //!     value, so a single `.map_err(sqlx::Error::Io)` preserves the
 //!     full diagnostic chain (`sqlx::Error::source() -> &io::Error`).
+//!     Superseded by JOLT-RS-102 (decisions 45–47): [`JoltDb::migrate`]
+//!     now returns [`MigrationError`], and the filesystem-error path
+//!     flows through [`MigrationError::Io`] via the `From<io::Error>`
+//!     impl rather than re-wrapping through `sqlx::Error::Io`. The
+//!     `io::Error`-preservation contract is identical; only the outer
+//!     variant changes.
+//!
+//! JOLT-RS-102 opens phase24 by introducing [`MigrationError`] — the
+//! dedicated error enum the migration apply pipeline returns now that it
+//! has more than one failure mode worth pattern-matching on. The
+//! [`JoltDb::migrate`] signature changes from `Result<usize,
+//! sqlx::Error>` (the JOLT-RS-100 shape, decision 42) to `Result<usize,
+//! MigrationError>`, and the JOLT-RS-100 collapsed "skip on any
+//! presence" arm (decision 43) splits into the three-way fork the
+//! decision 39 closing notes forecast: name absent → apply; name
+//! present with matching checksum → skip; name present with
+//! mismatched checksum → [`MigrationError::Tampered`].
+//!
+//! 45. **Dedicated [`MigrationError`] enum, not a `sqlx::Error::Protocol(msg)`
+//!     sentinel (JOLT-RS-102).** Decision 42 documented when this slice
+//!     would pay for itself: when the apply pipeline grows three or more
+//!     distinct failure modes that callers want to pattern-match on. At
+//!     JOLT-RS-102 it has reached that threshold — `Tampered { name }` is
+//!     the new variant, filesystem errors and sqlx errors are the
+//!     pre-existing two. A sentinel `sqlx::Error::Protocol("Migration X
+//!     has been modified ...")` would force callers into substring
+//!     matching to differentiate tampered-vs-IO-vs-DB failures, which is
+//!     exactly the brittleness the PRD's pattern-match-friendly error
+//!     shape needs to avoid. Three variants for now ([`MigrationError::
+//!     Tampered`], [`MigrationError::Io`], [`MigrationError::Sqlx`]);
+//!     JOLT-RS-103 will add [`MigrationError::Removed`] for the
+//!     rollback-detection failure mode the same way. [`Self::
+//!     applied_migrations`] keeps returning [`sqlx::Error`] directly —
+//!     it has no migration-specific failure modes (decision 38 still
+//!     stands), and callers who chain it into `migrate` propagate the
+//!     `sqlx::Error` via the `From<sqlx::Error>` conversion (decision
+//!     46). [`MigrationError`] implements [`std::error::Error`] with
+//!     [`source`](std::error::Error::source) returning the wrapped
+//!     `io::Error` / `sqlx::Error` so the full diagnostic chain (the
+//!     same contract decision 44 pinned for the JOLT-RS-100 shape) is
+//!     preserved across the wrap.
+//!
+//! 46. **`From<std::io::Error>` and `From<sqlx::Error>` for
+//!     [`MigrationError`] so `?`-chaining stays one line per call site
+//!     (JOLT-RS-102).** The migrate body calls `read_migration_files`
+//!     (returns `io::Error`), `self.applied_migrations` (returns
+//!     `sqlx::Error`), `self.pool.begin` / `tx.execute` / `tx.commit`
+//!     (all `sqlx::Error`); without the `From` impls each call site
+//!     would need its own `.map_err(MigrationError::Io)` or
+//!     `.map_err(MigrationError::Sqlx)` shim. The `?` operator picks
+//!     the right variant via the `From` impl, so the body reads
+//!     `read_migration_files(dir)?` and `self.pool.begin().await?`
+//!     unchanged from the JOLT-RS-100 shape. Decision 44's
+//!     `io::Error`-preservation contract carries through: the
+//!     `From<io::Error>` impl wraps the original `io::Error` by value
+//!     (no rebuilding a fresh one), so the `kind()` and `Display`
+//!     output survive verbatim and surface via
+//!     `MigrationError::source()`. Bespoke wrappers are still available
+//!     for the rare call site that wants to override the variant
+//!     choice explicitly.
+//!
+//! 47. **Three-way fork at the apply-loop call site, no helper
+//!     function (JOLT-RS-102).** Decision 39 forecast this shape and
+//!     decision 43 deferred it; JOLT-RS-102 lands it. The loop body
+//!     reads `match applied.get(&file.name) { Some(c) if c ==
+//!     &file.checksum => continue, Some(_) => return Err(Tampered {
+//!     name: file.name.clone() }), None => /* apply */ }`. Inlining
+//!     the fork at the call site (vs. a `pending_migrations(files,
+//!     applied) -> Vec<_>` helper) keeps the loop's three-way control
+//!     flow visible in one place and avoids leaking the decision into
+//!     a separate function signature that JOLT-RS-103 would have to
+//!     extend again for the "applied row but no on-disk file"
+//!     rollback case. The tamper `return` short-circuits the entire
+//!     `migrate` call — once any prior migration shows a mismatched
+//!     checksum, every migration that follows is considered untrusted
+//!     and the operator must repair the divergence before the apply
+//!     loop will resume. The error variant uses `clone()` for the
+//!     name (cheap — migration filenames are short and the error path
+//!     is the cold path) rather than threading a borrowed lifetime
+//!     through `MigrationError`. The PRD-102 mandated [`Display`]
+//!     output for the tamper variant is `"Migration {name} has been
+//!     modified since it was applied."` verbatim — pinned by the
+//!     `migration_error_display_renders_prd_verbatim_for_tampered`
+//!     unit test so a regression that drops the period, mangles the
+//!     wording, or escapes the name through `Debug` formatting fails
+//!     without ever running migrate.
 
 /// Per-deployment Postgres pool configuration consumed by the upcoming
 /// `JoltDb::connect` (JOLT-RS-083) to build a
@@ -1017,12 +1103,13 @@ impl JoltDb {
     /// method on [`JoltDb`] (not a free function), and the skip-decision
     /// semantic that the JOLT-RS-100 apply path layers on top.
     ///
-    /// The skip invariant for the JOLT-RS-100 apply loop: a discovered
-    /// [`MigrationFile`] `f` is already applied (and should be skipped)
-    /// when `applied.get(&f.name) == Some(&f.checksum)`. A name present
-    /// with a *different* checksum is the JOLT-RS-102 tamper case
-    /// (handled when that slice lands). A name not present at all is a
-    /// new migration that JOLT-RS-100 will apply.
+    /// The skip invariant for the [`Self::migrate`] apply loop: a
+    /// discovered [`MigrationFile`] `f` is already applied (and should
+    /// be skipped) when `applied.get(&f.name) == Some(&f.checksum)`.
+    /// A name present with a *different* checksum is the JOLT-RS-102
+    /// tamper case — the apply loop returns
+    /// [`MigrationError::Tampered`]. A name not present at all is a
+    /// new migration that the apply loop will execute.
     ///
     /// Reads `name` and `checksum` only; the `applied_at` column is
     /// intentionally not surfaced (decision 37). Returns the raw
@@ -1054,36 +1141,48 @@ impl JoltDb {
 
     /// Discover migration files in `dir`, apply every one not yet
     /// recorded in `_migrations`, and return the count of newly applied
-    /// migrations (JOLT-RS-100).
+    /// migrations (JOLT-RS-100; tamper detection added by JOLT-RS-102).
     ///
-    /// See module docs decisions 40–44 for the architectural contract:
+    /// See module docs decisions 40–47 for the architectural contract:
     /// one transaction per migration, body executed via
     /// [`sqlx::raw_sql`] (multi-statement bodies supported), filesystem
-    /// errors re-wrapped through [`sqlx::Error::Io`], and the
-    /// three-way-fork skip semantic (collapsed to "skip on any
-    /// presence" until JOLT-RS-102 lands the tamper-detection arm).
+    /// errors flow through [`MigrationError::Io`], sqlx errors flow
+    /// through [`MigrationError::Sqlx`], and the apply loop runs the
+    /// three-way fork (skip on matching checksum, tamper on mismatch,
+    /// apply on missing).
     ///
     /// Composes the three primitives already in place:
     /// 1. [`read_migration_files`] (JOLT-RS-094/096) for discovery
     ///    sorted lexicographically by filename and pre-hashed.
     /// 2. [`Self::applied_migrations`] (JOLT-RS-099) for the
-    ///    name → checksum read-back used by the skip-decision.
+    ///    name → checksum read-back used by the skip / tamper / apply
+    ///    decision.
     /// 3. [`Self::transaction`] (JOLT-RS-088) for the per-migration
     ///    body + bookkeeping atomicity boundary.
     ///
-    /// For each discovered [`MigrationFile`] in lex-sorted order:
-    /// - If the name is already in the applied set, skip it.
-    /// - Otherwise, open a transaction, execute the file's `content`
-    ///   via [`sqlx::raw_sql`], `INSERT INTO _migrations (name,
-    ///   checksum) VALUES ($1, $2)`, and commit. The bookkeeping row's
-    ///   `id` and `applied_at` come from the column defaults
-    ///   (decision 35).
+    /// For each discovered [`MigrationFile`] in lex-sorted order
+    /// (decision 47's three-way fork):
+    /// - Name in the applied set with matching checksum → skip.
+    /// - Name in the applied set with a different checksum → return
+    ///   [`MigrationError::Tampered`] immediately; every later
+    ///   migration is left unattempted until the operator repairs
+    ///   the divergence.
+    /// - Name not in the applied set → open a transaction, execute
+    ///   the file's `content` via [`sqlx::raw_sql`], `INSERT INTO
+    ///   _migrations (name, checksum) VALUES ($1, $2)`, and commit.
+    ///   The bookkeeping row's `id` and `applied_at` come from the
+    ///   column defaults (decision 35).
     ///
-    /// Errors propagate as the raw [`sqlx::Error`]: filesystem
-    /// failures from discovery are wrapped via [`sqlx::Error::Io`]
-    /// (decision 44), migration-body and bookkeeping failures surface
-    /// the sqlx error from the failing statement directly (rolled
-    /// back by the surrounding per-migration transaction).
+    /// Errors propagate as [`MigrationError`]: filesystem failures
+    /// from discovery flow through [`MigrationError::Io`] via the
+    /// `From<std::io::Error>` impl (decision 46), migration-body and
+    /// bookkeeping failures flow through [`MigrationError::Sqlx`] via
+    /// the `From<sqlx::Error>` impl (rolled back by the surrounding
+    /// per-migration transaction), and tamper detection surfaces
+    /// [`MigrationError::Tampered`] with the file's name. The
+    /// PRD-102 [`Display`](std::fmt::Display) message for the tamper
+    /// case is `"Migration {name} has been modified since it was
+    /// applied."` verbatim (decision 47).
     ///
     /// # Example
     ///
@@ -1091,17 +1190,25 @@ impl JoltDb {
     /// let applied = db.migrate("./migrations").await?;
     /// println!("applied {applied} new migrations");
     /// ```
-    pub async fn migrate(&self, dir: &str) -> Result<usize, sqlx::Error> {
-        let files = read_migration_files(dir).map_err(sqlx::Error::Io)?;
+    pub async fn migrate(&self, dir: &str) -> Result<usize, MigrationError> {
+        let files = read_migration_files(dir)?;
         let applied = self.applied_migrations().await?;
         let mut count = 0_usize;
         for file in &files {
-            // Decision 43: skip on any presence in the applied set.
-            // JOLT-RS-102 will split this into the three-way fork
-            // (Some(c) if c == &checksum => skip, Some(_) => tamper,
-            // None => apply); for now both Some arms collapse to skip.
-            if applied.contains_key(&file.name) {
-                continue;
+            // Decision 47: three-way fork pinning JOLT-RS-102's
+            // tamper detection alongside the JOLT-RS-100 skip / apply
+            // arms. A tamper short-circuits the entire migrate call
+            // — once any prior migration's checksum diverges from
+            // disk the operator must repair the state before
+            // subsequent migrations are attempted.
+            match applied.get(&file.name) {
+                Some(stored) if stored == &file.checksum => continue,
+                Some(_) => {
+                    return Err(MigrationError::Tampered {
+                        name: file.name.clone(),
+                    });
+                }
+                None => {}
             }
             // Per-migration transaction (decision 40). We open the
             // transaction inline via `self.pool.begin()` rather than
@@ -1235,6 +1342,88 @@ pub struct MigrationFile {
     pub checksum: String,
 }
 
+/// Error type returned by the migration apply pipeline
+/// ([`JoltDb::migrate`], JOLT-RS-102+).
+///
+/// See module docs decisions 45–47 for the architectural contract:
+/// dedicated enum (not a `sqlx::Error::Protocol(msg)` sentinel),
+/// `From<std::io::Error>` and `From<sqlx::Error>` for `?`-chaining
+/// inside the apply loop, and a PRD-102 verbatim [`Display`] message
+/// for the [`Self::Tampered`] variant.
+///
+/// JOLT-RS-103 will add a `Removed { name }` variant for the
+/// rollback-detection failure mode (applied row in `_migrations` whose
+/// migration file no longer exists on disk); the additive shape means
+/// callers that pattern-match exhaustively today will get a compile-time
+/// nudge to handle the new variant when it lands.
+#[derive(Debug)]
+pub enum MigrationError {
+    /// A previously-applied migration's recorded checksum in
+    /// `_migrations` no longer matches the on-disk file's checksum
+    /// (decision 47). Detected by comparing
+    /// [`MigrationFile::checksum`] (computed at discovery time by
+    /// [`read_migration_files`] via [`sha256_hex`], decision 32)
+    /// against the corresponding row from
+    /// [`JoltDb::applied_migrations`].
+    ///
+    /// The [`Display`](std::fmt::Display) output for this variant is
+    /// the PRD-102 verbatim message
+    /// `"Migration {name} has been modified since it was applied."`.
+    Tampered {
+        /// Filename (basename) of the tampered migration —
+        /// [`MigrationFile::name`] / `_migrations.name` verbatim.
+        name: String,
+    },
+    /// Filesystem failure surfaced from [`read_migration_files`]
+    /// (missing directory, permission denied, etc.). Wraps the
+    /// underlying [`std::io::Error`] by value — kind, message, and
+    /// [`source`](std::error::Error::source) chain are preserved
+    /// (decision 46).
+    Io(std::io::Error),
+    /// Postgres / sqlx-level failure surfaced from the pool, the
+    /// `_migrations` read-back, or any of the per-migration
+    /// transaction operations (body execute, bookkeeping insert,
+    /// commit). Wraps the raw [`sqlx::Error`] by value so callers can
+    /// still pattern-match on the inner variant
+    /// (`Error::PoolTimedOut`, `Error::Database(_)`, etc.).
+    Sqlx(sqlx::Error),
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // PRD-102 mandates this message verbatim.
+            Self::Tampered { name } => {
+                write!(f, "Migration {name} has been modified since it was applied.")
+            }
+            Self::Io(err) => write!(f, "migration filesystem error: {err}"),
+            Self::Sqlx(err) => write!(f, "migration database error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Tampered { .. } => None,
+            Self::Io(err) => Some(err),
+            Self::Sqlx(err) => Some(err),
+        }
+    }
+}
+
+impl From<std::io::Error> for MigrationError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<sqlx::Error> for MigrationError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Sqlx(err)
+    }
+}
+
 /// Discover migration files in `dir` (JOLT-RS-094; populates the
 /// [`MigrationFile::checksum`] field as of JOLT-RS-096).
 ///
@@ -1319,8 +1508,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbConfig, JoltDb, MIGRATIONS_TABLE_DDL, MigrationFile, TypedQuery, read_migration_files,
-        sha256_hex,
+        DbConfig, JoltDb, MIGRATIONS_TABLE_DDL, MigrationError, MigrationFile, TypedQuery,
+        read_migration_files, sha256_hex,
     };
 
     #[test]
@@ -2536,29 +2725,30 @@ mod tests {
     // ---- JOLT-RS-100: JoltDb::migrate ----
 
     /// Compile-time pin: `db.migrate(dir: &str)` resolves to
-    /// `Result<usize, sqlx::Error>` (decision 42). The explicit return
-    /// annotation forces the typecheck — a regression that switches the
-    /// count type to `i64` / `u32`, wraps the error in a bespoke
-    /// `MigrationError`, or changes the parameter to `&Path` /
+    /// `Result<usize, MigrationError>` (decisions 42 + 45). JOLT-RS-102
+    /// changes the error type from `sqlx::Error` to [`MigrationError`];
+    /// the explicit return annotation forces the typecheck so a
+    /// regression that reverts to `sqlx::Error`, switches the count
+    /// type to `i64` / `u32`, or changes the parameter to `&Path` /
     /// `impl AsRef<Path>` breaks this build pin without needing a live
     /// Postgres.
     #[test]
     fn migrate_signature_pins() {
-        async fn _pin(db: &JoltDb, dir: &str) -> Result<usize, sqlx::Error> {
+        async fn _pin(db: &JoltDb, dir: &str) -> Result<usize, MigrationError> {
             db.migrate(dir).await
         }
     }
 
-    /// Filesystem errors from discovery surface as `sqlx::Error::Io`
-    /// (decision 44). A non-existent directory triggers
-    /// [`read_migration_files`]'s `read_dir` to fail with
-    /// `io::ErrorKind::NotFound`; the migrate verb re-wraps that
-    /// `io::Error` via `.map_err(sqlx::Error::Io)` without modifying
-    /// the underlying kind / message, so a regression that constructs
-    /// a fresh `io::Error` (losing the kind) or returns the FS error
-    /// through a non-Io variant fails this pin. Does not need a live
-    /// Postgres because the directory-read failure happens before any
-    /// DB round trip.
+    /// Filesystem errors from discovery surface as
+    /// `MigrationError::Io` (decisions 44 + 46). A non-existent
+    /// directory triggers [`read_migration_files`]'s `read_dir` to
+    /// fail with `io::ErrorKind::NotFound`; JOLT-RS-102's
+    /// `From<std::io::Error>` impl on [`MigrationError`] wraps that
+    /// `io::Error` by value without modifying the underlying kind /
+    /// message, so a regression that constructs a fresh `io::Error`
+    /// (losing the kind) or routes the FS error through a non-Io
+    /// variant fails this pin. Does not need a live Postgres because
+    /// the directory-read failure happens before any DB round trip.
     #[tokio::test]
     async fn migrate_returns_io_error_for_missing_directory() {
         // Use the unreachable-server connect_lazy fixture so we have a
@@ -2583,14 +2773,14 @@ mod tests {
             .await
             .expect_err("migrate against missing directory should error");
         match err {
-            sqlx::Error::Io(io_err) => {
+            MigrationError::Io(io_err) => {
                 assert_eq!(
                     io_err.kind(),
                     std::io::ErrorKind::NotFound,
                     "expected NotFound from missing directory, got {io_err:?}",
                 );
             }
-            other => panic!("expected sqlx::Error::Io for FS failure, got {other:?}"),
+            other => panic!("expected MigrationError::Io for FS failure, got {other:?}"),
         }
     }
 
@@ -2709,6 +2899,168 @@ mod tests {
 
         // Teardown — leave the fixture clean for parallel reruns.
         sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_test_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (teardown)");
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (teardown)");
+    }
+
+    // ---- JOLT-RS-102: MigrationError + tamper detection ----
+
+    /// PRD-102 mandates the Display output for the tamper variant
+    /// verbatim: `"Migration X has been modified since it was
+    /// applied."`. Pins decision 47's contract. A regression that
+    /// drops the period, mangles the wording, or routes the variant
+    /// through `Debug` formatting fails this test without ever
+    /// running migrate.
+    #[test]
+    fn migration_error_display_renders_prd_verbatim_for_tampered() {
+        let err = MigrationError::Tampered {
+            name: String::from("003_add_users.sql"),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "Migration 003_add_users.sql has been modified since it was applied.",
+        );
+    }
+
+    /// `From<std::io::Error>` impl on [`MigrationError`] preserves the
+    /// underlying `io::Error` kind verbatim (decision 46). The `?`
+    /// operator inside `migrate` relies on this conversion — a
+    /// regression that swaps the conversion for a fresh-`io::Error`
+    /// construction (losing the kind) or routes IO failures through
+    /// the Sqlx variant fails this pin.
+    #[test]
+    fn migration_error_from_io_preserves_kind() {
+        let raw = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let wrapped: MigrationError = raw.into();
+        match wrapped {
+            MigrationError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected MigrationError::Io from io::Error conversion, got {other:?}"),
+        }
+    }
+
+    /// `From<sqlx::Error>` impl on [`MigrationError`] routes sqlx
+    /// failures through the Sqlx variant (decision 46). The `?`
+    /// operator inside `migrate` relies on this conversion for the
+    /// `applied_migrations()` call and every per-migration
+    /// `tx.execute` / `tx.commit` round trip.
+    #[test]
+    fn migration_error_from_sqlx_routes_through_sqlx_variant() {
+        // RowNotFound is a no-side-effect variant convenient for
+        // round-tripping through the From impl.
+        let raw = sqlx::Error::RowNotFound;
+        let wrapped: MigrationError = raw.into();
+        assert!(
+            matches!(wrapped, MigrationError::Sqlx(sqlx::Error::RowNotFound)),
+            "expected MigrationError::Sqlx(RowNotFound) from sqlx::Error::RowNotFound, got {wrapped:?}",
+        );
+    }
+
+    /// [`MigrationError`] implements [`std::error::Error`] with
+    /// [`source`](std::error::Error::source) chained through the
+    /// wrapped `io::Error` (decision 45). Tampered carries no
+    /// underlying error so its source is `None`.
+    #[test]
+    fn migration_error_source_chains_through_io_variant() {
+        use std::error::Error;
+
+        let io_wrapped = MigrationError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nope",
+        ));
+        let source = io_wrapped.source().expect("Io variant should expose source");
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "source for Io variant should downcast to io::Error",
+        );
+
+        let tampered = MigrationError::Tampered {
+            name: String::from("foo.sql"),
+        };
+        assert!(
+            tampered.source().is_none(),
+            "Tampered carries no underlying error",
+        );
+    }
+
+    /// PRD-mandated verification for JOLT-RS-102: "change file content
+    /// after apply → error on next run." Env-gated on
+    /// `JOLT_TEST_DATABASE_URL` (same convention as the rest of the
+    /// live-DB tests in this module).
+    ///
+    /// Flow:
+    /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
+    ///    empty starting state.
+    /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
+    ///    `migrate`, assert `Ok(1)`.
+    /// 3. Overwrite the same `001_init.sql` file with different
+    ///    content (different SQL body → different SHA-256). The
+    ///    `_migrations` row still records the *original* checksum.
+    /// 4. Call `migrate` again. Assert it returns
+    ///    [`MigrationError::Tampered`] with `name = "001_init.sql"`.
+    /// 5. Assert the Display output is the PRD-102 verbatim message.
+    /// 6. Teardown.
+    #[tokio::test]
+    async fn migrate_detects_tampered_migration_when_test_db_available() {
+        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let cfg = DbConfig::new(url);
+        let db = JoltDb::connect(&cfg).await.expect("connect");
+
+        // Fresh-state setup.
+        sqlx::query("TRUNCATE TABLE _migrations")
+            .execute(db.pool())
+            .await
+            .expect("truncate _migrations (setup)");
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
+            .execute(db.pool())
+            .await
+            .expect("drop target table (setup)");
+
+        let dir = TestDir::new("tamper");
+        dir.write_file(
+            "001_init.sql",
+            "CREATE TABLE _jolt_migrate_tamper_target (id INT);",
+        );
+
+        let applied = db
+            .migrate(dir.path_str())
+            .await
+            .expect("first migrate should succeed on a fresh DB");
+        assert_eq!(applied, 1, "first migrate should apply the one file");
+
+        // Now tamper with the file — different body, same name. The
+        // `_migrations.checksum` row holds the *original* SHA-256 so
+        // the next migrate call should detect the mismatch.
+        dir.write_file(
+            "001_init.sql",
+            "CREATE TABLE _jolt_migrate_tamper_target (id BIGINT);",
+        );
+
+        let err = db
+            .migrate(dir.path_str())
+            .await
+            .expect_err("re-run after tampering should surface MigrationError::Tampered");
+        match &err {
+            MigrationError::Tampered { name } => {
+                assert_eq!(name, "001_init.sql");
+            }
+            other => panic!("expected MigrationError::Tampered, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "Migration 001_init.sql has been modified since it was applied.",
+        );
+
+        // Teardown.
+        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
             .execute(db.pool())
             .await
             .expect("drop target table (teardown)");
