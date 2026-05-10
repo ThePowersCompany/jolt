@@ -16,11 +16,13 @@
 //! Ladder for phase07:
 //! - JOLT-RS-033 (landed): `Service` impl + `RequestExt` injection.
 //! - JOLT-RS-034 (landed): `from_registry` + registry-driven `call`.
-//! - JOLT-RS-035 (this file): preserve-existing-`RequestExt` contract +
+//! - JOLT-RS-035 (landed): preserve-existing-`RequestExt` contract +
 //!   finished-flag short-circuit between dispatch and handler.
-//! - JOLT-RS-036 (next): `Router::new(registry)` as the canonical constructor;
-//!   likely collapses [`Inner`] to a single variant once `from_axum` is
-//!   retired.
+//! - JOLT-RS-036 (this file): `Router::new(registry)` as the canonical
+//!   constructor. Tower Layer composition is "optional" in the sense that
+//!   `Router` itself is a [`tower::Service`], so callers stack layers around
+//!   it via [`tower::ServiceBuilder`] when they need to (no Router-side
+//!   `.layer()` method is required for the registry's hot path).
 //! - JOLT-RS-037 (next): full test sweep including 405 method-mismatch
 //!   refinement (this file's 034 dispatch returns 404 for both unknown paths
 //!   and method mismatches, matching the JOLT-RS-034 step text verbatim).
@@ -75,14 +77,36 @@ impl Router {
     /// On no match, respond with `404 Not Found`.
     ///
     /// The registry is sorted longest-path-first at construction so that
-    /// `/api/hello` is preferred over `/api`. JOLT-RS-036 will rename this to
-    /// `Router::new(registry)`; the current name disambiguates from the
-    /// reserved [`Self::from_axum`] entry while phase07 is still in flight.
+    /// `/api/hello` is preferred over `/api`. Prefer [`Self::new`], which is
+    /// the canonical entry point — `from_registry` is retained as a sibling
+    /// for callers that want the explicit name and as the implementation site
+    /// the constructor delegates to.
     pub fn from_registry(mut registry: EndpointRegistry) -> Self {
         registry.sort();
         Self {
             inner: Inner::Registry(Arc::new(registry)),
         }
+    }
+
+    /// Canonical constructor (JOLT-RS-036): build a registry-driven Router
+    /// that's immediately ready to serve as a [`tower::Service`]. Equivalent
+    /// to [`Self::from_registry`]; documented as the preferred entry point so
+    /// downstream phases (auto-middleware codegen, server wiring) can name a
+    /// stable constructor.
+    ///
+    /// "Optional tower Layer stack" semantics: `Router` is itself a
+    /// [`tower::Service`], so callers compose tower layers around it
+    /// externally via [`tower::ServiceBuilder`] — no Router-side `.layer()`
+    /// method is needed for the registry's hot path.
+    ///
+    /// ```ignore
+    /// let router = Router::new(registry);
+    /// let svc = tower::ServiceBuilder::new()
+    ///     .layer(/* tower::Layer */)
+    ///     .service(router);
+    /// ```
+    pub fn new(registry: EndpointRegistry) -> Self {
+        Self::from_registry(registry)
     }
 }
 

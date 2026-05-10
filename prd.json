@@ -545,7 +545,7 @@
       "verification": [
         "Unit test: Router::new() yields ready-to-serve axum Router."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-037",

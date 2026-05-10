@@ -1758,6 +1758,92 @@ mod router {
             assert_eq!(resp.status(), StatusCode::OK);
             assert_eq!(body_string(resp).await, "API_HELLO");
         }
+
+        #[tokio::test]
+        async fn new_constructor_yields_ready_to_serve_router() {
+            // PRD-mandated verification for JOLT-RS-036: `Router::new(registry)`
+            // produces a ready-to-serve tower::Service. Driving a registered
+            // route end-to-end (200 + body match) proves both the dispatch
+            // wiring and the longest-path-first sort that `from_registry`
+            // shares with `new` are intact behind the canonical constructor.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::new(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "hi");
+        }
+
+        #[tokio::test]
+        async fn new_constructor_sorts_registry_for_longest_path_match() {
+            // Pins that `Router::new` delegates to `from_registry` (and thus
+            // inherits the longest-path-first sort) rather than re-implementing
+            // construction. Without the sort, `/api` would match before
+            // `/api/hello` and the wrong handler would respond.
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/api",
+                method: Method::Get,
+                body: "API",
+            });
+            registry.register(EchoEndpoint {
+                path: "/api/hello",
+                method: Method::Get,
+                body: "API_HELLO",
+            });
+            let router = Router::new(registry);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/api/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "API_HELLO");
+        }
+
+        #[tokio::test]
+        async fn new_constructor_composes_with_tower_service_builder() {
+            // PRD-036's "with optional tower Layer stack" phrase is satisfied
+            // by Router being a tower::Service that callers wrap with
+            // ServiceBuilder externally. This test pins that compositional
+            // contract by routing a request through a ServiceBuilder-built
+            // service whose final `.service(router)` is the registry-driven
+            // Router. ServiceBuilder with no `.layer(...)` calls is the
+            // identity case; if Router ever stops being a tower::Service or
+            // breaks Service<AxumRequest, Response = Response, Error =
+            // Infallible>, this test fails to compile rather than at runtime.
+            use tower::ServiceBuilder;
+
+            let mut registry = EndpointRegistry::new();
+            registry.register(EchoEndpoint {
+                path: "/hello",
+                method: Method::Get,
+                body: "hi",
+            });
+            let router = Router::new(registry);
+            let svc = ServiceBuilder::new().service(router);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/hello")
+                .body(Body::empty())
+                .unwrap();
+            let resp = svc.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_string(resp).await, "hi");
+        }
     }
 }
 
