@@ -1860,6 +1860,144 @@ mod router {
         }
 
         #[tokio::test]
+        async fn finished_flag_short_circuits_handler_when_set_by_outer_tower_layer() {
+            // PRD-mandated verification for JOLT-RS-079: a real `tower::Layer`
+            // wrapping `Router::new(registry)` that flips `mark_finished()` +
+            // stashes a response on the shared `Arc<RequestExt>` BEFORE
+            // delegating to inner causes Router to take the stash and return
+            // it without invoking the matched endpoint's handler. The handler
+            // tracks invocation via an `AtomicBool` so the assertion
+            // distinguishes "handler skipped" from "handler ran but returned
+            // the same status the layer would have."
+            //
+            // Distinct from the sibling
+            // `finished_flag_with_stashed_response_short_circuits_handler`,
+            // which pre-inserts a marked-finished ext into the request
+            // directly: this test routes through actual tower-layer
+            // composition (`ServiceBuilder::layer(...).service(router)`) to
+            // pin the contract end-to-end through Router's
+            // preserve-existing-ext seam — a regression that broke the
+            // tower-layer propagation of the latch (e.g., re-introducing the
+            // pre-035 overwrite) would silently pass the direct-insertion
+            // test but fail this one.
+            use std::future::Future;
+            use std::pin::Pin;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::task::{Context, Poll};
+
+            use tower::{Layer, Service, ServiceBuilder};
+
+            use crate::request_ext::RequestExt;
+
+            struct TrackingEndpoint {
+                invoked: Arc<AtomicBool>,
+            }
+
+            impl Endpoint for TrackingEndpoint {
+                fn path(&self) -> &str {
+                    "/protected"
+                }
+
+                fn method(&self) -> Method {
+                    Method::Get
+                }
+
+                fn handler(&self, _req: Request) -> EndpointFuture {
+                    let invoked = Arc::clone(&self.invoked);
+                    Box::pin(async move {
+                        invoked.store(true, Ordering::Relaxed);
+                        axum::response::Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::empty())
+                            .unwrap()
+                    })
+                }
+            }
+
+            #[derive(Clone)]
+            struct FinishingLayer;
+
+            impl<S> Layer<S> for FinishingLayer {
+                type Service = FinishingService<S>;
+                fn layer(&self, inner: S) -> Self::Service {
+                    FinishingService { inner }
+                }
+            }
+
+            #[derive(Clone)]
+            struct FinishingService<S> {
+                inner: S,
+            }
+
+            impl<S> Service<AxumRequest> for FinishingService<S>
+            where
+                S: Service<AxumRequest, Response = axum::response::Response>
+                    + Clone
+                    + Send
+                    + 'static,
+                S::Future: Send + 'static,
+            {
+                type Response = S::Response;
+                type Error = S::Error;
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+                fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                    self.inner.poll_ready(cx)
+                }
+
+                fn call(&mut self, mut req: AxumRequest) -> Self::Future {
+                    // Canonical "middleware rejected the request" pattern:
+                    // grab (or inject) the Arc<RequestExt>, stash a 401
+                    // response, flip the latch — then delegate to inner.
+                    // Router's `call` will preserve this same Arc (per the
+                    // JOLT-RS-035 preserve-existing-ext contract) and observe
+                    // the finished latch on the SAME instance.
+                    let ext: Arc<RequestExt> = match req.extensions().get::<Arc<RequestExt>>() {
+                        Some(existing) => Arc::clone(existing),
+                        None => {
+                            let fresh = Arc::new(RequestExt::new());
+                            req.extensions_mut().insert(Arc::clone(&fresh));
+                            fresh
+                        }
+                    };
+                    ext.set_response(
+                        axum::response::Response::builder()
+                            .status(StatusCode::UNAUTHORIZED)
+                            .body(Body::from("layer rejected"))
+                            .unwrap(),
+                    );
+                    ext.mark_finished();
+
+                    let mut inner = self.inner.clone();
+                    Box::pin(async move { inner.call(req).await })
+                }
+            }
+
+            let invoked = Arc::new(AtomicBool::new(false));
+            let mut registry = EndpointRegistry::new();
+            registry.register(TrackingEndpoint {
+                invoked: Arc::clone(&invoked),
+            });
+            let router = Router::new(registry);
+            let svc = ServiceBuilder::new().layer(FinishingLayer).service(router);
+
+            let req = AxumRequest::builder()
+                .method("GET")
+                .uri("/protected")
+                .body(Body::empty())
+                .unwrap();
+            let resp = svc.oneshot(req).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(body_string(resp).await, "layer rejected");
+            assert!(
+                !invoked.load(Ordering::Relaxed),
+                "handler must not be invoked when an outer tower layer marks the request finished"
+            );
+        }
+
+        #[tokio::test]
         async fn longest_path_wins_when_multiple_registered() {
             // `from_registry` calls `sort()` internally so longer paths match
             // first. This test pins that contract: register `/api` first and
