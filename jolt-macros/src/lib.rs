@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, ItemFn};
 
+mod auto_middleware;
 mod endpoint;
 
 /// `#[endpoint("/path")]` attribute macro.
@@ -36,6 +37,29 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr2: proc_macro2::TokenStream = attr.into();
     let item2: proc_macro2::TokenStream = item.into();
     endpoint::expand_endpoint(attr2, item2).into()
+}
+
+/// `#[derive(AutoMiddleware)]` proc-macro derive — phase10 entry point.
+///
+/// JOLT-RS-046 (current): parses the struct's named fields and their types via
+/// [`auto_middleware::parse_auto_middleware_input`], then emits a hidden
+/// `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT` const so an integration test can
+/// observe that the derive ran.
+///
+/// Subsequent phase10/11 items extend this expansion:
+/// - 047 detects body-candidate fields (`T: DeserializeOwned`),
+/// - 048 detects query-extraction fields (`QueryParams<T>` / `HashMap<String, String>`),
+/// - 049 detects request-injection fields (`&Request` / `Request`),
+/// - 050 detects struct-level `#[cors]` attributes,
+/// - 051-053 generate the `tower::Layer` impl + extraction code in `call()`.
+///
+/// On parse failure the emission is a single `compile_error!` token (no
+/// partial codegen), so the user gets a single targeted diagnostic instead of
+/// a cascade of "use of undeclared type" errors from later code.
+#[proc_macro_derive(AutoMiddleware)]
+pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    auto_middleware::expand_auto_middleware(input).into()
 }
 
 /// Placeholder attribute macro. Future PRD items will expand this into

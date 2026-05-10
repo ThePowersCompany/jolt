@@ -30,7 +30,7 @@ pub use status::StatusCode;
 // same reason — user crates `use jolt_core::endpoint;` instead of pulling in
 // jolt-macros directly.
 pub use inventory;
-pub use jolt_macros::endpoint;
+pub use jolt_macros::{endpoint, AutoMiddleware};
 
 #[cfg(test)]
 mod tests;
