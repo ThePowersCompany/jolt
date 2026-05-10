@@ -2752,3 +2752,176 @@ mod parse_body {
         );
     }
 }
+
+mod parse_body_string {
+    //! PRD-mandated verification for JOLT-RS-061: "Unit test: POST with
+    //! text/plain body → extracted as String."
+    //!
+    //! Two structural checks stacked into the primary test:
+    //! 1. A UTF-8 `text/plain` body lands in request extensions as `String`
+    //!    on the inner service's side — the "extracted as String" contract.
+    //! 2. The layer restores the buffered body bytes onto the request before
+    //!    delegating, matching the contract `ParseBodyLayer` pinned in 059.
+    //!
+    //! The sibling `non_utf8_body_short_circuits_with_400_and_marks_finished`
+    //! test pins the failure-rejection contract that mirrors 060's JSON-failure
+    //! behavior: invalid bytes → 400 + mark_finished + direct return.
+
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::extract::Request as AxumRequest;
+    use axum::http::{Method as HttpMethod, StatusCode};
+    use axum::response::Response;
+    use tower::{Layer, ServiceExt};
+
+    use crate::request_ext::RequestExt;
+    use crate::ParseBodyStringLayer;
+
+    #[tokio::test]
+    async fn text_plain_body_is_decoded_and_inserted_into_extensions() {
+        let captured_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let body_clone = Arc::clone(&captured_body);
+        let bytes_clone = Arc::clone(&captured_bytes);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let body_clone = Arc::clone(&body_clone);
+            let bytes_clone = Arc::clone(&bytes_clone);
+            async move {
+                if let Some(body) = req.extensions().get::<String>() {
+                    *body_clone.lock().unwrap() = Some(body.clone());
+                }
+                let (_, body) = req.into_parts();
+                let bytes = axum::body::to_bytes(body, u32::MAX as usize)
+                    .await
+                    .unwrap_or_default();
+                *bytes_clone.lock().unwrap() = bytes.to_vec();
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        let layer = ParseBodyStringLayer::new();
+        let svc = layer.layer(inner);
+
+        let payload = b"hello, jolt";
+        let req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/text")
+            .header("content-type", "text/plain")
+            .body(Body::from(&payload[..]))
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let extracted = captured_body.lock().unwrap().clone();
+        assert_eq!(
+            extracted,
+            Some("hello, jolt".to_string()),
+            "text/plain body must be decoded as UTF-8 and land in extensions as String",
+        );
+
+        let restored = captured_bytes.lock().unwrap().clone();
+        assert_eq!(
+            restored, payload,
+            "layer must restore the buffered body bytes onto the request before delegating",
+        );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_body_short_circuits_with_400_and_marks_finished() {
+        // Mirror of JOLT-RS-060's invalid-JSON test, adapted for the UTF-8
+        // failure surface. A panicking inner service structurally forbids
+        // delegation past the failure branch.
+        let inner = tower::service_fn(|_: AxumRequest| async move {
+            panic!("ParseBodyStringService must short-circuit on UTF-8 failure and never call inner");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let layer = ParseBodyStringLayer::new();
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        // 0xff is never a valid UTF-8 leading byte.
+        let invalid_utf8: &[u8] = &[0xff, 0xfe, 0xfd];
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/text")
+            .header("content-type", "text/plain")
+            .body(Body::from(invalid_utf8.to_vec()))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid UTF-8 must surface 400 Bad Request",
+        );
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("400 response must carry a Content-Type")
+            .to_str()
+            .expect("Content-Type must be ASCII");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "400 body is text/plain; got {content_type}",
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), u32::MAX as usize)
+            .await
+            .unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("400 body is UTF-8");
+        assert!(
+            body_text.starts_with("Invalid UTF-8: "),
+            "400 body must be prefixed with 'Invalid UTF-8: '; got {body_text:?}",
+        );
+        assert!(
+            body_text.len() > "Invalid UTF-8: ".len(),
+            "400 body must include the underlying utf-8 error detail; got {body_text:?}",
+        );
+
+        assert!(
+            request_ext.is_finished(),
+            "ParseBodyStringService must flip RequestExt::mark_finished on UTF-8 failure",
+        );
+        assert!(
+            request_ext.take_response().is_none(),
+            "the 400 is returned directly from call(), not stashed in RequestExt",
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_body_decodes_to_empty_string() {
+        // Empty bytes are valid UTF-8 (the empty string). Pins the contract
+        // that an empty body is NOT treated as a UTF-8 failure — empty-body
+        // rejection is the user's responsibility, not this layer's.
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured_clone);
+            async move {
+                if let Some(body) = req.extensions().get::<String>() {
+                    *captured.lock().unwrap() = Some(body.clone());
+                }
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        let layer = ParseBodyStringLayer::new();
+        let svc = layer.layer(inner);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/text")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            captured.lock().unwrap().clone(),
+            Some(String::new()),
+            "empty body must decode to an empty String (not 400)",
+        );
+    }
+}

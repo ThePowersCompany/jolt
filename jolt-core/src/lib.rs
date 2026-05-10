@@ -19,7 +19,7 @@ pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
 pub use method::{Method, ParseMethodError};
-pub use parse_body::{ParseBodyLayer, ParseBodyService};
+pub use parse_body::{ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService};
 pub use registered_endpoint::RegisteredEndpoint;
 pub use request::Request;
 pub use request_ext::RequestExt;

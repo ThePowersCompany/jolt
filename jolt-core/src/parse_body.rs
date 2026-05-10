@@ -1,4 +1,20 @@
-//! Body parsing `tower::Layer` (JOLT-RS-059).
+//! Body parsing `tower::Layer`s (JOLT-RS-059..061).
+//!
+//! Two sibling layers share the buffer-body-then-stash-into-extensions shape:
+//!
+//! * [`ParseBodyLayer<T>`] (JOLT-RS-059/060) attempts
+//!   `serde_json::from_slice::<T>` on the buffered bytes and stashes the
+//!   parsed `T` into request extensions. Parse failure short-circuits with a
+//!   `400 Bad Request` carrying `"Invalid JSON: <serde error>"`.
+//! * [`ParseBodyStringLayer`] (JOLT-RS-061) decodes the buffered bytes as
+//!   UTF-8 and stashes the resulting `String` into request extensions. UTF-8
+//!   decode failure short-circuits with a `400 Bad Request` carrying
+//!   `"Invalid UTF-8: <utf-8 error>"`. Distinct from `ParseBodyLayer<String>`
+//!   on purpose: a `String` body in this framework is a raw `text/plain`
+//!   payload, not a JSON string literal. Routing it through
+//!   `serde_json::from_slice::<String>` would only accept inputs that are
+//!   already quoted JSON (`"hello"`, not `hello`), which is the opposite of
+//!   what the user means.
 //!
 //! [`ParseBodyLayer<T>`] buffers an inbound axum request's body bytes once,
 //! restores the buffered bytes onto the request so downstream services
@@ -272,4 +288,127 @@ async fn buffer_body(body: Body) -> Bytes {
     axum::body::to_bytes(body, u32::MAX as usize)
         .await
         .unwrap_or_default()
+}
+
+/// `tower::Layer` that buffers the request body and decodes it as a UTF-8
+/// [`String`] (JOLT-RS-061). On success, the decoded string is inserted into
+/// the request's extensions so a downstream service (or the
+/// AutoMiddleware-derived struct consuming the request) can pull it out with
+/// `req.extensions().get::<String>()`. On UTF-8 decode failure, the layer
+/// short-circuits with a `400 Bad Request` carrying
+/// `"Invalid UTF-8: <error>"` as a `text/plain` body, mirroring
+/// [`ParseBodyLayer`]'s JSON-failure contract.
+///
+/// Architectural notes:
+///
+/// * **Distinct from `ParseBodyLayer<String>`.** Routing raw `text/plain`
+///   bytes through `serde_json::from_slice::<String>` would require the
+///   payload to be a JSON string literal (`"hello"`, with quotes); callers
+///   wiring a `String` body field want the raw request payload as UTF-8.
+///   Two separate layers keep both surfaces unambiguous and let a caller pick
+///   the contract that matches the field type.
+/// * **Empty body is valid input.** Empty bytes are valid UTF-8 (the empty
+///   string), so the layer inserts `String::new()` into extensions and
+///   delegates. Empty-body rejection (if any) is the user's responsibility,
+///   matching how the JSON layer treats `null` / `""`.
+/// * **Body restoration mirrors [`ParseBodyLayer`].** The buffered bytes are
+///   re-armed onto the request before delegating so downstream services
+///   (notably `build_jolt_request`'s re-read in the registry path) keep
+///   working.
+/// * **`Arc<RequestExt>` preserve-or-inject mirrors [`ParseBodyService`] and
+///   [`CorsService`](crate::CorsService).** A flipped `finished` latch on
+///   UTF-8 failure is observable to whoever holds the same Arc, and the
+///   contract holds even when the layer composes outside Router.
+#[derive(Default, Clone, Debug)]
+pub struct ParseBodyStringLayer;
+
+impl ParseBodyStringLayer {
+    /// Construct a string-body parser layer. The layer carries no runtime
+    /// state, so a fresh layer is functionally identical to any other.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<S> Layer<S> for ParseBodyStringLayer {
+    type Service = ParseBodyStringService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ParseBodyStringService { inner }
+    }
+}
+
+/// Inner-service wrapper produced by [`ParseBodyStringLayer::layer`]. Buffers
+/// the request body and inserts a decoded [`String`] into request extensions
+/// on success; short-circuits with a `400 Bad Request` on UTF-8 decode
+/// failure. See [`ParseBodyStringLayer`] for the architectural contract.
+#[derive(Clone, Debug)]
+pub struct ParseBodyStringService<S> {
+    inner: S,
+}
+
+impl<S> Service<AxumRequest> for ParseBodyStringService<S>
+where
+    S: Service<AxumRequest, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Response, S::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: AxumRequest) -> Self::Future {
+        // Same `poll_ready`/`call` swap pattern as `ParseBodyService::call`
+        // (JOLT-RS-059) and `CorsService::call` (JOLT-RS-056).
+        let cloned = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, cloned);
+        Box::pin(async move {
+            let (mut parts, body) = req.into_parts();
+            let bytes = buffer_body(body).await;
+
+            let request_ext: Arc<RequestExt> = match parts.extensions.get::<Arc<RequestExt>>() {
+                Some(existing) => Arc::clone(existing),
+                None => {
+                    let fresh = Arc::new(RequestExt::new());
+                    parts.extensions.insert(Arc::clone(&fresh));
+                    fresh
+                }
+            };
+
+            let mut req = AxumRequest::from_parts(parts, Body::from(bytes.clone()));
+
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => {
+                    req.extensions_mut().insert(text.to_owned());
+                    inner.call(req).await
+                }
+                Err(err) => {
+                    request_ext.mark_finished();
+                    Ok(bad_request_for_utf8_error(&err))
+                }
+            }
+        })
+    }
+}
+
+/// Build the `400 Bad Request` response surfaced when [`std::str::from_utf8`]
+/// rejects the buffered body bytes (JOLT-RS-061). The body is `text/plain`,
+/// mirroring [`bad_request_for_parse_error`]'s format, and carries
+/// `"Invalid UTF-8: <utf-8 error>"` so the caller gets actionable detail
+/// (byte index of the invalid sequence) without the layer needing to know
+/// what shape the user expected.
+fn bad_request_for_utf8_error(err: &std::str::Utf8Error) -> Response {
+    let body = format!("Invalid UTF-8: {err}");
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(Body::from(body))
+        .expect("400 response builder always succeeds with static headers + owned body")
 }
