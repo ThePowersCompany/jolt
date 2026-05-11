@@ -1,13 +1,51 @@
-//! End-to-end integration tests for the `joltr-types` binary scaffold.
+//! End-to-end integration tests for the `joltr-types` crate.
 //!
-//! JOLTR-RS-176 (PRD #11): exercises the `cargo run -p joltr-types` pipeline
-//! without depending on `joltr-macros` having a fully-wired `inventory::submit!`
-//! site yet (that arrives with JOLTR-RS-177 / PRD #12). Tests redirect the
-//! output via `JOLTR_TYPES_OUT` so a developer's workspace-level `types.d.ts`
-//! is never overwritten by `cargo test`.
+//! Coverage split:
+//! - **Binary subprocess tests** (`binary_*`): spawn `cargo`-built
+//!   `joltr-types` and assert on what it writes to disk. The joltr-types
+//!   binary's own link unit contains no `#[derive(TsExport)]` sites, so
+//!   these tests pin the empty-registry contract (header-only output).
+//! - **In-process library tests** (`render_*`): call `joltr_types::render()`
+//!   directly from this test binary. Because integration tests link the
+//!   joltr-types lib AND any `#[derive(TsExport)]` sites in this file, the
+//!   inventory is non-empty here — these tests verify the macro → submit →
+//!   render integration path end-to-end.
+//!
+//! ## JOLTR-RS-176 (PRD #11)
+//! Added the binary subprocess tests.
+//!
+//! ## JOLTR-RS-177 (PRD #12)
+//! Added the in-process library tests. They are the canonical surface that
+//! exercises the full pipeline introduced in #12: `#[derive(TsExport)]` →
+//! `::joltr_types::inventory::submit!` → `joltr_types::render()`.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+use joltr_macros::TsExport;
+
+// ── In-process derives. These submit into THIS test binary's inventory; the
+//    `joltr-types` subprocess binary's inventory is separate and unaffected. ──
+
+/// Verifies struct → interface rendering with primitive + Vec + Option fields.
+#[derive(TsExport)]
+#[allow(dead_code)]
+struct UserExport {
+    id: u32,
+    name: String,
+    tags: Vec<String>,
+    nickname: Option<String>,
+}
+
+/// Verifies simple-enum → const-object + union rendering.
+#[derive(TsExport)]
+#[allow(dead_code)]
+enum StatusExport {
+    Active,
+    Inactive,
+}
+
+// ── Binary subprocess test helpers ──
 
 /// Generate a unique tempfile path inside the workspace's `target/` directory.
 ///
@@ -61,14 +99,17 @@ fn binary_writes_header_to_redirected_output() {
 }
 
 #[test]
-fn binary_emits_one_entry_per_inventory_submission() {
-    // JOLTR-RS-176: pre-#12, no `inventory::submit!` sites exist in any
-    // workspace crate, so the rendered document is exactly the header.
-    // This test pins that invariant — when #12 wires `#[derive(TsExport)]`
-    // into the registry, this test will fail loudly and force an update
-    // to match the new expected output, surfacing the integration point.
+fn binary_with_no_local_derives_emits_only_the_header() {
+    // The `joltr-types` binary's link unit contains no `#[derive(TsExport)]`
+    // sites (this test file's derives are linked into a DIFFERENT binary —
+    // this integration-test binary, not the subprocess). So spawning the
+    // joltr-types binary still produces a header-only document.
+    //
+    // When a future PRD wires user app crates into the joltr-types binary's
+    // dep graph (so its inventory is non-empty), this test will need updating
+    // to match the new expected output.
     let exe = env!("CARGO_BIN_EXE_joltr-types");
-    let out = tempfile_in_target("empty-registry");
+    let out = tempfile_in_target("empty-link-unit");
 
     let result = Command::new(exe)
         .env("JOLTR_TYPES_OUT", &out)
@@ -84,8 +125,67 @@ fn binary_emits_one_entry_per_inventory_submission() {
 
     assert!(
         after_header.is_empty(),
-        "no inventory entries are registered yet at PRD #11 — body must be empty, got: {after_header:?}"
+        "joltr-types binary's own link unit has no derives — body must be empty, got: {after_header:?}"
     );
 
     let _ = std::fs::remove_file(&out);
+}
+
+// ── In-process library tests ──
+
+#[test]
+fn render_includes_struct_interface_from_derive() {
+    let out = joltr_types::render();
+
+    assert!(
+        out.contains("export interface UserExport {"),
+        "render must emit `export interface UserExport`, got:\n{out}"
+    );
+    assert!(
+        out.contains("id: number;"),
+        "id: u32 must render as `id: number;`, got:\n{out}"
+    );
+    assert!(
+        out.contains("name: string;"),
+        "name: String must render as `name: string;`, got:\n{out}"
+    );
+    assert!(
+        out.contains("tags: string[];"),
+        "tags: Vec<String> must render as `tags: string[];`, got:\n{out}"
+    );
+    assert!(
+        out.contains("nickname: string | null;"),
+        "nickname: Option<String> must render as `nickname: string | null;`, got:\n{out}"
+    );
+}
+
+#[test]
+fn render_includes_enum_const_object_plus_type() {
+    let out = joltr_types::render();
+
+    assert!(
+        out.contains("export const StatusExport = {"),
+        "simple enum must emit `export const StatusExport = {{`, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"Active: "Active","#),
+        "variant must emit `Active: \"Active\",`, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"Inactive: "Inactive","#),
+        "variant must emit `Inactive: \"Inactive\",`, got:\n{out}"
+    );
+    assert!(
+        out.contains("export type StatusExport = typeof StatusExport[keyof typeof StatusExport];"),
+        "enum must emit the companion type alias, got:\n{out}"
+    );
+}
+
+#[test]
+fn render_starts_with_canonical_header() {
+    let out = joltr_types::render();
+    assert!(
+        out.starts_with("// === DO NOT MODIFY ==="),
+        "render must always lead with the header marker, got: {out:?}"
+    );
 }

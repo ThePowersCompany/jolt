@@ -4,14 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Binary entry point: walks the `linkme`/`inventory` registry populated by
-# `#[derive(TsExport)]` and writes a TypeScript declaration file.
-#
-# Marked `path = "src/main.rs"` explicitly so the scaffold lives entirely
-# inside `src/main.rs` for PRD #11 (JOLTR-RS-176). PRD #12 (JOLTR-RS-177)
-# adds `src/lib.rs` with the richer `TsTypeDef` and rendering surface; the
-# binary will then move to `joltr_types::main_entry()`-style glue while
-# this `[[bin]]` block stays intact.
+# JOLTR-RS-177 (PRD #12) split: the rich `TsTypeDef` shape + `inventory::collect!`
+# + structured TS rendering live in `src/lib.rs`; the `joltr-types` binary in
+# `src/main.rs` is thin glue that resolves the output path and writes the
+# rendered string. The two targets share the same inventory instance — only the
+# library defines `inventory::collect!(TsTypeDef)`, so any binary or test that
+# links the lib sees the same registry.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "joltr-types"
 path = "src/main.rs"
@@ -20,3 +21,7 @@ path = "src/main.rs"
 inventory = { workspace = true }
 
 [dev-dependencies]
+# Used by `tests/ts_export_integration.rs` to derive `TsExport` on a fixture
+# struct and verify the inventory submission renders end-to-end through
+# `joltr_types::render()` inside the same test binary.
+joltr-macros = { path = "../joltr-macros" }

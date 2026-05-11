@@ -112,3 +112,62 @@ Files changed:
 Next notes:
 - PRD #12 is now unblocked: add `joltr-types/src/lib.rs` exposing the full `TsTypeDef { name, kind: Interface|Enum|Union, fields, generics, docs }` plus the `inventory::collect!` collection point; flip `main.rs` to import from the lib; update `joltr-macros/src/ts_export.rs` to emit `inventory::submit!` per derive site; and update the empty-registry tripwire test to assert the new expected output.
 - The placeholder `body: &'static str` field will go away — #12's rendering happens inside `joltr-types` rather than at submit time, so the macro only ships the structured data, not pre-rendered strings.
+
+
+2026-05-11 PRD #12 — TsExport: inventory registry and type rendering
+
+Completed:
+- `joltr-types/src/lib.rs` (new) — the rich registry + rendering surface:
+  - `TsTypeDef { name, kind, fields, generics, docs }` plus `TsField { name, ts_type, docs }` and `TsKind { Interface, Enum, Union }`. All `&'static`-only so the value satisfies `inventory`'s const-construction requirement.
+  - Single `inventory::collect!(TsTypeDef)` site — workspace-wide collection point. Defining it once in the lib means every binary that links the lib observes the same registry.
+  - `pub use inventory;` so the macro can emit `::joltr_types::inventory::submit!` without forcing every user crate to add `inventory` to its own Cargo.toml (mirrors joltr-core's `pub use inventory`).
+  - `render()` walks the registry and renders `HEADER` + one entry per `TsTypeDef`. Per-kind rendering helpers:
+    - `Interface` → `export interface Name<G> { field: T; … }` (single-line `{}` for empty bodies).
+    - `Enum` → `export const Name = { Variant: "Variant", … } as const;` followed by `export type Name = typeof Name[keyof typeof Name];` — the legacy Zig generator's emit shape.
+    - `Union` → `export type Name = arm | arm | …;` (or `never` when empty).
+  - JSDoc emission: type-level docs render as `/** … */` above the declaration; field-level docs render `/** … */` above the field line.
+- `joltr-types/src/main.rs` — thinned to glue. Removed the placeholder `TsTypeDef`, `HEADER`, and `render` defined inline; the binary now calls `joltr_types::render()` and writes to the resolved output path. `resolve_out_path()` stays local (env override + workspace-root fallback).
+- `joltr-types/Cargo.toml` — added `[lib] path = "src/lib.rs"` alongside the existing `[[bin]]`. Added `joltr-macros` dev-dep so integration tests can derive `TsExport` on fixture types.
+- `joltr-macros/src/ts_export.rs`:
+  - `rust_type_to_ts` extended with JSON-wrapper + nullable mappings: `Option<T>` and `Optional<T>` → `"{T_ts} | null"`, `Json<T>` → inner T (transparent), `JsonArray<T>` → `"{T_ts}[]"`. Existing Vec mapping refactored to share the new `single_generic_inner(segment)` helper. Inner-unmapped semantics preserved (None propagates) — matches existing `Vec<UnknownType>` contract.
+  - New `generate_inventory_submit(parsed)` emits one `::joltr_types::inventory::submit! { ::joltr_types::TsTypeDef { … } }` block per derive site, at module scope (appended to the existing impl-block emission). Field-name comes from `#[ts(rename = "...")]` when present, otherwise the Rust ident. Unmapped field types fall back to `"any"` (TS top type) so the emitted TS stays syntactically valid.
+  - Enum variants register as `TsField { name: <variant>, ts_type: "", docs: None }` with `kind: TsKind::Enum`.
+  - `expand_ts_export` appends the submit block to the existing impl emission. No partial codegen on parse failure (existing contract preserved).
+- `joltr-types/tests/ts_export_integration.rs` — restructured into two halves:
+  - Binary subprocess tests (unchanged contract): `binary_writes_header_to_redirected_output` and `binary_with_no_local_derives_emits_only_the_header` (renamed from `binary_emits_one_entry_per_inventory_submission` with updated docstring — the joltr-types binary's own link unit has no derives, so the empty-registry assertion still holds).
+  - In-process library tests (new): `#[derive(TsExport)] struct UserExport { id, name, tags: Vec<String>, nickname: Option<String> }` + `#[derive(TsExport)] enum StatusExport { Active, Inactive }` followed by three tests calling `joltr_types::render()` directly to verify the macro → submit → render integration path end-to-end (interface fields, enum const-object + type alias, header lead-in).
+- 13 new `joltr-macros` unit tests in `ts_export::tests`:
+  - 8 type-mapping tests: `Option<String>` / `Option<i32>` / `Optional<String>` / `JsonArray<String>` / `Json<i32>` / `JsonArray<Json<i32>>` / `Option<Vec<String>>` / `Option<MyStruct>` (unknown → None).
+  - 5 inventory-submit token-shape tests: struct emits Interface + name/type pair; enum emits Enum + variant names; `#[ts(rename)]` controls submit-time property name; unmapped field type falls back to `"any"`; compile-error on tuple-struct emits no submit block.
+
+Verification:
+- `cargo check --workspace --all-targets` → clean (one pre-existing unused-import warning in joltr-core/src/tests.rs unrelated to this PRD).
+- `cargo test -p joltr-macros --lib` → **262 passed** (up from 249; 13 new PRD #12 unit tests).
+- `cargo test -p joltr-types` → **12 passed** (7 lib unit + 5 integration). The 5 integration tests cover both the binary subprocess path and the in-process `render()` path; binary tests run a fresh subprocess and confirm the binary's link unit is empty.
+- `cargo test -p joltr-core --tests` → all pass (regression sweep on the surface most likely affected by macro-emission shape changes — every joltr-core integration test re-derives endpoint/auto-middleware/patch-query macros and would surface a regression first).
+- Smoke run: `JOLTR_TYPES_OUT=/tmp/... cargo run -q -p joltr-types` wrote 92 bytes (header only) — confirms the binary's own link unit has no derives and the pipeline still functions.
+
+Key decisions:
+- TsExport macro emits `::joltr_types::inventory::submit!` (going through joltr-types directly), NOT `::joltr_core::joltr_types::...`. Rationale: PRD #12's listed files are `joltr-types/src/lib.rs` + `joltr-macros/src/ts_export.rs` only. Re-exporting `joltr_types` through `joltr-core` (mirroring how `#[endpoint]` resolves `::joltr_core::inventory`) would require touching joltr-core/Cargo.toml + joltr-core/src/lib.rs. Going through joltr-types directly keeps the change inside the PRD's stated scope; user crates that derive TsExport must add `joltr-types` as a dep. A future polish PRD can add the joltr-core re-export.
+- `inventory::collect!(TsTypeDef)` lives in `joltr-types/src/lib.rs` (not main.rs). Rationale: the `inventory` collection site has to be inside a library — `inventory::submit!` from another crate cannot target a binary-private symbol. Splitting lib + bin in #12 makes the collection point reachable from both the joltr-types binary AND from integration tests that link the lib directly (which is what makes the new in-process render tests possible).
+- TsTypeDef uses `&'static [TsField]` (not `Vec<TsField>` or a `Box<[…]>`). Rationale: `inventory::submit!` requires `const`-constructible values; a borrowed slice from a `const`-bound `&[…]` literal satisfies this and incurs zero runtime allocation per derive site. All field strings are `&'static str` for the same reason.
+- Unmapped field types fall back to `"any"` (TS top type) at submit time. Rationale: a parse-time bare-ident fallback (e.g. `MyStruct` → `"MyStruct"`) would silently break when the user hasn't also derived TsExport on the referent. `"any"` is loud (visible in the generated `.d.ts`) and syntactically valid, so it surfaces the gap without making the whole derive a hard error. A future PRD can promote bare idents once cross-derive type resolution exists.
+- `#[ts(flatten)]` is intentionally a no-op at submit time. Rationale: a faithful flatten requires looking up the flattened type's structure, which the macro can't do at expand-time (the referent's TsExport markers aren't visible across crates without name resolution we don't have). The existing `__JOLTR_TS_EXPORT_flatten_<N>` markers are preserved for future use; for now flattened fields submit as ordinary properties so the derive doesn't silently drop them.
+- Type-level docs are unconditionally `None` in the emitted TsTypeDef. Rationale: the current parser only collects field-level `///` doc comments; adding struct/enum-level doc parsing is a one-line follow-up that's out of #12's listed file scope. The renderer already handles `Some(_)` correctly so adding it later is a parser-only change.
+- `Optional<T>` and `Option<T>` collapse to the same `T | null` shape. Rationale: `joltr_core::Optional` is tri-state on the wire (Some/Null/NotProvided) but its serde behavior already maps NotProvided to the absence of the property at the JSON level — TS callers see the optional-field semantics through the property-optional convention, not through a third union arm. Distinguishing them in TS would force every consumer to handle three states for an arm that serde itself elides.
+
+Files changed:
+- joltr-types/Cargo.toml (added [lib], joltr-macros dev-dep)
+- joltr-types/src/lib.rs (new — TsTypeDef + TsKind + TsField + inventory::collect! + render + 7 unit tests)
+- joltr-types/src/main.rs (thinned to glue — delegates to joltr_types::render)
+- joltr-types/tests/ts_export_integration.rs (restructured — binary subprocess + in-process library tests, 5 total)
+- joltr-macros/src/ts_export.rs (rust_type_to_ts JSON-wrapper + nullable mappings, generate_inventory_submit, +13 unit tests)
+- prd.json (item 12 → passes: true)
+
+Next notes:
+- PRD #13 (Example app scaffold) is now unblocked end-to-end through Phase 5 — joltr-types ships a real type registry that the example app could pipe into a generated frontend types.d.ts.
+- Polish follow-ups to consider before #13:
+  - Re-export `joltr_types` from `joltr-core` (`pub use joltr_types;` + a `joltr-types` workspace dep) so users only declare one dep. Would also let the TsExport macro shift to `::joltr_core::joltr_types::...` paths.
+  - Parse struct/enum-level `///` docs into the new `docs` field — currently always `None`. Parser change in `joltr-macros/src/ts_export.rs::parse_ts_export_input`.
+  - Bare-ident fallback for unmapped types (instead of `"any"`) so user types compose. Needs care: probably gated on "is the referent in scope as a TsExport derive?" — link-time would be ideal but is hard at macro time, so it may just be opt-in via an attribute.
+  - Wire user app crates into the joltr-types binary's dep graph (so its inventory iteration actually sees user derives). Likely requires a small Cargo feature / build.rs convention.

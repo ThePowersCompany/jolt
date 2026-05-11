@@ -106,7 +106,7 @@
       "description": "Implement a TsTypeDef struct (name, fields, generics, docs, kind: Interface|Enum|Union) stored in an inventory. Implement TypeScript rendering: export interface, export type (union), enum (const object + type). Handle Optional<T> → T | null, JsonArray<T> → T[], Vec<T> → T[], Option<T> → T | null.",
       "files": ["joltr-types/src/lib.rs", "joltr-macros/src/ts_export.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "13",

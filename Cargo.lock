@@ -1175,6 +1175,7 @@ name = "joltr-types"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "joltr-macros",
 ]
 
 [[package]]

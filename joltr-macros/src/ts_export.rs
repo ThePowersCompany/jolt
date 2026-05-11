@@ -62,17 +62,32 @@ pub(crate) struct TsExportField {
 
 /// Map a Rust type to its TypeScript equivalent.
 ///
-/// JOLTR-RS-166: maps common Rust types to TypeScript type strings.
-///
+/// JOLTR-RS-166 baseline:
 /// - `String` / `str` → `"string"`
 /// - `i32` / `i64` / `u32` / `u64` / `f32` / `f64` / `usize` / `isize` → `"number"`
 /// - `bool` → `"boolean"`
-/// - `Vec<T>` → `"{T_ts}[]"` (recursive mapping of the inner type)
+/// - `Vec<T>` → `"{T_ts}[]"`
+///
+/// JOLTR-RS-177 (PRD #12) additions — JSON-wrapper and nullable shapes that
+/// flow through joltr-core's request/response surface:
+/// - `Option<T>` → `"{T_ts} | null"`
+/// - `Optional<T>` → `"{T_ts} | null"` (tri-state on the wire collapses to
+///   the same nullable shape in TS; the `NotProvided` arm is the absence of
+///   the field, but TS callers see the optional-field semantics via
+///   the `| null` union — matching the existing serde behavior in
+///   `joltr_core::Optional`)
+/// - `Json<T>` → inner `T`'s TS (transparent newtype)
+/// - `JsonArray<T>` → `"{T_ts}[]"` (transparent over `Vec<T>`)
 ///
 /// Returns `None` for types that don't have a direct mapping (user-defined
 /// structs, enums, tuples, references, etc.). Those types will either be
 /// resolved by a future cross-crate lookup phase or left as opaque
 /// references.
+///
+/// For nested generics where the inner type is unmapped, the result is `None`
+/// (mirroring the existing `Vec<UnknownType>` behavior). A future PRD can
+/// fall back to the inner type's bare ident so user types compose cleanly,
+/// but that semantic change is out of scope for #12.
 ///
 /// Matching is by identity alone — no path resolution. The compiler
 /// type-checks that the user's types are what they claim to be; the
@@ -90,23 +105,32 @@ pub(crate) fn rust_type_to_ts(ty: &Type) -> Option<String> {
                     Some("number".into())
                 }
                 "bool" => Some("boolean".into()),
-                "Vec" => {
-                    if let PathArguments::AngleBracketed(args) = &last.arguments {
-                        if args.args.len() == 1 {
-                            if let GenericArgument::Type(inner) = &args.args[0] {
-                                if let Some(inner_ts) = rust_type_to_ts(inner) {
-                                    return Some(format!("{inner_ts}[]"));
-                                }
-                            }
-                        }
-                    }
-                    None
-                }
+                "Vec" | "JsonArray" => single_generic_inner(last)
+                    .and_then(rust_type_to_ts)
+                    .map(|inner| format!("{inner}[]")),
+                "Option" | "Optional" => single_generic_inner(last)
+                    .and_then(rust_type_to_ts)
+                    .map(|inner| format!("{inner} | null")),
+                "Json" => single_generic_inner(last).and_then(rust_type_to_ts),
                 _ => None,
             }
         }
         _ => None,
     }
+}
+
+/// Extract the single `T` from a `Wrapper<T>`-shaped type path segment, if
+/// it has exactly one type-position generic argument. Returns `None` for
+/// segments with no generics, lifetime-only generics, or arity ≠ 1.
+fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
+    if let PathArguments::AngleBracketed(args) = &segment.arguments {
+        if args.args.len() == 1 {
+            if let GenericArgument::Type(inner) = &args.args[0] {
+                return Some(inner);
+            }
+        }
+    }
+    None
 }
 
 /// Parse a `DeriveInput` into [`TsExportInput`].
@@ -393,6 +417,8 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
         });
     }
 
+    let inventory_submit = generate_inventory_submit(&parsed);
+
     quote! {
         #[automatically_derived]
         impl #ident {
@@ -417,6 +443,96 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             #(#field_doc_markers)*
 
             #(#variant_markers)*
+        }
+
+        #inventory_submit
+    }
+}
+
+/// Emit the `::joltr_types::inventory::submit!` block that registers this
+/// derive site into the link-time `TsTypeDef` registry walked by the
+/// `joltr-types` binary.
+///
+/// JOLTR-RS-177 (PRD #12) addition. The block is at module scope so the
+/// resulting static lives in the binary's `linkme` / `inventory` section.
+/// All `&'static [TsField]` and `&'static str` literals are baked at compile
+/// time — no runtime allocation — so the value satisfies `inventory`'s
+/// `const`-construction requirement.
+///
+/// Field-name resolution:
+/// 1. `#[ts(rename = "x")]` wins (the user override).
+/// 2. Otherwise the Rust field ident is used verbatim.
+///
+/// Field-type resolution:
+/// 1. If [`rust_type_to_ts`] mapped the field, that string is used.
+/// 2. Otherwise `"any"` (TS top type) is the fallback — keeps the emitted
+///    TS syntactically valid for fields whose type the macro can't yet
+///    resolve. A future PRD can swap this for the bare Rust ident once
+///    cross-derive type resolution exists.
+///
+/// Enums: each variant contributes a [`TsField`] whose `name` is the variant
+/// ident and whose `ts_type` is `""` (unused by the [`TsKind::Enum`]
+/// renderer, which derives the literal from the variant name).
+///
+/// `#[ts(flatten)]` is intentionally ignored at submit time — a faithful
+/// flatten requires cross-type lookup that isn't available at macro-expand
+/// time. Marked-flatten fields are still emitted as ordinary fields so the
+/// derive doesn't silently drop them.
+fn generate_inventory_submit(parsed: &TsExportInput) -> TokenStream {
+    let ident = &parsed.ident;
+    let name_lit = ident.to_string();
+
+    let (kind_tokens, field_literals): (TokenStream, Vec<TokenStream>) =
+        if parsed.variants.is_empty() {
+            let fields = parsed
+                .fields
+                .iter()
+                .map(|f| {
+                    let prop_name = match &f.ts_name {
+                        Some(n) => n.clone(),
+                        None => f.name.to_string(),
+                    };
+                    let ts_type = f.ts_type.clone().unwrap_or_else(|| "any".to_string());
+                    let docs = match &f.doc {
+                        Some(d) => quote! { ::core::option::Option::Some(#d) },
+                        None => quote! { ::core::option::Option::None },
+                    };
+                    quote! {
+                        ::joltr_types::TsField {
+                            name: #prop_name,
+                            ts_type: #ts_type,
+                            docs: #docs,
+                        }
+                    }
+                })
+                .collect();
+            (quote! { ::joltr_types::TsKind::Interface }, fields)
+        } else {
+            let fields = parsed
+                .variants
+                .iter()
+                .map(|v| {
+                    quote! {
+                        ::joltr_types::TsField {
+                            name: #v,
+                            ts_type: "",
+                            docs: ::core::option::Option::None,
+                        }
+                    }
+                })
+                .collect();
+            (quote! { ::joltr_types::TsKind::Enum }, fields)
+        };
+
+    quote! {
+        ::joltr_types::inventory::submit! {
+            ::joltr_types::TsTypeDef {
+                name: #name_lit,
+                kind: #kind_tokens,
+                fields: &[ #(#field_literals),* ],
+                generics: &[],
+                docs: ::core::option::Option::None,
+            }
         }
     }
 }
@@ -719,6 +835,172 @@ mod tests {
     fn reference_type_returns_none() {
         let ty = parse_type("&str");
         assert!(rust_type_to_ts(&ty).is_none());
+    }
+
+    // ── JOLTR-RS-177 (PRD #12) — JSON-wrapper and nullable mappings ──
+
+    #[test]
+    fn option_string_maps_to_nullable_string() {
+        let ty = parse_type("Option<String>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string | null"));
+    }
+
+    #[test]
+    fn option_i32_maps_to_nullable_number() {
+        let ty = parse_type("Option<i32>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number | null"));
+    }
+
+    #[test]
+    fn optional_string_collapses_to_nullable_string() {
+        // `joltr_core::Optional` is tri-state on the wire (Some/Null/NotProvided)
+        // but TS-side it surfaces as the same nullable union — the absent
+        // arm is encoded by the property being optional via serde defaults.
+        let ty = parse_type("Optional<String>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string | null"));
+    }
+
+    #[test]
+    fn json_array_maps_like_vec() {
+        let ty = parse_type("JsonArray<String>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string[]"));
+    }
+
+    #[test]
+    fn json_wrapper_is_transparent_over_inner() {
+        let ty = parse_type("Json<i32>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn json_array_of_json_double_unwraps() {
+        // JsonArray<Json<i32>> → JsonArray<number> → number[]
+        let ty = parse_type("JsonArray<Json<i32>>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number[]"));
+    }
+
+    #[test]
+    fn option_of_vec_nests_correctly() {
+        let ty = parse_type("Option<Vec<String>>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string[] | null"));
+    }
+
+    #[test]
+    fn option_of_unknown_returns_none() {
+        // Mirrors Vec<UnknownType> → None; future PRD can fall back to the
+        // bare Rust ident so user types compose. For #12 the contract is
+        // identical to existing Vec semantics.
+        let ty = parse_type("Option<MyStruct>");
+        assert!(rust_type_to_ts(&ty).is_none());
+    }
+
+    // ── JOLTR-RS-177 (PRD #12) — inventory::submit! emission ──
+
+    #[test]
+    fn expand_emits_inventory_submit_for_struct() {
+        let input = parse_derive(
+            r#"
+            struct User {
+                id: u32,
+                name: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(":: joltr_types :: inventory :: submit"),
+            "must emit ::joltr_types::inventory::submit! block, got: {out}"
+        );
+        assert!(
+            out.contains(":: joltr_types :: TsTypeDef"),
+            "submit body must reference ::joltr_types::TsTypeDef, got: {out}"
+        );
+        assert!(
+            out.contains(":: joltr_types :: TsKind :: Interface"),
+            "struct must register as TsKind::Interface, got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "User""#),
+            "must carry the struct ident as TsTypeDef.name, got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "id""#) && out.contains(r#"ts_type : "number""#),
+            "id: u32 must register as name=\"id\", ts_type=\"number\", got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "name""#) && out.contains(r#"ts_type : "string""#),
+            "name: String must register as name=\"name\", ts_type=\"string\", got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_inventory_submit_for_enum() {
+        let input = parse_derive("enum Status { Active, Inactive }");
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(":: joltr_types :: TsKind :: Enum"),
+            "simple enum must register as TsKind::Enum, got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "Active""#),
+            "variant 0 must appear as TsField.name=\"Active\", got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "Inactive""#),
+            "variant 1 must appear as TsField.name=\"Inactive\", got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_submit_honors_ts_rename_for_property_name() {
+        let input = parse_derive(
+            r#"
+            struct Rn {
+                #[ts(rename = "userId")]
+                id: u32,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(r#"name : "userId""#),
+            "renamed field must use the ts_name in TsField.name, got: {out}"
+        );
+        assert!(
+            !out.contains(r#"TsField { name : "id""#) || out.contains(r#"name : "userId""#),
+            "rust ident \"id\" must not leak as the submit-time property name, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_submit_falls_back_to_any_for_unmapped_field_type() {
+        let input = parse_derive(
+            r#"
+            struct Blob {
+                payload: SomeUserType,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(r#"name : "payload""#) && out.contains(r#"ts_type : "any""#),
+            "unmapped field type must fall back to \"any\" in submit body, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_no_submit_on_compile_error() {
+        // Parse failure (tuple struct) must NOT emit a submit block.
+        let input = parse_derive("struct TupleExport(String, u32);");
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            !out.contains(":: joltr_types :: inventory :: submit"),
+            "no partial codegen on parse failure, got: {out}"
+        );
+        assert!(
+            out.contains("compile_error"),
+            "expected compile_error on tuple struct, got: {out}"
+        );
     }
 
     #[test]
