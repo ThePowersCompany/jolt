@@ -171,3 +171,52 @@ Next notes:
   - Parse struct/enum-level `///` docs into the new `docs` field — currently always `None`. Parser change in `joltr-macros/src/ts_export.rs::parse_ts_export_input`.
   - Bare-ident fallback for unmapped types (instead of `"any"`) so user types compose. Needs care: probably gated on "is the referent in scope as a TsExport derive?" — link-time would be ideal but is hard at macro time, so it may just be opt-in via an attribute.
   - Wire user app crates into the joltr-types binary's dep graph (so its inventory iteration actually sees user derives). Likely requires a small Cargo feature / build.rs convention.
+
+
+2026-05-11 PRD #6 — Static file serving layer (FileServeLayer / FileServeService)
+
+Completed:
+- joltr-core/src/file_serve.rs (new) — `FileServeLayer` + `FileServeService<S>`:
+  - `FileServeLayer::new(prefix, root)` normalizes the prefix at construction (adds leading `/` if missing, strips trailing `/`s; empty stays empty for the "serve everything from root" mode) and stores the root `PathBuf`.
+  - `Layer::layer` builds a fresh `tower_http::services::ServeDir` per produced service so services don't share mutable filesystem state.
+  - `Service<AxumRequest>` impl matches prefix, rewrites the request URI's path to the suffix (preserving query string), and dispatches via `serve_dir.oneshot(req)` — the canonical tower readiness pattern in an async block. Paths outside the prefix delegate to the wrapped inner service.
+  - `match_prefix` enforces a "next-segment boundary" rule (`/static` must match `/static` or `/static/...`, not `/staticky/...`) so sibling routes aren't accidentally stolen.
+  - 404 for missing files is delegated to `ServeDir`'s own miss-path branch; path traversal (`..` segments) is rejected by `ServeDir`'s `build_and_validate_path`.
+  - 11 unit tests in-file cover normalize_prefix, match_prefix, and rewrite_uri edge cases.
+- joltr-core/src/lib.rs — `pub mod file_serve;` + crate-root re-export `pub use file_serve::{FileServeLayer, FileServeService};` so user crates `use joltr_core::FileServeLayer;`.
+- joltr-core/tests/file_serve.rs (new) — 7 end-to-end integration tests via `tower::ServiceExt::oneshot`:
+  - `serves_file_when_path_matches_prefix` — 200 + file bytes.
+  - `returns_404_for_missing_file_under_prefix` — 404 from ServeDir's miss branch.
+  - `delegates_to_inner_when_path_does_not_match_prefix` — request reaches the sentinel inner (418 + recognizable body), proving it wasn't swallowed by ServeDir.
+  - `sibling_prefix_is_not_a_match` — `/staticky/foo` against a `/static` mount delegates (no URI rewrite).
+  - `path_traversal_does_not_escape_root` — `GET /static/../inside.txt` → 404, but the legitimate `/static/inside.txt` still serves OK (regression guard on the same layer).
+  - `query_string_survives_rewrite` — `?v=42` carried through the rewrite, file still resolves.
+  - `prefix_without_leading_slash_is_normalized` — `FileServeLayer::new("static", ...)` matches `/static/...` requests.
+
+Verification:
+- This is a pure Rust workspace (no `server/` dir, no `package.json`). Verification is the Rust equivalent of the prompt's npm checks: cargo check on the workspace + cargo test.
+- `cargo check --workspace --all-targets` → clean (one pre-existing unused-import warning in joltr-core/src/tests.rs unrelated to this PRD).
+- `cargo test -p joltr-core --lib file_serve` → 11 passed (new unit tests).
+- `cargo test -p joltr-core --test file_serve` → 7 passed (new integration tests).
+- `cargo test -p joltr-core --tests` → all green: 288 lib tests (joltr-core lib), 7 file_serve, 9 inventory, 17 patch_query, 6 endpoint, 3 endpoint_error, 4 error, 1 auto_middleware, 2+2+4+1 ws-related. Regression sweep confirms the new module + re-exports don't disturb existing surface.
+
+Key decisions:
+- Layer/Service shape mirrors `CorsLayer`/`CorsService` (JOLTR-RS-056) rather than mounting `ServeDir` as a sibling axum route. Rationale: a tower layer composes uniformly with the rest of the JoltR middleware stack (`AuthJwtLayer`, `CorsLayer`, `BodyLogLayer`) via `tower::ServiceBuilder`, and the PRD names `FileServeLayer`/`FileServeService` explicitly. Routing through axum's `nest_service` would skip the JoltR layer ordering contract and split the static-asset surface across two layering systems.
+- URI rewrite (strip prefix) at call time rather than mounting `ServeDir` per-prefix internally. Rationale: `ServeDir` resolves the request path relative to its root and does NOT know about the mount prefix — rewriting once at the layer's `call` boundary keeps `ServeDir` ignorant of routing concerns and lets the same `serve_dir` instance handle every request. Query string is preserved unchanged in case a future PRD (#7 cache headers) wants to read it.
+- Inner service swap (`std::mem::replace(&mut self.inner, cloned)`) is unconditional, even on the prefix-match branch where the inner isn't called. Rationale: matches the CorsService discipline so a caller invoking `poll_ready` → `call` → `poll_ready` always operates on a freshly-cloned slot regardless of which branch the previous `call` took. This pins one swap-discipline rule for every layer rather than two.
+- `serve_dir.oneshot(req)` (vs. manual `poll_ready` then `call`). Rationale: `oneshot` is the standard tower pattern when calling a service inside an async block where we don't hold a `Context`; it handles readiness polling correctly without us having to fabricate a context. Cheaper than re-implementing the dance, and `ServeDir` with no fallback is always ready so the readiness poll is effectively a no-op.
+- `match_prefix` rejects "sibling prefix" hits (path `/staticky` against prefix `/static`) by requiring the suffix to be empty or start with `/`. Rationale: a literal `starts_with` would silently route `/staticky/foo` to `<root>/y/foo`, which is both surprising and a footgun for callers naming routes that share a literal prefix. The explicit segment-boundary check is one extra comparison and pins the spec'd "/static/*" expectation.
+- Empty prefix supported as "serve every request from the root." Rationale: zero special API surface — falls out of the `match_prefix` empty-string branch — and lets advanced callers stack `FileServeLayer` as a catch-all without inventing a separate "no prefix" constructor. Not currently exercised in tests beyond the unit-level matcher; users opting into this should be aware their inner service won't receive any requests.
+- PRD #7 (cache headers + ETag + Last-Modified) and PRD #8 (gzip + Range) are explicitly out of scope here. `ServeDir` in tower-http 0.6 already emits `Content-Length` / `Content-Type` and supports `Range` and `Accept-Encoding: gzip` opt-ins via `precompressed_gzip()`; #7 will add `Cache-Control`/`ETag` injection (probably as a post-call response header pass), and #8 will toggle the precompression mode + verify range/traversal coverage. No layer-internal pieces from this PRD need to change for either — both are additive on top of the existing dispatch.
+- Path traversal protection is delegated to `ServeDir`. Rationale: tower-http's `build_and_validate_path` (mod.rs:455) rejects any `Component::ParentDir`/`RootDir`/`Prefix` segment in the requested path before opening the file. Re-implementing the check in JoltR would be a second source of truth for the same security property; delegating keeps the security boundary in one well-tested place.
+
+Files changed:
+- joltr-core/src/file_serve.rs (new — FileServeLayer + FileServeService + 11 unit tests)
+- joltr-core/src/lib.rs (mod registration + crate-root re-exports)
+- joltr-core/tests/file_serve.rs (new — 7 integration tests)
+- prd.json (item 6 → passes: true)
+
+Next notes:
+- PRD #7 (cache headers + ETag + Last-Modified + If-None-Match → 304) is now unblocked. Likely shape: a post-call hook in `FileServeService::call` that inspects the request's `If-None-Match` and rewrites the response into a 304 when the inner ETag matches, otherwise injects `Cache-Control`/`ETag`/`Last-Modified` from the resolved file's metadata. The hook lives between `serve_dir.oneshot(req)` and the final `Ok(response.map(Body::new))`.
+- PRD #8 (gzip + Range) is partly free from `ServeDir`'s built-ins: `ServeDir::new(root).precompressed_gzip()` is the canonical toggle. The FileServeLayer constructor will need a `with_precompressed_gzip()` builder method, and tests will need to stage `.gz` companion files. `Range` handling and 206 responses are already implemented by `ServeDir`; the test surface just needs to assert them.
+- One pre-existing unused-import warning in `joltr-core/src/tests.rs:8` (`ParseMethodError`) is unrelated to this PRD; flagging it here so a polish pass can sweep it later.

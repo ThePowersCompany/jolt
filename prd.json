@@ -52,7 +52,7 @@
       "description": "Implement FileServeLayer / FileServeService using tower-http ServeDir/ServeFile. Serve files from a configurable root directory. Map to a route prefix (e.g. /static/*). Return 404 for missing files.",
       "files": ["joltr-core/src/file_serve.rs"],
       "tests": ["joltr-core/tests/file_serve.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "7",
