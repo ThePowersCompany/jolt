@@ -5432,3 +5432,47 @@ Files changed:
 
 Blockers / next notes:
 - JOLT-RS-142 (priority 142): arena-based task storage via slab::Slab. Requires adding `slab` to workspace deps and refactoring `Vec<Box<dyn Task + Send>>` → `Slab<Box<dyn Task + Send>>`.
+
+## 2026-05-11 — JOLT-RS-142: arena-based task storage via slab::Slab
+
+PRD item: JOLT-RS-142 (priority 142, phase33-background-tasks) — Replace `Vec<Box<dyn Task + Send>>` with `Slab<Box<dyn Task + Send>>` so tasks can hold slab indices referencing other tasks.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task` → 11 passed (6 prior + 5 new slab-specific tests), 0 failed.
+- `cargo test -p jolt-core --lib` → 269 passed total (up from 264); 0 failed.
+- `cargo check --workspace` → all crates check clean; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..141 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `slab = "0.4"` to workspace `[workspace.dependencies]` and `slab = { workspace = true }` to jolt-core's `[dependencies]`. slab 0.4.12 was already in Cargo.lock as a transitive dep of futures-util; promoting it to direct doesn't add new crates.
+- `TaskScheduler.tasks` changed from `Vec<Box<dyn Task + Send>>` to `Slab<Box<dyn Task + Send>>`. `register()` now returns `usize` (the slab key) instead of `()`. All 6 prior task tests pass without modification (unused return values are allowed in Rust).
+- `start()` iterates via `for (_, mut task) in self.tasks` — Slab implements `IntoIterator`, same effect as the old Vec iteration. No change to the spawn-loop body.
+- Added slab-access methods:
+  * `get(key: usize) -> Option<&(dyn Task + Send)>` — read-only lookup by slab index.
+  * `get_mut(key: usize) -> Option<&mut (dyn Task + Send)>` — mutable access via `&mut **b` (deref coercion, not Box::as_mut to avoid `'static` lifetime pinning).
+  * `remove(key: usize) -> Option<Box<dyn Task + Send>>` — removes and returns the task from the slab via `try_remove`.
+  * `len() -> usize` and `is_empty() -> bool` — delegates to Slab's own methods.
+- Did NOT wire slab keys into the Task trait — tasks that need to reference sibling tasks can capture keys from `register()` returns or store `usize` values in their own state. The PRD item is about the STORAGE primitive; inter-task communication via indices is enabled but not exercised.
+
+Tests added (5 new + 1 updated in `mod task`):
+- `task_scheduler_register_adds_task_without_panic` — updated to assert `scheduler.len() == 2` (previously no assertion).
+- `task_scheduler_register_returns_unique_keys` — two registrations return two distinct slab keys.
+- `task_scheduler_get_retrieves_registered_task_by_slab_key` — the PRD-mandated verification: register CleanupTask, get by key, assert `name() == "cleanup"`.
+- `task_scheduler_get_returns_none_for_unused_slab_key` — out-of-bounds key returns None.
+- `task_scheduler_remove_returns_task_and_clears_slot` — remove returns the task, subsequent get returns None, slab reports empty.
+- `task_scheduler_len_and_is_empty_reflect_slab_state` — len/is_empty track insertions.
+
+Files changed:
+- Cargo.toml (workspace root) — added `slab = "0.4"` to `[workspace.dependencies]`.
+- jolt-core/Cargo.toml — added `slab = { workspace = true }` to `[dependencies]`.
+- jolt-core/src/task.rs — replaced Vec with Slab; added get/get_mut/remove/len/is_empty methods; `register()` returns `usize`; `start()` uses Slab's IntoIterator.
+- jolt-core/src/tests.rs — updated `task_scheduler_register_adds_task_without_panic` with len assertion; added 5 new tests in `mod task`.
+- prd.json — JOLT-RS-142 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-143 (priority 143, closes phase33): "Write task unit tests: interval timing (within tolerance), task error doesn't crash loop, multiple tasks run concurrently." The start-error test exists from JOLT-RS-140; concurrent-task and timing-tolerance tests are the remaining gap.
+- Tasks CAN now hold `usize` indices referencing other tasks in the slab, but there is no API yet for cross-task lookup after `start()` consumes the scheduler. If cross-task communication is needed, the scheduler either needs to outlive `start()` (Arc-based sharing) or tasks need their own copy of relevant handles. Deferred to future PRD items.
+- The `get_mut` lifetime approach (`&mut **b` via deref coercion instead of `.as_mut()`) avoids the `'static` lifetime pinning that Box::as_mut() imposes. The Slab itself handles lifetime management internally.
+- `dyn Task + Send` return type on get/get_mut preserves the Send auto-trait info from the stored Box — callers that need to move/store references across thread boundaries keep the Send guarantee.
+

@@ -7143,6 +7143,7 @@ mod task {
         let mut scheduler = TaskScheduler::new();
         scheduler.register(CleanupTask);
         scheduler.register(CleanupTask);
+        assert_eq!(scheduler.len(), 2);
     }
 
     #[tokio::test]
@@ -7156,6 +7157,55 @@ mod task {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(count.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn task_scheduler_register_returns_unique_keys() {
+        let mut scheduler = TaskScheduler::new();
+        let key_a = scheduler.register(CleanupTask);
+        let key_b = scheduler.register(CleanupTask);
+        assert_ne!(key_a, key_b, "slab must assign unique keys per insertion");
+    }
+
+    #[test]
+    fn task_scheduler_get_retrieves_registered_task_by_slab_key() {
+        let mut scheduler = TaskScheduler::new();
+        let key = scheduler.register(CleanupTask);
+        let task = scheduler.get(key).expect("task must be retrievable by slab key");
+        assert_eq!(task.name(), "cleanup");
+    }
+
+    #[test]
+    fn task_scheduler_get_returns_none_for_unused_slab_key() {
+        let scheduler = TaskScheduler::new();
+        assert!(scheduler.get(0).is_none());
+        assert!(scheduler.get(999).is_none());
+    }
+
+    #[test]
+    fn task_scheduler_remove_returns_task_and_clears_slot() {
+        let mut scheduler = TaskScheduler::new();
+        let key = scheduler.register(CleanupTask);
+        assert_eq!(scheduler.len(), 1);
+
+        let removed = scheduler.remove(key);
+        assert!(removed.is_some(), "remove must return the task");
+        assert!(scheduler.get(key).is_none(), "slot must be empty after removal");
+        assert!(scheduler.is_empty(), "slab must report empty after removing sole entry");
+    }
+
+    #[test]
+    fn task_scheduler_len_and_is_empty_reflect_slab_state() {
+        let mut scheduler = TaskScheduler::new();
+        assert!(scheduler.is_empty());
+        assert_eq!(scheduler.len(), 0);
+
+        scheduler.register(CleanupTask);
+        assert!(!scheduler.is_empty());
+        assert_eq!(scheduler.len(), 1);
+
+        scheduler.register(CleanupTask);
+        assert_eq!(scheduler.len(), 2);
     }
 
     #[tokio::test]

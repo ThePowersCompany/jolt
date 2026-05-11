@@ -1131,6 +1131,7 @@ dependencies = [
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "slab",
  "tokio",
  "tokio-stream",
  "tower",

@@ -1,3 +1,4 @@
+use slab::Slab;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -51,20 +52,43 @@ pub trait Task {
 }
 
 pub struct TaskScheduler {
-    tasks: Vec<Box<dyn Task + Send>>,
+    tasks: Slab<Box<dyn Task + Send>>,
 }
 
 impl TaskScheduler {
     pub fn new() -> Self {
-        Self { tasks: Vec::new() }
+        Self {
+            tasks: Slab::new(),
+        }
     }
 
-    pub fn register<T: Task + Send + 'static>(&mut self, task: T) {
-        self.tasks.push(Box::new(task));
+    pub fn register<T: Task + Send + 'static>(&mut self, task: T) -> usize {
+        self.tasks.insert(Box::new(task))
+    }
+
+    pub fn get(&self, key: usize) -> Option<&(dyn Task + Send)> {
+        self.tasks.get(key).map(std::convert::AsRef::as_ref)
+    }
+
+    pub fn get_mut(&mut self, key: usize) -> Option<&mut (dyn Task + Send)> {
+        let b: &mut Box<dyn Task + Send> = self.tasks.get_mut(key)?;
+        Some(b.as_mut())
+    }
+
+    pub fn remove(&mut self, key: usize) -> Option<Box<dyn Task + Send>> {
+        self.tasks.try_remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
     }
 
     pub fn start(self) {
-        for mut task in self.tasks {
+        for (_, mut task) in self.tasks {
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = task.run().await {
