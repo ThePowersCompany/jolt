@@ -375,6 +375,34 @@ pub trait WebSocketHandler {
     async fn on_shutdown(&mut self) {}
 }
 
+/// Witness value returned by the `ws!` macro at JOLT-RS-122 (phase29 opener).
+///
+/// The macro emits a block expression that constructs this struct with the
+/// two string-literal arguments (`path`, `subprotocol`) so a downstream
+/// integration test can observe that the macro parsed and expanded
+/// correctly. The two remaining macro arguments (the handler type and the
+/// auth-fn path) don't carry runtime values, so they're type-checked at
+/// compile time inside the same expansion via a `const _: fn() = ...`
+/// trait-bound closure (handler type) and a `let _ = ...;` (auth_fn path).
+///
+/// JOLT-RS-124 will replace this witness with the real WS upgrade-handler
+/// return type (likely an [`axum::Router`] fragment or a registration
+/// helper); the witness exists only to give 122 a typed return value to
+/// land before the upgrade-handler codegen does.
+///
+/// `#[doc(hidden)]` and the `__` prefix mark this as not part of the stable
+/// public API — user code should never reference `__WsMacroWitness` directly.
+#[doc(hidden)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct __WsMacroWitness {
+    /// The path string-literal passed to `ws!` as the first positional
+    /// argument (e.g. `"/chat"`).
+    pub path: &'static str,
+    /// The subprotocol string-literal passed to `ws!` as the
+    /// `subprotocol = "..."` named argument (e.g. `"chat-v1"`).
+    pub subprotocol: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
     //! Phase28 test bundle:

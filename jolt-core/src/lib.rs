@@ -65,9 +65,12 @@ pub use status::StatusCode;
 // JOLT-RS-120 surface: the `WsMessage` variants (Text/Binary/Ping/Pong/Close),
 // the Jolt-owned `CloseFrame`, and the `From<axum::Message> for WsMessage`
 // mapping (plus the inverse) that 124's read/write loops will exercise.
+// JOLT-RS-122 surface: the hidden `__WsMacroWitness` struct that the `ws!`
+// macro's expansion constructs. Not part of the stable API surface; carried
+// only so 122's integration test can verify the macro parsed + expanded.
 // Re-exported at the crate root so user crates `use jolt_core::WebSocketHandler;`
 // without needing to know the internal module layout.
-pub use websocket::{CloseFrame, WebSocketHandler, WebSocketSender, WsMessage, WsSendError};
+pub use websocket::{CloseFrame, WebSocketHandler, WebSocketSender, WsMessage, WsSendError, __WsMacroWitness};
 
 // Re-export `inventory` so the `#[endpoint]` macro can emit
 // `::jolt_core::inventory::submit!` without forcing every user crate to add
@@ -80,7 +83,11 @@ pub use websocket::{CloseFrame, WebSocketHandler, WebSocketSender, WsMessage, Ws
 // `::jolt_core::tower::Service` impls so the user's middleware struct slots
 // into a tower stack without the user crate having to depend on tower itself.
 pub use inventory;
-pub use jolt_macros::{endpoint, AutoMiddleware, PatchQuery};
+// JOLT-RS-122 surface: the `ws!` function-like proc-macro for declaring an
+// axum WebSocket route with a JWT-subprotocol auth gate. Re-exported here so
+// user crates `use jolt_core::ws;` instead of pulling in `jolt-macros`
+// directly.
+pub use jolt_macros::{endpoint, ws, AutoMiddleware, PatchQuery};
 pub use tower;
 
 #[cfg(test)]

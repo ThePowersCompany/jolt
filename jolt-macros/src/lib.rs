@@ -7,6 +7,7 @@ use syn::{parse_macro_input, DeriveInput, ItemFn};
 mod auto_middleware;
 mod endpoint;
 mod patch_query;
+mod ws;
 
 /// `#[endpoint("/path")]` attribute macro.
 ///
@@ -119,6 +120,38 @@ pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
 pub fn patch_query_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     patch_query::expand_patch_query(input).into()
+}
+
+/// `ws!(path, HandlerType, subprotocol = "...", auth_fn = fn_name)` —
+/// function-like proc-macro for declaring an axum WebSocket route with a
+/// JWT-subprotocol auth gate (phase29 entry point).
+///
+/// JOLT-RS-122 (current): parses the four-argument call form (two positional:
+/// path string-literal + handler `Type`; two named: `subprotocol = "..."` +
+/// `auth_fn = fn_name`) via [`ws::WsMacroInput`]'s `Parse` impl, then emits a
+/// block-expression witness that:
+/// 1. compile-time-checks the handler type implements
+///    [`::jolt_core::WebSocketHandler`] via a `const _: fn() = || { ... };`
+///    closure (no runtime call),
+/// 2. type-checks the `auth_fn` path resolves to a value via `let _ = ...;`,
+/// 3. returns a `::jolt_core::__WsMacroWitness { path, subprotocol }` literal
+///    carrying the two string-literal arguments.
+///
+/// Subsequent phase29 items extend this expansion:
+/// - 123: tighten the `auth_fn` check to `fn(&str) -> Result<JwtClaims, _>`
+///   and emit the 401-on-Err branch.
+/// - 124: replace the witness-struct return with the real axum WS upgrade
+///   handler driving the full handler lifecycle through 120's `WsMessage`
+///   variants.
+/// - 125: phase29 closing integration test (full connect / send / receive
+///   roundtrip).
+///
+/// On parse failure the emission is a single `compile_error!` token (no
+/// partial codegen) — mirrors the contract from JOLT-RS-046 / JOLT-RS-110.
+#[proc_macro]
+pub fn ws(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    ws::expand_ws_macro(input2).into()
 }
 
 /// Placeholder attribute macro. Future PRD items will expand this into
