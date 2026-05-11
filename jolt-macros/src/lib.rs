@@ -6,6 +6,7 @@ use syn::{parse_macro_input, DeriveInput, ItemFn};
 
 mod auto_middleware;
 mod endpoint;
+mod patch_query;
 
 /// `#[endpoint("/path")]` attribute macro.
 ///
@@ -88,6 +89,36 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     auto_middleware::expand_auto_middleware(input).into()
+}
+
+/// `#[derive(PatchQuery)]` proc-macro derive — phase26 entry point.
+///
+/// JOLT-RS-110 (current): parses the struct's named fields and their types via
+/// [`patch_query::parse_patch_query_input`], then emits a hidden
+/// `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` const so an integration test can
+/// observe that the derive ran on `Optional<T>`-containing structs.
+///
+/// Subsequent phase26/27 items extend this expansion:
+/// - 111: parse the struct-level `#[patch("table_name")]` attribute. The
+///   `attributes(patch)` opt-in below tells the compiler to treat `#[patch]`
+///   as a helper attribute owned by this derive (without it the compiler
+///   would reject `#[patch("...")]` as an unknown macro at the user's source
+///   site before the derive runs).
+/// - 112: detect `Optional<T>` fields and extract inner `T`.
+/// - 113: build the `Vec<PatchField>` internal representation
+///   (`name`/`column_name`/`is_optional`/`inner_type`).
+/// - 114-116: emit `fn to_patch_query(&self, id_column, id_value) ->
+///   (String, Vec<&dyn ToSql>)` and the `$N`-parameterized SET clause
+///   builder.
+/// - 117: closing-test bundle for phase27.
+///
+/// On parse failure the emission is a single `compile_error!` token — no
+/// partial codegen. Mirrors `#[derive(AutoMiddleware)]`'s contract from
+/// JOLT-RS-046.
+#[proc_macro_derive(PatchQuery, attributes(patch))]
+pub fn patch_query_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    patch_query::expand_patch_query(input).into()
 }
 
 /// Placeholder attribute macro. Future PRD items will expand this into

@@ -1581,7 +1581,7 @@
       "verification": [
         "Derive compiles on a struct with Optional<T> fields."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-111",

@@ -68,7 +68,7 @@ pub use status::StatusCode;
 // `::jolt_core::tower::Service` impls so the user's middleware struct slots
 // into a tower stack without the user crate having to depend on tower itself.
 pub use inventory;
-pub use jolt_macros::{endpoint, AutoMiddleware};
+pub use jolt_macros::{endpoint, AutoMiddleware, PatchQuery};
 pub use tower;
 
 #[cfg(test)]
