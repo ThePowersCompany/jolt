@@ -5628,3 +5628,39 @@ Files changed:
 Blockers / next notes:
 - phase34-task-retry-shutdown is now CLOSED. All 9 items (139–147) are passes: true.
 - JOLT-RS-148 (priority 148, phase35-jwt-utils): "Define JwtClaims struct: sub (Option<String>), exp (Option<u64>), ..." — this is the next PRD item by priority order. Note the current workspace has jolt-utils with a stub `jwt.rs` module, and jolt-core's `auth_jwt.rs` layer already imports `jsonwebtoken` for test-side token minting. 148 is a pure-additive surface — `jolt-utils/src/jwt.rs` carries the typed `JwtClaims`/`JwtConfig` that the auth layer currently inlines from jolt-utils's test module. If the existing `JwtClaims` from the earlier phase's work is already in jolt-utils/src/jwt.rs, 148 may already be partially satisfied by forward-work; need to verify the current state of `jolt-utils/src/jwt.rs`.
+
+## 2026-05-11 — JOLT-RS-148: JwtClaims struct aligned to PRD spec
+
+PRD item: JOLT-RS-148 (priority 148, phase35-jwt-utils) — Redefine JwtClaims struct to match the PRD spec: all standard fields as Options, renamed custom-claims field, added missing fields.
+
+Verification:
+- `cargo check -p jolt-utils` → clean in 1.42s.
+- `cargo test -p jolt-utils` → 6/6 passed (all jwt tests).
+- `cargo test --workspace --lib` → 273 jolt-core + 75 jolt-db + 194 jolt-macros + 36 jolt-templates + 6 jolt-utils = 584 passed; 0 failed.
+- `cargo test --no-run` → all test binaries compile.
+
+Key decisions:
+- Previous `JwtClaims` had `sub: String` (required), `exp: usize` (required), `iat: Option<usize>`, and `extra: JsonMap<String, JsonValue>` (flatten). PRD spec mandates all-Option standard fields, `u64` for timestamp types, `HashMap<String, serde_json::Value>` for custom claims, and the `nbf`/`iss`/`aud` fields. Aligned the struct to match.
+- `sub` → `Option<String>` (was `String`). `#[serde(default, skip_serializing_if = "Option::is_none")]` so absent `sub` deserializes to `None`. Minter side must wrap in `Some(...)`.
+- `exp` → `Option<u64>` (was `usize`). As a Unix timestamp `u64` is more correct (NumericDate is integer seconds, fits in u64).
+- `iat` → `Option<u64>` (was `Option<usize>`). Same rationale.
+- Added `nbf: Option<u64>`, `iss: Option<String>`, `aud: Option<String>` with serde skip-if-none.
+- Renamed `extra: JsonMap<String, JsonValue>` → `custom: HashMap<String, serde_json::Value>` (still `#[serde(flatten)]`). `HashMap` is serde-compatible and matches PRD spec verbatim. `serde_json::Map` is `BTreeMap`-backed; `HashMap` is iterable but unordered. Both serialize to the same JSON map.
+- `now_secs()` helper in tests changed from `-> usize` to `-> u64` (`.as_secs()` already returns `u64`; the `as usize` cast was unnecessary).
+- Updated 5 integration test files (ws_auth_upgrade, ws_integration, ws_macro, ws_pubsub_integration) + lib tests (jolt-core/src/tests.rs) to use the new struct shape: `Some(...)` wraps on sub/exp, `as u64` casts on iat/timestamp expressions, `extra` → `custom` rename, `JsonMap::new()` → `HashMap::new()`, `sub.as_deref()` in assertions, added `nbf: None, iss: None, aud: None` to all struct literals.
+- Did NOT update `jolt-macros/src/ws.rs` doc comments referencing `extra` — those are generated-code strings referencing the old name, but the ws macro generates code that doesn't directly construct JwtClaims (it references the type in handler trait bounds). No compile impact.
+- Module doc comment in jwt.rs updated: decision 4 changed from "required exp+sub" to "all standard fields optional", decision 5 updated `extra` → `custom` references. Imports swapped `JsonMap` for `HashMap`.
+
+Files changed:
+- jolt-utils/src/jwt.rs — struct definition, module docs, imports, all 6 tests.
+- jolt-core/src/tests.rs — 14 edits across auth_jwt, auth_ws_jwt, websocket test modules.
+- jolt-core/tests/ws_auth_upgrade.rs — 2 edits.
+- jolt-core/tests/ws_integration.rs — 2 edits.
+- jolt-core/tests/ws_macro.rs — 2 edits.
+- jolt-core/tests/ws_pubsub_integration.rs — 1 edit.
+- prd.json — JOLT-RS-148 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-149 (priority 149): "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) -> Result<String>." The test helper `sign_hs256` already does this inline via jsonwebtoken::encode; 149 is about surfacing it as a public API. New `Algorithm` enum per PRD (HS256/HS384/HS512), mapping to jsonwebtoken::Algorithm.
+- JOLT-RS-150: decode (already exists as `pub fn decode(...)`, needs updating to handle the new all-Optional claims shape). Current implementation returns `Result<JwtClaims, JwtDecodeError>` — works unmodified since jsonwebtoken's decode deserializes into the target type and Option fields parse correctly. Verification may need additional tests for the new fields (nbf/iss/aud validation).
+- The `ws_macro.rs` generated-code doc comments reference `JwtClaims::extra` in explanatory text — not functional, but worth cleaning up when that file is next touched.

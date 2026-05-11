@@ -4585,6 +4585,7 @@ mod auth_jwt {
     //! Module is named `auth_jwt` so `cargo test -p jolt-core -- tests::auth_jwt`
     //! filters cleanly; matches the established `auth_bearer` / `parse_body` /
     //! `parse_query` naming convention.
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4666,12 +4667,15 @@ mod auth_jwt {
         // parsed JwtClaims lands in extensions and the finished latch is
         // UNTOUCHED on the happy path.
         let secret = b"jolt-rs-072-auth-jwt-test-secret";
-        let exp = now_secs() + 3600;
+        let exp = now_secs() as u64 + 3600;
         let claims = JwtClaims {
-            sub: "alice".to_owned(),
-            exp,
-            iat: Some(now_secs()),
-            extra: serde_json::Map::new(),
+            sub: Some("alice".to_owned()),
+            exp: Some(exp),
+            iat: Some(now_secs() as u64),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4688,7 +4692,7 @@ mod auth_jwt {
             Ok::<Response, Infallible>(
                 Response::builder()
                     .status(StatusCode::OK)
-                    .body(Body::from(sub))
+                    .body(Body::from(sub.expect("sub must be present")))
                     .unwrap(),
             )
         });
@@ -4724,10 +4728,13 @@ mod auth_jwt {
         let secret = b"jolt-rs-072-auth-jwt-test-secret";
         // exp = 1000 → 1970; well in the past.
         let claims = JwtClaims {
-            sub: "alice".to_owned(),
-            exp: 1_000,
+            sub: Some("alice".to_owned()),
+            exp: Some(1_000),
             iat: None,
-            extra: serde_json::Map::new(),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4786,10 +4793,13 @@ mod auth_jwt {
         // is rejected with the dedicated InvalidSignature body so callers
         // see *why* the token was rejected (vs. a generic 401).
         let claims = JwtClaims {
-            sub: "alice".to_owned(),
-            exp: now_secs() + 3600,
+            sub: Some("alice".to_owned()),
+            exp: Some(now_secs() as u64 + 3600),
             iat: None,
-            extra: serde_json::Map::new(),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(b"signed-with-this-secret", &claims);
 
@@ -4908,10 +4918,13 @@ mod auth_jwt {
         let minted_exp = now_secs() + 7200;
         let minted_iat = now_secs();
         let claims = JwtClaims {
-            sub: minted_sub.to_owned(),
-            exp: minted_exp,
-            iat: Some(minted_iat),
-            extra: serde_json::Map::new(),
+            sub: Some(minted_sub.to_owned()),
+            exp: Some(minted_exp as u64),
+            iat: Some(minted_iat as u64),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -4958,16 +4971,18 @@ mod auth_jwt {
             .clone()
             .expect("inner service must have observed the stashed JwtClaims");
         assert_eq!(
-            observed.sub, minted_sub,
+            observed.sub.as_deref(),
+            Some(minted_sub),
             "sub field must round-trip verbatim through the extension key"
         );
         assert_eq!(
-            observed.exp, minted_exp,
+            observed.exp,
+            Some(minted_exp as u64),
             "exp field must round-trip verbatim through the extension key"
         );
         assert_eq!(
             observed.iat,
-            Some(minted_iat),
+            Some(minted_iat as u64),
             "iat field (Option<usize>) must round-trip verbatim, preserving the Some discriminant"
         );
     }
@@ -4990,20 +5005,23 @@ mod auth_jwt {
         // claims must surface those claims via `JwtClaims::extra` on the
         // request-extensions handle used by downstream handlers.
         let secret = b"jolt-rs-074-auth-jwt-custom-claims-secret";
-        let mut minted_extra = serde_json::Map::new();
-        minted_extra.insert(
+        let mut minted_custom = HashMap::new();
+        minted_custom.insert(
             "role".to_owned(),
             serde_json::Value::String("admin".to_owned()),
         );
-        minted_extra.insert(
+        minted_custom.insert(
             "scopes".to_owned(),
             serde_json::json!(["read", "write", "admin"]),
         );
         let claims = JwtClaims {
-            sub: "user-074".to_owned(),
-            exp: now_secs() + 3600,
-            iat: Some(now_secs()),
-            extra: minted_extra,
+            sub: Some("user-074".to_owned()),
+            exp: Some(now_secs() as u64 + 3600),
+            iat: Some(now_secs() as u64),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: minted_custom,
         };
         let token = sign_hs256(secret, &claims);
 
@@ -5050,14 +5068,14 @@ mod auth_jwt {
             .unwrap()
             .clone()
             .expect("inner service must have observed the stashed JwtClaims");
-        assert_eq!(observed.sub, "user-074");
+        assert_eq!(observed.sub.as_deref(), Some("user-074"));
         assert_eq!(
-            observed.extra.get("role"),
+            observed.custom.get("role"),
             Some(&serde_json::Value::String("admin".to_owned())),
             "string-valued custom claim `role` must surface verbatim through extra"
         );
         assert_eq!(
-            observed.extra.get("scopes"),
+            observed.custom.get("scopes"),
             Some(&serde_json::json!(["read", "write", "admin"])),
             "array-valued custom claim `scopes` must surface verbatim through extra"
         );
@@ -5262,6 +5280,7 @@ mod auth_ws_jwt {
     //! `cargo test -p jolt-core -- tests::auth_ws_jwt` filters cleanly to
     //! this slice; matches the established `auth_bearer` / `auth_jwt` /
     //! `auth_websocket` naming convention.
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -5356,10 +5375,13 @@ mod auth_ws_jwt {
         let secret = b"jolt-rs-076-auth-ws-jwt-test-secret";
         // exp = 1000 → 1970; well in the past.
         let claims = JwtClaims {
-            sub: "alice".to_owned(),
-            exp: 1_000,
+            sub: Some("alice".to_owned()),
+            exp: Some(1_000),
             iat: None,
-            extra: serde_json::Map::new(),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -5479,10 +5501,13 @@ mod auth_ws_jwt {
         // layer composes the 075 extractor with the 072 decoder, not just
         // the format check alone.
         let claims = JwtClaims {
-            sub: "alice".to_owned(),
-            exp: now_secs() + 3600,
+            sub: Some("alice".to_owned()),
+            exp: Some(now_secs() as u64 + 3600),
             iat: None,
-            extra: serde_json::Map::new(),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(b"signed-with-this-secret", &claims);
 
@@ -5513,10 +5538,13 @@ mod auth_ws_jwt {
         let secret = b"jolt-rs-076-auth-ws-jwt-test-secret";
         let minted_sub = "user-076-valid";
         let claims = JwtClaims {
-            sub: minted_sub.to_owned(),
-            exp: now_secs() + 3600,
-            iat: Some(now_secs()),
-            extra: serde_json::Map::new(),
+            sub: Some(minted_sub.to_owned()),
+            exp: Some(now_secs() as u64 + 3600),
+            iat: Some(now_secs() as u64),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         };
         let token = sign_hs256(secret, &claims);
 
@@ -5581,7 +5609,8 @@ mod auth_ws_jwt {
             "WsJwtToken in extensions must carry the verbatim token bytes"
         );
         assert_eq!(
-            observed_claims.sub, minted_sub,
+            observed_claims.sub.as_deref(),
+            Some(minted_sub),
             "JwtClaims sub must round-trip through the extension key"
         );
         assert!(
@@ -6403,6 +6432,7 @@ mod websocket {
     //! handler in a driver function that calls it manually, then drives the
     //! async lifecycle.
 
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use crate::{WebSocketHandler, WebSocketSender, WsMessage};
@@ -6487,10 +6517,13 @@ mod websocket {
 
         // 1. set_claims — sync, fires before any async callback.
         handler.set_claims(jolt_utils::jwt::JwtClaims {
-            sub: "test-user".to_owned(),
-            exp: 0,
+            sub: Some("test-user".to_owned()),
+            exp: Some(0),
             iat: None,
-            extra: serde_json::Map::new(),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
         });
         assert!(*claims_set.lock().unwrap(), "set_claims must have fired");
 

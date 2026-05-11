@@ -68,10 +68,13 @@ async fn valid_token_upgrade_succeeds_and_drives_lifecycle() {
     fn test_auth(token: &str) -> Result<JwtClaims, AuthError> {
         if token == "valid-token" {
             Ok(JwtClaims {
-                sub: "user-1".to_owned(),
-                exp: 9999999999,
+                sub: Some("user-1".to_owned()),
+                exp: Some(9999999999),
                 iat: None,
-                extra: Default::default(),
+                nbf: None,
+                iss: None,
+                aud: None,
+                custom: Default::default(),
             })
         } else {
             Err(AuthError::new("nope"))
@@ -141,10 +144,13 @@ async fn invalid_token_is_rejected_with_401() {
     fn my_auth(token: &str) -> Result<JwtClaims, AuthError> {
         if token == "good" {
             Ok(JwtClaims {
-                sub: "u".to_owned(),
-                exp: 9999999999,
+                sub: Some("u".to_owned()),
+                exp: Some(9999999999),
                 iat: None,
-                extra: Default::default(),
+                nbf: None,
+                iss: None,
+                aud: None,
+                custom: Default::default(),
             })
         } else {
             Err(AuthError::new("bad token"))
@@ -204,10 +210,13 @@ async fn missing_subprotocol_header_is_rejected_with_401() {
     fn my_auth(token: &str) -> Result<JwtClaims, AuthError> {
         if token == "good" {
             Ok(JwtClaims {
-                sub: "u".to_owned(),
-                exp: 9999999999,
+                sub: Some("u".to_owned()),
+                exp: Some(9999999999),
                 iat: None,
-                extra: Default::default(),
+                nbf: None,
+                iss: None,
+                aud: None,
+                custom: Default::default(),
             })
         } else {
             Err(AuthError::new("bad"))
@@ -274,10 +283,13 @@ async fn ws_macro_compiles_with_generic_handler_type() {
     fn auth_ok(token: &str) -> Result<JwtClaims, AuthError> {
         if token == "ok" {
             Ok(JwtClaims {
-                sub: "u".to_owned(),
-                exp: 9999999999,
+                sub: Some("u".to_owned()),
+                exp: Some(9999999999),
                 iat: None,
-                extra: Default::default(),
+                nbf: None,
+                iss: None,
+                aud: None,
+                custom: Default::default(),
             })
         } else {
             Err(AuthError::new("no"))

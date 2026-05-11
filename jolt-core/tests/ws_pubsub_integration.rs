@@ -62,13 +62,16 @@ async fn two_clients_client_a_publishes_client_b_receives() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as usize;
+        .as_secs();
 
     let claims = JwtClaims {
-        sub: "user-134".to_owned(),
-        exp: now + 3600,
+        sub: Some("user-134".to_owned()),
+        exp: Some(now + 3600),
         iat: Some(now),
-        extra: Default::default(),
+        nbf: None,
+        iss: None,
+        aud: None,
+        custom: Default::default(),
     };
     let token = encode(
         &Header::new(Algorithm::HS256),

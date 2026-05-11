@@ -20,14 +20,17 @@ async fn ws_connect_with_valid_token_upgrade_succeeds_and_handler_has_claims() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as usize;
+        .as_secs();
 
     let expected_sub = "user-077".to_owned();
     let claims = JwtClaims {
-        sub: expected_sub.clone(),
-        exp: now + 3600,
+        sub: Some(expected_sub.clone()),
+        exp: Some(now + 3600),
         iat: Some(now),
-        extra: Default::default(),
+        nbf: None,
+        iss: None,
+        aud: None,
+        custom: Default::default(),
     };
     let token = encode(
         &Header::new(Algorithm::HS256),
@@ -95,7 +98,7 @@ async fn ws_connect_with_valid_token_upgrade_succeeds_and_handler_has_claims() {
     let stored = stored
         .as_ref()
         .expect("handler.set_claims must have been called");
-    assert_eq!(stored.sub, expected_sub);
+    assert_eq!(stored.sub.as_deref(), Some(expected_sub.as_str()));
     assert_eq!(stored.exp, claims.exp);
     assert!(
         stored.iat.is_some(),
