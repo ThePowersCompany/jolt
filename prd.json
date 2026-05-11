@@ -1511,7 +1511,7 @@
       "verification": [
         "cargo test -p jolt-db -- tests::migration_safety passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-106",

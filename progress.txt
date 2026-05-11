@@ -4490,3 +4490,30 @@ Files changed:
 Blockers / next notes:
 - Phase22-migration-files is now CLOSED. All 4 items (094/095/096/097) are passes: true.
 - Next unfinished item in priority order is JOLT-RS-105 (priority 105, phase24-migration-safety: migration safety tests under `tests::migration_safety`). Covers checksum mismatch error, rollback detection error, and CLI creates correct filename. The existing tests for these (migrate_detects_tampered, migrate_detects_removed, create_migration_file_builds_timestamped_filename, etc.) live at the `mod tests` level and need to be wrapped in `mod migration_safety` per the PRD verification filter. Same structural pattern as 089/093/097.
+
+## 2026-05-11 — JOLT-RS-105: Migration safety tests (wrap JOLT-RS-102/103/104 tests into `mod migration_safety`) — closes phase24
+
+PRD item: JOLT-RS-105 (priority 105, phase24-migration-safety) — Wrap existing migration safety tests (checksum mismatch, rollback detection, CLI) into `mod migration_safety` so `cargo test -p jolt-db -- tests::migration_safety` hits them.
+
+Verification:
+- `cargo test -p jolt-db -- tests::migration_safety` → 14/14 passed (0 failed).
+- `cargo test -p jolt-db --lib` → 75/75 passed (0 failed, unchanged from JOLT-RS-097 baseline).
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as prior entries — npm/Bun-Hono commands don't apply; cargo is the verification tool.
+
+Key decisions:
+- Wrapped JOLT-RS-102 (MigrationError + tamper detection, 5 tests), JOLT-RS-103 (MigrationError::Removed + rollback detection, 3 tests), and JOLT-RS-104 (create_migration_file CLI, 6 tests) into `mod migration_safety { ... }` inside `mod tests`. Same structural pattern as `mod query_helpers`, `mod listen_notify`, `mod migration_files` — co-locate all tests for a phase's API surface under a single submodule to give the PRD-mandated filter a stable target.
+- JOLT-RS-101 tests (partial apply + multi-statement body, 2 tests) stay at the `mod tests` top level — they exercise the apply pipeline, not safety detection, and belong to phase23 not phase24.
+- All 14 tests are unchanged in body — same assertions, same env-gated pattern (`JOLT_TEST_DATABASE_URL`), same compile-time pins. Zero behavioral risk.
+- `mod migration_safety` imports production types via `use crate::{create_migration_file, DbConfig, JoltDb, MigrationError};` (crate-level path) and `use super::TestDir;` (sibling fixture). The `mod tests`-level import of `create_migration_file` was removed (unused warning) since all CLI tests moved into the submodule.
+- TestDir stays at the `mod tests` top level (shared by migration_files, migration_safety, and remaining top-level tests).
+- Python script used for the text transformation to avoid manual reindentation errors across ~700 lines of test code. The wrapping added `mod migration_safety {` + import lines + closing `}` (5 net lines); no test bodies were re-indented.
+
+Files changed:
+- jolt-db/src/lib.rs — added `mod migration_safety { ... }` wrapping JOLT-RS-102/103/104 tests (14 tests total); removed unused `create_migration_file` from `mod tests` imports; JOLT-RS-101 tests remain at top level ordered after `mod migration_safety`.
+- prd.json — JOLT-RS-105 passes: true.
+
+Blockers / next notes:
+- Phase24-migration-safety is now CLOSED. All 5 items (102/103/104/105) are passes: true.
+- Next unfinished item in priority order is JOLT-RS-109 (priority 109, phase25-templates: template tests under `tests::templates`). Similar pattern expected — wrap existing template tests into a submodule.

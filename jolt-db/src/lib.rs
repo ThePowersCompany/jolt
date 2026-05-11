@@ -1755,7 +1755,7 @@ pub fn create_migration_file(
 mod tests {
     use super::{
         DbConfig, JoltDb, MIGRATIONS_TABLE_DDL, MigrationError, MigrationFile, TypedQuery,
-        create_migration_file, read_migration_files, sha256_hex,
+        read_migration_files, sha256_hex,
     };
 
     mod connection {
@@ -3354,6 +3354,10 @@ mod tests {
             .expect("truncate _migrations (teardown)");
     }
 
+    mod migration_safety {
+        use super::TestDir;
+        use crate::{create_migration_file, DbConfig, JoltDb, MigrationError};
+
     // ---- JOLT-RS-102: MigrationError + tamper detection ----
 
     /// PRD-102 mandates the Display output for the tamper variant
@@ -3686,6 +3690,159 @@ mod tests {
             .expect("truncate _migrations (teardown)");
     }
 
+    // ---- JOLT-RS-104: `create_migration_file` (CLI scaffolding) ----
+
+    /// Compile-time pin: `create_migration_file(dir: &str, name: &str,
+    /// now: DateTime<Utc>) -> std::io::Result<PathBuf>` (decisions 49,
+    /// 50). The explicit return annotation catches a regression that
+    /// switches the `now` parameter to `Local`-time, narrows the
+    /// return to `()` (the binary doesn't need the path but the
+    /// library does for JOLT-RS-105's filename test), or wraps the
+    /// return in a foreign error type.
+    #[test]
+    fn create_migration_file_signature_pins() {
+        fn _pin(
+            dir: &str,
+            name: &str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> std::io::Result<std::path::PathBuf> {
+            create_migration_file(dir, name, now)
+        }
+    }
+
+    /// PRD-104 mandated filename shape: `<YYYYMMDDHHMMSS>_<name>.sql`.
+    /// Pins decision 50's `%Y%m%d%H%M%S` UTC format — a regression
+    /// that drops the leading zero on a single-digit month, swaps the
+    /// component order, or formats in local time would produce a
+    /// different filename and fail this assertion.
+    #[test]
+    fn create_migration_file_builds_timestamped_filename() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-name");
+        // The PRD's verification example uses 2026-05-10 12:00:00 UTC.
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path =
+            create_migration_file(dir.path_str(), "add_users", now).expect("create migration");
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("UTF-8 filename");
+        assert_eq!(filename, "20260510120000_add_users.sql");
+        assert_eq!(path.parent(), Some(dir.path.as_path()));
+    }
+
+    /// Decision 51: placeholder body is the single line
+    /// `"-- migration: <name>\n"`. A regression that drops the comment,
+    /// writes an `-- up` / `-- down` template, or omits the trailing
+    /// newline fails this assertion.
+    #[test]
+    fn create_migration_file_writes_placeholder_body() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-body");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path = create_migration_file(dir.path_str(), "add_users", now).expect("create");
+        let body = std::fs::read_to_string(&path).expect("read placeholder body");
+        assert_eq!(body, "-- migration: add_users\n");
+    }
+
+    /// Decision 52: a second call with the same timestamp and name
+    /// returns `ErrorKind::AlreadyExists`, does not overwrite the
+    /// first file. Pins the `OpenOptions::create_new(true)` choice —
+    /// a regression that uses `fs::write` (truncate-and-write) would
+    /// silently overwrite and this test would fail.
+    #[test]
+    fn create_migration_file_errors_on_collision_without_overwriting() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-collision");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let path =
+            create_migration_file(dir.path_str(), "add_users", now).expect("first create");
+        // Mutate the first file's body so we can verify it survives.
+        std::fs::write(&path, "-- operator edits\n").expect("rewrite first body");
+
+        let err = create_migration_file(dir.path_str(), "add_users", now)
+            .expect_err("second create with identical timestamp must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // The first file's body is untouched.
+        let body = std::fs::read_to_string(&path).expect("re-read first body");
+        assert_eq!(body, "-- operator edits\n");
+    }
+
+    /// Decision 53: empty name and names containing path separators
+    /// surface as `ErrorKind::InvalidInput` *before* any filesystem
+    /// touch. A regression that drops the validation would either
+    /// write an unintended file (path-traversal via `../`) or
+    /// fail later with a generic `Os` error.
+    #[test]
+    fn create_migration_file_rejects_invalid_names() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-validate");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+
+        let empty = create_migration_file(dir.path_str(), "", now)
+            .expect_err("empty name should be rejected");
+        assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
+
+        let slash = create_migration_file(dir.path_str(), "../escape", now)
+            .expect_err("forward-slash name should be rejected");
+        assert_eq!(slash.kind(), std::io::ErrorKind::InvalidInput);
+
+        let backslash = create_migration_file(dir.path_str(), "win\\path", now)
+            .expect_err("backslash name should be rejected");
+        assert_eq!(backslash.kind(), std::io::ErrorKind::InvalidInput);
+
+        // No files were created (the validation runs before any
+        // filesystem write). Read the directory back: should be empty.
+        let entries: Vec<_> = std::fs::read_dir(&dir.path)
+            .expect("read dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect entries");
+        assert!(
+            entries.is_empty(),
+            "validation must reject before touching disk; found {entries:?}",
+        );
+    }
+
+    /// `create_migration_file` creates the migrations directory if it
+    /// doesn't yet exist (operator's first `migrate new` against a
+    /// fresh repo). Uses a deliberately not-yet-created subdirectory
+    /// under the test fixture so cleanup still works via TestDir's
+    /// recursive remove.
+    #[test]
+    fn create_migration_file_creates_missing_directory() {
+        use chrono::TimeZone;
+        let dir = TestDir::new("create-mkdir");
+        let nested = dir.path.join("nested").join("migrations");
+        let nested_str = nested.to_str().expect("UTF-8 path");
+        assert!(!nested.exists(), "fixture: nested dir not created yet");
+
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+            .single()
+            .expect("valid UTC datetime");
+        let path =
+            create_migration_file(nested_str, "init", now).expect("should mkdir-p and create");
+        assert!(path.exists());
+        assert_eq!(path.parent(), Some(nested.as_path()));
+    }
+    }
+
     // ---- JOLT-RS-101: migration apply tests (partial apply + multi-statement body) ----
 
     /// PRD-101 mandates: "Write migration apply tests: fresh apply, partial
@@ -3906,155 +4063,4 @@ mod tests {
             .expect("truncate _migrations (teardown)");
     }
 
-    // ---- JOLT-RS-104: `create_migration_file` (CLI scaffolding) ----
-
-    /// Compile-time pin: `create_migration_file(dir: &str, name: &str,
-    /// now: DateTime<Utc>) -> std::io::Result<PathBuf>` (decisions 49,
-    /// 50). The explicit return annotation catches a regression that
-    /// switches the `now` parameter to `Local`-time, narrows the
-    /// return to `()` (the binary doesn't need the path but the
-    /// library does for JOLT-RS-105's filename test), or wraps the
-    /// return in a foreign error type.
-    #[test]
-    fn create_migration_file_signature_pins() {
-        fn _pin(
-            dir: &str,
-            name: &str,
-            now: chrono::DateTime<chrono::Utc>,
-        ) -> std::io::Result<std::path::PathBuf> {
-            create_migration_file(dir, name, now)
-        }
-    }
-
-    /// PRD-104 mandated filename shape: `<YYYYMMDDHHMMSS>_<name>.sql`.
-    /// Pins decision 50's `%Y%m%d%H%M%S` UTC format — a regression
-    /// that drops the leading zero on a single-digit month, swaps the
-    /// component order, or formats in local time would produce a
-    /// different filename and fail this assertion.
-    #[test]
-    fn create_migration_file_builds_timestamped_filename() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-name");
-        // The PRD's verification example uses 2026-05-10 12:00:00 UTC.
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-
-        let path =
-            create_migration_file(dir.path_str(), "add_users", now).expect("create migration");
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("UTF-8 filename");
-        assert_eq!(filename, "20260510120000_add_users.sql");
-        assert_eq!(path.parent(), Some(dir.path.as_path()));
-    }
-
-    /// Decision 51: placeholder body is the single line
-    /// `"-- migration: <name>\n"`. A regression that drops the comment,
-    /// writes an `-- up` / `-- down` template, or omits the trailing
-    /// newline fails this assertion.
-    #[test]
-    fn create_migration_file_writes_placeholder_body() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-body");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-
-        let path = create_migration_file(dir.path_str(), "add_users", now).expect("create");
-        let body = std::fs::read_to_string(&path).expect("read placeholder body");
-        assert_eq!(body, "-- migration: add_users\n");
-    }
-
-    /// Decision 52: a second call with the same timestamp and name
-    /// returns `ErrorKind::AlreadyExists`, does not overwrite the
-    /// first file. Pins the `OpenOptions::create_new(true)` choice —
-    /// a regression that uses `fs::write` (truncate-and-write) would
-    /// silently overwrite and this test would fail.
-    #[test]
-    fn create_migration_file_errors_on_collision_without_overwriting() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-collision");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-
-        let path =
-            create_migration_file(dir.path_str(), "add_users", now).expect("first create");
-        // Mutate the first file's body so we can verify it survives.
-        std::fs::write(&path, "-- operator edits\n").expect("rewrite first body");
-
-        let err = create_migration_file(dir.path_str(), "add_users", now)
-            .expect_err("second create with identical timestamp must fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-
-        // The first file's body is untouched.
-        let body = std::fs::read_to_string(&path).expect("re-read first body");
-        assert_eq!(body, "-- operator edits\n");
-    }
-
-    /// Decision 53: empty name and names containing path separators
-    /// surface as `ErrorKind::InvalidInput` *before* any filesystem
-    /// touch. A regression that drops the validation would either
-    /// write an unintended file (path-traversal via `../`) or
-    /// fail later with a generic `Os` error.
-    #[test]
-    fn create_migration_file_rejects_invalid_names() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-validate");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-
-        let empty = create_migration_file(dir.path_str(), "", now)
-            .expect_err("empty name should be rejected");
-        assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
-
-        let slash = create_migration_file(dir.path_str(), "../escape", now)
-            .expect_err("forward-slash name should be rejected");
-        assert_eq!(slash.kind(), std::io::ErrorKind::InvalidInput);
-
-        let backslash = create_migration_file(dir.path_str(), "win\\path", now)
-            .expect_err("backslash name should be rejected");
-        assert_eq!(backslash.kind(), std::io::ErrorKind::InvalidInput);
-
-        // No files were created (the validation runs before any
-        // filesystem write). Read the directory back: should be empty.
-        let entries: Vec<_> = std::fs::read_dir(&dir.path)
-            .expect("read dir")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect entries");
-        assert!(
-            entries.is_empty(),
-            "validation must reject before touching disk; found {entries:?}",
-        );
-    }
-
-    /// `create_migration_file` creates the migrations directory if it
-    /// doesn't yet exist (operator's first `migrate new` against a
-    /// fresh repo). Uses a deliberately not-yet-created subdirectory
-    /// under the test fixture so cleanup still works via TestDir's
-    /// recursive remove.
-    #[test]
-    fn create_migration_file_creates_missing_directory() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-mkdir");
-        let nested = dir.path.join("nested").join("migrations");
-        let nested_str = nested.to_str().expect("UTF-8 path");
-        assert!(!nested.exists(), "fixture: nested dir not created yet");
-
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-        let path =
-            create_migration_file(nested_str, "init", now).expect("should mkdir-p and create");
-        assert!(path.exists());
-        assert_eq!(path.parent(), Some(nested.as_path()));
-    }
 }
