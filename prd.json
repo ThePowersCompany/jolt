@@ -2450,7 +2450,7 @@
       "verification": [
         "cargo test -p jolt-macros -- tests::tsexport_attributes passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-173",

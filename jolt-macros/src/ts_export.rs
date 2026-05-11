@@ -20,7 +20,8 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Type};
+use syn::punctuated::Punctuated;
+use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Token, Type};
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
 ///
@@ -134,58 +135,60 @@ pub(crate) fn parse_ts_export_input(
     }
 }
 
-/// Extract the TS property name override from field-level `#[ts(rename = "...")]`.
+/// Parsed `#[ts(...)]` field-level attribute values.
 ///
-/// Returns `Some("name_string")` when the field carries `#[ts(rename = "newName")]`,
-/// `None` otherwise (attribute absent, or `#[ts(...)]` with other forms like `flatten`).
-///
-/// Scans all `#[ts(...)]` attributes on the field and returns the first `rename` value
-/// found. If multiple `rename` attributes exist, the first wins (same as Rust's
-/// standard attribute resolution).
-fn parse_ts_rename_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
-    for attr in attrs {
-        if !attr.path().is_ident("ts") {
-            continue;
-        }
-        let meta: Meta = match attr.meta.require_list() {
-            Ok(ok) => ok.parse_args().ok()?,
-            Err(_) => continue,
-        };
-        match meta {
-            Meta::NameValue(nv) if nv.path.is_ident("rename") => {
-                match nv.value {
-                    syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) => {
-                        return Some(s.value());
-                    }
-                    _ => continue,
-                }
-            }
-            _ => continue,
-        }
-    }
-    None
+/// JOLT-RS-172: unified parser replaces the separate `parse_ts_rename_from_attrs`
+/// and `parse_ts_flatten_from_attrs` helpers. The union parser uses
+/// `Punctuated::parse_terminated` to support comma-separated multi-item forms
+/// like `#[ts(flatten, rename = "userId")]` — which the old single-`Meta`
+/// `parse_args()` call rejected.
+struct TsFieldAttrInfo {
+    rename: Option<String>,
+    flatten: bool,
 }
 
-/// Detect the `#[ts(flatten)]` attribute on a field.
+/// Parse all `#[ts(...)]` attributes on a field into a unified [`TsFieldAttrInfo`].
 ///
-/// Returns `true` when the field carries `#[ts(flatten)]`, `false` otherwise
-/// (attribute absent, or `#[ts(...)]` with other forms like `rename`).
+/// Handles both separate attributes (`#[ts(flatten)] #[ts(rename = "x")]`) and
+/// combined attributes (`#[ts(flatten, rename = "x")]`) by parsing comma-separated
+/// `Meta` items within each `#[ts(...)]` group.
 ///
-/// Scans all `#[ts(...)]` attributes on the field and returns `true` if any
-/// `flatten` path is found.
-fn parse_ts_flatten_from_attrs(attrs: &[syn::Attribute]) -> bool {
+/// If multiple `rename` values are found across attributes, the first one wins
+/// (same as Rust's standard attribute resolution). `flatten` is binary: any
+/// `flatten` path sets it to `true`.
+fn parse_ts_field_attrs(attrs: &[syn::Attribute]) -> TsFieldAttrInfo {
+    let mut info = TsFieldAttrInfo {
+        rename: None,
+        flatten: false,
+    };
+
     for attr in attrs {
         if !attr.path().is_ident("ts") {
             continue;
         }
         let Ok(list) = attr.meta.require_list() else { continue };
-        let Some(meta) = list.parse_args().ok() else { continue };
-        match meta {
-            Meta::Path(path) if path.is_ident("flatten") => return true,
-            _ => continue,
+        let Ok(items) = list.parse_args_with(
+            Punctuated::<Meta, Token![,]>::parse_terminated
+        ) else { continue };
+
+        for meta in items {
+            match meta {
+                Meta::Path(path) if path.is_ident("flatten") => {
+                    info.flatten = true;
+                }
+                Meta::NameValue(nv) if nv.path.is_ident("rename") => {
+                    if info.rename.is_none() {
+                        if let syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                            info.rename = Some(s.value());
+                        }
+                    }
+                }
+                _ => continue,
+            }
         }
     }
-    false
+
+    info
 }
 
 /// Extract doc comments from field-level `/// ...` attributes.
@@ -229,15 +232,14 @@ fn parse_struct_fields(
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
                 let ts_type = rust_type_to_ts(&field.ty);
-                let ts_name = parse_ts_rename_from_attrs(&field.attrs);
-                let is_flatten = parse_ts_flatten_from_attrs(&field.attrs);
+                let ts_attr = parse_ts_field_attrs(&field.attrs);
                 let doc = parse_doc_from_attrs(&field.attrs);
                 out.push(TsExportField {
                     name: field_ident,
                     rust_type: field.ty.clone(),
                     ts_type,
-                    ts_name,
-                    is_flatten,
+                    ts_name: ts_attr.rename,
+                    is_flatten: ts_attr.flatten,
                     doc,
                 });
             }
@@ -1011,5 +1013,162 @@ mod tests {
             out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
             "flatten must coexist with doc, got: {out}"
         );
+    }
+
+    // ── JOLT-RS-172: multi-item attribute + combination tests ──
+
+    mod tsexport_attributes {
+        use super::*;
+
+        #[test]
+        fn combined_flatten_and_rename_single_attr() {
+            let input = parse_derive(
+                r#"
+            struct ComboExport {
+                #[ts(flatten, rename = "userId")]
+                id: u32,
+            }
+            "#,
+            );
+            let out = expand_ts_export(input).to_string();
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+                "flatten must be true when combined with rename in single attr, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+                "rename must be Some(\"userId\") when combined with flatten, got: {out}"
+            );
+        }
+
+        #[test]
+        fn combined_flatten_and_rename_reversed_order() {
+            let input = parse_derive(
+                r#"
+            struct ComboReversed {
+                #[ts(rename = "fullName", flatten)]
+                name: String,
+            }
+            "#,
+            );
+            let out = expand_ts_export(input).to_string();
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+                "flatten must be true even when rename comes first, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("fullName")"#),
+                "rename must be Some even when it comes first, got: {out}"
+            );
+        }
+
+        #[test]
+        fn doc_rename_and_flatten_all_three_combo() {
+            let input = parse_derive(
+                r#"
+            struct AllThree {
+                /// The user identifier
+                #[ts(flatten, rename = "userId")]
+                id: u32,
+            }
+            "#,
+            );
+            let out = expand_ts_export(input).to_string();
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("The user identifier")"#),
+                "doc must coexist with flatten+rename combo, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+                "rename must coexist with flatten+doc combo, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+                "flatten must coexist with rename+doc combo, got: {out}"
+            );
+        }
+
+        #[test]
+        fn separate_ts_attrs_still_work() {
+            let input = parse_derive(
+                r#"
+            struct SeparateAttrs {
+                #[ts(flatten)]
+                #[ts(rename = "displayName")]
+                name: String,
+            }
+            "#,
+            );
+            let out = expand_ts_export(input).to_string();
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+                "separate #[ts(flatten)] must still set flatten to true, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("displayName")"#),
+                "separate #[ts(rename)] must still set rename, got: {out}"
+            );
+        }
+
+        #[test]
+        fn mixed_single_and_combo_attr_styles() {
+            let input = parse_derive(
+                r#"
+            struct MixedAttrs {
+                /// Primary key
+                #[ts(flatten, rename = "userId")]
+                id: u32,
+                #[ts(flatten)]
+                #[ts(rename = "fullName")]
+                name: String,
+                /// Email address
+                email: String,
+            }
+            "#,
+            );
+            let out = expand_ts_export(input).to_string();
+
+            // field 0: combo attr with doc
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+                "field 0 (combo attr) must be flatten=true, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+                "field 0 (combo attr) must have rename userId, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("Primary key")"#),
+                "field 0 must have doc, got: {out}"
+            );
+
+            // field 1: separate attrs
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_1") && out.contains("true"),
+                "field 1 (separate attrs) must be flatten=true, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_1") && out.contains(r#"Some ("fullName")"#),
+                "field 1 (separate attrs) must have rename fullName, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_doc_1") && out.contains("None"),
+                "field 1 must have no doc, got: {out}"
+            );
+
+            // field 2: plain field with doc
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_flatten_2") && out.contains("false"),
+                "field 2 (plain) must be flatten=false, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_name_2") && out.contains("None"),
+                "field 2 (plain) must have rename None, got: {out}"
+            );
+            assert!(
+                out.contains("__JOLT_TS_EXPORT_doc_2") && out.contains(r#"Some ("Email address")"#),
+                "field 2 must have doc, got: {out}"
+            );
+        }
     }
 }
