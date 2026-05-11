@@ -6,6 +6,7 @@
 //! error variants); password hashing, UUID helpers, and serde glue land in
 //! subsequent PRD items.
 
+pub mod datetime;
 pub mod jwt;
 pub mod password;
 pub mod uuid;

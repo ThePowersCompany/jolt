@@ -5858,3 +5858,29 @@ Notes for next iterations:
 - The `tests::password_uuid` module intentionally overlaps with inline tests in `password.rs` and `uuid.rs` — the PRD verification command (`cargo test -p jolt-utils -- tests::password_uuid`) is a stable filter that must work independently of whatever lives in the inline modules.
 - JOLT-RS-156 (priority 156, phase37-datetime-email-mime) is the next unfinished PRD item: `parse_rfc3339` + `format_rfc3339`. This requires `chrono` (already a workspace dep with `serde` feature). Likely lives in a new `jolt-utils/src/datetime.rs` with `pub use` re-exports.
 - JOLT-RS-157/158/159 are email validation + MIME table + `content_type_for_path` — all in phase37, requiring a `phf` dep for the static MIME map. Consider feature-gating or adding `phf` to workspace deps proactively when 156 is done.
+
+## 2026-05-11 — JOLT-RS-156: parse_rfc3339 + format_rfc3339
+
+PRD item: JOLT-RS-156 (priority 156, phase37-datetime-email-mime) — Implement parse_rfc3339 and format_rfc3339 using chrono in jolt-utils.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 71 passed (10 new datetime tests + 61 existing); compiled clean.
+- `cargo check --workspace` → all 5 crates check clean; no regressions.
+
+Key decisions:
+- `parse_rfc3339` wraps `DateTime::parse_from_rfc3339` (which returns `DateTime<FixedOffset>`) and converts to UTC via `.with_timezone(&Utc)`. This handles both `Z` suffix and explicit `+00:00`/`-05:00` offsets uniformly.
+- `format_rfc3339` delegates to `chrono::DateTime::to_rfc3339()`, which produces the `+00:00` suffix form (not `Z`). The round-trip tests verify that `+00:00`-formatted output is parseable back to the same instant.
+- Error type is `chrono::ParseError` directly — no wrapper. When a future PRD item needs a crate-level `JoltUtilsError`, migrating parse_rfc3339's return type is a mechanical one-liner. Before that, wrapping would just add indirection without benefit.
+- Tests cover: Z suffix, explicit +00:00, nonzero offset (+05:00), fractional seconds, rejection of invalid formats (missing T separator, garbage), round-trip parse→format→parse, round-trip format→parse→format, and subsecond precision in output.
+- Module file is `jolt-utils/src/datetime.rs`. Did NOT add re-exports at crate root — `jolt_utils::datetime::parse_rfc3339` is already unambiguous, and re-exporting would bloat the root namespace when email/mime join the same crate.
+- Tests are inline `#[cfg(test)] mod tests` in datetime.rs, matching the pattern in uuid.rs and password.rs (JOLT-RS-152/154). The `tests::` top-level module (jwt, password_uuid) doesn't yet have a datetime submodule; that can be added when JOLT-RS-159 calls for `cargo test -p jolt-utils -- tests::datetime_email_mime` or similar.
+
+Files changed:
+- jolt-utils/src/datetime.rs (new) — parse_rfc3339, format_rfc3339, 10 unit tests.
+- jolt-utils/src/lib.rs — added `pub mod datetime;`.
+- prd.json — JOLT-RS-156 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-157 (priority 157): `is_valid_email(s: &str) -> bool`. Likely lives in `jolt-utils/src/email.rs`. Simple validation (contains @, non-empty local/domain, domain contains dot). No extra deps needed.
+- JOLT-RS-158 (priority 158): Define static MIME_TABLE as `phf::Map<&str, &str>`. This requires adding `phf` to workspace dependencies (version 0.11 with `macros` feature). Consider whether to add phf at workspace level (shared across crates) or only in jolt-utils.
+- JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>` — depends on 158's MIME_TABLE. Extract extension, lowercase, lookup.
