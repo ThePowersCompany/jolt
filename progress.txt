@@ -4027,3 +4027,30 @@ Blockers / next notes:
 - **JOLT-RS-027 (server-builder test polish), 032 (endpoint-registry test polish), 045 (endpoint-integration test), 054 (phase11 closing test), 062 (phase13 closing test bundle), 067 (phase14 closing test bundle), 069 (log format customization), 070 (debug body logging), 081 (phase18 closer), 085 (phase19 closing test), 087/089 (phase20), 093 (phase21), 097 (phase22), 105 (phase24), 109 (phase25 closing test).** Same pre-122 polish/standard holdouts.
 - **Public API surface from 122**: one new public function-like proc-macro (`jolt_macros::ws`, re-exported as `jolt_core::ws`). One new public `#[doc(hidden)]` witness struct (`jolt_core::__WsMacroWitness` with `path` + `subprotocol` fields). One new private macro module (`jolt_macros::ws`). The `ws!` macro is callable today and produces a typed value, but the value is a witness — 124 replaces it with the real axum-route surface. User crates that adopt `ws!` at 122 will compile but produce no actual WS routes until 124 lands.
 - **No new workspace deps.** Uses `syn`, `quote`, `proc-macro2` (already declared at the workspace root for `jolt-macros`); the integration test uses `jolt_core` types only.
+
+## 2026-05-10 — JOLT-RS-027: port binding conflict test (closes phase05)
+
+PRD item: JOLT-RS-027 (priority 27, phase05-server-builder) — Write server builder unit tests: defaults, builder chain, port binding conflict handling. Closes phase05.
+
+Verification:
+- `cargo test -p jolt-core --lib -- server` → 11/11 passed (including the new port-conflict test); 0 failed.
+- `cargo test -p jolt-core --lib` → 206 passed; 0 failed.
+- `cargo check --workspace` → clean in 0.23s; no regressions.
+
+Note on harness instructions: same as prior items — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added only the port-binding-conflict test (`start_returns_addr_in_use_when_port_already_bound`). Defaults and builder-chain coverage were already supplied by JOLT-RS-023/024/025/026's test slices — the 10 pre-existing tests in `mod server` cover new() defaults, `.port()`, `.threads()`, `.cors()`, `.endpoint()`, builder chaining, non-clobber invariants, and start/404. 027 is exclusively the missing conflict-path test.
+- Used `std::net::TcpListener` (not `tokio::net`) for the probe bind. `tokio::net::TcpListener` sets `SO_REUSEADDR` before binding on every platform; on macOS, `SO_REUSEADDR` allows two listeners on the exact same address:port (the OS round-robins accepts), so a tokio probe would not reliably trigger the conflict. `std::net::TcpListener` does NOT set `SO_REUSEADDR`, so the JoltServer's internal `tokio::net::TcpListener::bind` fails with `EADDRINUSE` regardless of platform.
+- Bound both probe and server to `0.0.0.0:PORT` (not `127.0.0.1` vs `0.0.0.0`). Identical addresses are required for the bind conflict to surface — different addresses at the same port can coexist on some platforms even without `SO_REUSEADDR`.
+- Test shape: bind `std::net::TcpListener` on `0.0.0.0:0`, capture OS-assigned port, HOLD the probe (don't drop), call `JoltServer::new().port(port).start(Router::new()).await`, assert `Err(io::ErrorKind::AddrInUse)`, then drop the probe.
+- PRD verification command (`cargo test -p jolt-core -- tests::server`) now passes cleanly with 11 tests.
+
+Files changed:
+- jolt-core/src/tests.rs — added `start_returns_addr_in_use_when_port_already_bound` test in `mod server`.
+- prd.json — JOLT-RS-027 passes: true.
+
+Notes for next iterations:
+- phase05-server-builder is now CLOSED. All items (022..027) are passes: true.
+- JOLT-RS-032 (priority 32, endpoint-registry test bundle) is the next phase06 holdout. Same "test sweep" shape: 030+031's coverage (register, sort, build_router) already exists in `mod endpoint_registry`; 032 adds duplicate-path detection, wildcard/path-param extraction, and a verdict on the axum panic-shape for duplicate routes.
+- The `std::net::TcpListener` trick for avoiding `SO_REUSEADDR` on macOS is a reusable pattern. If a future test needs to hold a port with no reuse, use `std::net` — tokio's listener always sets reuse.

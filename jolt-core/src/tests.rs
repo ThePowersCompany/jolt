@@ -2386,6 +2386,36 @@ mod server {
     }
 
     #[tokio::test]
+    async fn start_returns_addr_in_use_when_port_already_bound() {
+        // PRD-mandated verification for JOLT-RS-027: port binding conflict
+        // handling. Bind a std::net::TcpListener (which does NOT set
+        // SO_REUSEADDR) and HOLD it, then call start on the same port. The
+        // bind inside start must fail with `io::ErrorKind::AddrInUse`.
+        //
+        // tokio::net::TcpListener sets SO_REUSEADDR before binding on all
+        // platforms; on macOS this allows two listeners on the same address
+        // (the OS round-robins accepts). Using std::net::TcpListener avoids
+        // that and forces a real bind conflict.
+        use axum::Router;
+        use std::io;
+        use std::net::TcpListener;
+
+        let probe = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+
+        let result = JoltServer::new().port(port).start(Router::new()).await;
+        let err = result.expect_err("start should fail on port already held by probe");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::AddrInUse,
+            "expected AddrInUse, got {:?}",
+            err
+        );
+
+        drop(probe);
+    }
+
+    #[tokio::test]
     async fn start_binds_and_serves_404_on_empty_router() {
         // PRD-mandated verification for JOLT-RS-025 ("server starts, curl
         // localhost:8080 returns 404"), automated via a port-0 probe so the
