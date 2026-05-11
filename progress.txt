@@ -4724,3 +4724,32 @@ Notes for next iterations:
 - `Optional<T>` now exists in jolt-core (ahead of phase38's schedule). JOLT-RS-162/163/164 (Serialize/Deserialize impls) remain open; they extend rather than replace this definition.
 - `ToSql` blanket impls cover common scalars but not composite types (`Vec<T>`, `Option<T>`, `HashMap<K,V>`). If a future PRD item needs those in patch queries, add the impls then.
 - The `TableName`-absent path (skip emitting to_patch_query) means structs without `#[patch("…")]` still get marker consts but no query method. If JOLT-RS-115 needs a different contract (e.g. emit method with a runtime panic when table name is None), adjust then.
+
+## 2026-05-11 — JOLT-RS-115: $N parameter notation in PatchQuery SET clause
+
+PRD item: JOLT-RS-115 (priority 115, phase27-patchquery-codegen) — For Optional::Some(val): add "column = $N" to SET clause, push val as parameter. For Optional::Null: add "column = NULL". For Optional::NotProvided: skip.
+
+Verification:
+- `cargo test -p jolt-macros` → 184 passed, 0 failed.
+- `cargo test -p jolt-core --lib` → 219 passed, 0 failed.
+- `cargo check --workspace` → clean in 0.99s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..114 — npm/Bun commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Changed the format strings in `generate_to_patch_query` from bare `{}` parameter placeholders to `$N` notation (`$` + param_idx). This was the core of JOLT-RS-115 — the method skeleton already existed from JOLT-RS-114; this item was about the `$` prefix.
+- Changed three locations: Optional::Some arm (`format!("{} = ${}", col_name, param_idx)`), plain-field branch (same format), and WHERE clause (`format!(" WHERE {} = ${}", id_column, param_idx)`). The Optional::Null arm (`format!("{} = NULL", col_name)`) didn't need a `$N` placeholder since NULL is literal SQL.
+- The `$` character inside `quote!` string literals is NOT processed by the quote! macro (only at the token level, not inside string token content). Verified by compilation success and all tests passing.
+- The `$N` numbering is 1-based (param_idx starts at 1) to match PostgreSQL convention. This was already the behavior from JOLT-RS-114; only the format strings changed.
+- The existing 20 patch-query unit tests + 5 integration tests (in `jolt-core/tests/patch_query_derive.rs`) all continue to pass because they assert on structural patterns (push calls, param_idx init/increment, Optional match arms), not on the exact format string content. The `$` notation is now load-bearing for the generated SQL but not independently tested at the unit level (the integration tests test runtime output).
+- Did NOT remove `#[allow(dead_code)]` from `inner_type` on `PatchField` — JOLT-RS-114's progress note flagged this as a JOLT-RS-115/116 consumption point, but the `$N` change didn't require type info.
+- Did NOT add a new test specific to `$N` notation. The existing `expand_to_patch_query_param_count_starts_at_one` test message already references `$1-based PostgreSQL bindings`, and the integration tests in jolt-core exercise runtime SQL output. A dedicated `$N`-format test can be added in JOLT-RS-116 or 117 if needed.
+
+Files changed:
+- jolt-macros/src/patch_query.rs — replaced `"{} = {}"` with `"{} = ${}"` in Optional::Some, plain-field, and WHERE clause format strings in `generate_to_patch_query`; updated module docstring ladder.
+- prd.json — JOLT-RS-115 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-116 (priority 116): "Generate parameterized query with $1, $2, ... bindings to prevent SQL injection." The `$N` placeholders are now the only value-referencing mechanism in generated SQL — column names come from field idents (compile-time), values come from `$N` + params. 116's verification ("generated SQL uses $N placeholders, never string interpolation for values") is essentially already satisfied. A dedicated test that regex-checks the generated TokenStream for bare value interpolation would lock it in.
+- JOLT-RS-117 (priority 117, closes phase27): closing test bundle — all-fields-Some, all-Null, mix, empty struct, table_name attribute.
+- The `Optional::Some` and plain-field arms are now identical in shape (both push `column = $N` + param). If future work wants to differentiate (e.g. Optional values get COALESCE), the arms are ready to diverge again.

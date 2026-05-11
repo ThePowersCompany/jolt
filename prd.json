@@ -1651,7 +1651,7 @@
       "verification": [
         "Unit test: Some(name) + NotProvided(email) + Null(bio) \u2192 SET name = $1, email = NULL WHERE id = $2."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-116",

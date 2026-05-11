@@ -15,11 +15,14 @@
 //!   `is_optional`, `inner_type`.
 //!
 //! Phase27 ladder:
-//! - JOLT-RS-114 (this iteration): generate `fn to_patch_query(&self,
+//! - JOLT-RS-114: generate `fn to_patch_query(&self,
 //!   id_column: &str, id_value: &impl ToSql) -> (String, Vec<&dyn ToSql>)`
 //!   that walks each field and builds the SET clause via [`generate_to_patch_query`].
-//! - JOLT-RS-115..116: refine the parameterized query with `$N` bindings
-//!   and `$1, $2, ...` placeholder numbering.
+//! - JOLT-RS-115 (this iteration): emit `$N` parameter notation
+//!   (`column = $1` instead of bare `column = 1`) in both the Optional::Some
+//!   arm and the plain-field branch, and in the WHERE clause.
+//! - JOLT-RS-116: validate the parameterized query uses `$1, $2, ...`
+//!   bindings exclusively (never string-interpolated values).
 //! - JOLT-RS-117: closing test bundle for phase27.
 
 use proc_macro2::TokenStream;
@@ -298,7 +301,7 @@ fn generate_to_patch_query(input: &PatchQueryInput) -> TokenStream {
             field_arms.push(quote! {
                 match &self.#field_ident {
                     ::jolt_core::Optional::Some(val) => {
-                        sets.push(format!("{} = {}", #col_name, param_idx));
+                        sets.push(format!("{} = ${}", #col_name, param_idx));
                         params.push(val);
                         param_idx += 1usize;
                     }
@@ -311,7 +314,7 @@ fn generate_to_patch_query(input: &PatchQueryInput) -> TokenStream {
         } else {
             field_arms.push(quote! {
                 {
-                    sets.push(format!("{} = {}", #col_name, param_idx));
+                    sets.push(format!("{} = ${}", #col_name, param_idx));
                     params.push(&self.#field_ident);
                     param_idx += 1usize;
                 }
@@ -340,7 +343,7 @@ fn generate_to_patch_query(input: &PatchQueryInput) -> TokenStream {
                 );
             }
 
-            let where_clause = format!(" WHERE {} = {}", id_column, param_idx);
+            let where_clause = format!(" WHERE {} = ${}", id_column, param_idx);
             params.push(id_value);
 
             let sql = format!("UPDATE {} SET {}{}", #table_name, sets.join(", "), where_clause);
