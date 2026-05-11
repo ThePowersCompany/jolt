@@ -11,3 +11,4 @@
 //! of whatever live in inline test modules.
 
 mod jwt;
+mod password_uuid;

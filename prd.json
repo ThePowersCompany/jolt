@@ -1728,9 +1728,9 @@
       "priority": 121,
       "phase": "phase28-ws-trait",
       "category": "backend",
-      "description": "Write WS trait unit test: mock WebSocketHandler, simulate open → message → close, verify callbacks fire in order.",
+      "description": "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order.",
       "steps": [
-        "Write WS trait unit test: mock WebSocketHandler, simulate open → message → close, verify callbacks fire in order."
+        "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order."
       ],
       "verification": [
         "cargo test -p jolt-core -- tests::websocket passes."
@@ -1770,9 +1770,9 @@
       "priority": 125,
       "phase": "phase29-ws-macro",
       "category": "backend",
-      "description": "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected.",
+      "description": "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected.",
       "steps": [
-        "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected."
+        "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected."
       ],
       "verification": [
         "cargo test --test ws_integration passes."
@@ -2211,7 +2211,7 @@
       "verification": [
         "cargo test -p jolt-utils -- tests::password_uuid passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-156",

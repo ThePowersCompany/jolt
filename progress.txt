@@ -5828,3 +5828,33 @@ Files changed:
 Blockers / next notes:
 - JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. The 154 implementation already covers UUID validation and uniqueness within the inline tests. 155 should add edge cases: empty strings for parse tests, version byte checks, timestamp monotonicity for v7, and the password hash determinism + verify edge cases. Per the PRD verification, `cargo test -p jolt-utils -- tests::password_uuid` — 155 should either create `src/tests/password_uuid.rs` or add a `mod password_uuid;` to `src/tests.rs` so the filter lands on a real test module.
 - JOLT-RS-156 (priority 156, phase37): opens datetime-email-mime phase — parse_rfc3339 / format_rfc3339 via chrono. chrono is already a workspace dep with serde feature.
+
+## 2026-05-11 — JOLT-RS-155: Password + UUID comprehensive tests (phase36)
+
+PRD item: JOLT-RS-155 (priority 155, phase36-password-uuid) — Write comprehensive tests for password hashing (determinism, edge cases) and UUID generation (uniqueness within 1000 generations).
+
+Verification:
+- `cargo test -p jolt-utils -- tests::password_uuid` → 27 passed, 0 failed.
+- `cargo test -p jolt-utils --lib` → 61 passed total (up from 34 baseline — 27 new), 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.43s; no regressions.
+
+Key decisions:
+- Created `jolt-utils/src/tests/password_uuid.rs` following the established `tests/jwt.rs` pattern (comprehensive, filterable test module separate from inline `#[cfg(test)]` blocks).
+- Password determinism: `different_salts_produce_different_hashes`, `same_salt_same_password_produces_same_hash_in_verify`, `same_salt_different_password_produces_different_hash` — three distinct angles on the determinism contract.
+- Password edge cases: empty password (hash + verify round-trip), 10k-char password, unicode emoji passwords, case sensitivity, hex encoding validation (odd length → error, non-hex chars → error), and display traits for `PasswordError`.
+- Empty hex strings (`""`) do NOT return `Err` — they decode to 0 bytes (even-length empty string), and verify returns `Ok(false)` since 0 bytes never match a 32-byte PBKDF2 output. Tests named `verify_with_empty_hash_hex_returns_false` / `verify_with_empty_salt_hex_returns_false` to match this reality rather than asserting `is_err()`.
+- UUID uniqueness: 1000-generation `HashSet<insert>` tests for both v4 and v7 (already covered in inline `uuid::tests`; repeated here to satisfy the PRD filter target).
+- Additional UUID properties: cross-type uniqueness (500 each v4+v7 → 1000 unique), RFC4122 variant check, standard hyphenation (8-4-4-4-12), lowercase enforcement, format round-trip through `uuid::Uuid::parse_str`.
+- All tests are pure sync (no `#[tokio::test]`); `Password::hash` and UUID generation are CPU-bound, no I/O.
+- Test structs/fixtures: no new fixtures needed — `Password` is a unit struct, UUID functions are free functions; all test data is constructed inline.
+
+Files changed:
+- jolt-utils/src/tests/password_uuid.rs (new) — 27 tests covering determinism, edge cases, and uniqueness.
+- jolt-utils/src/tests.rs — added `mod password_uuid;`.
+- prd.json — JOLT-RS-155 passes: true.
+
+Notes for next iterations:
+- Phase36-password-uuid is now CLOSED. All 4 items (152/153/154/155) are passes: true.
+- The `tests::password_uuid` module intentionally overlaps with inline tests in `password.rs` and `uuid.rs` — the PRD verification command (`cargo test -p jolt-utils -- tests::password_uuid`) is a stable filter that must work independently of whatever lives in the inline modules.
+- JOLT-RS-156 (priority 156, phase37-datetime-email-mime) is the next unfinished PRD item: `parse_rfc3339` + `format_rfc3339`. This requires `chrono` (already a workspace dep with `serde` feature). Likely lives in a new `jolt-utils/src/datetime.rs` with `pub use` re-exports.
+- JOLT-RS-157/158/159 are email validation + MIME table + `content_type_for_path` — all in phase37, requiring a `phf` dep for the static MIME map. Consider feature-gating or adding `phf` to workspace deps proactively when 156 is done.
