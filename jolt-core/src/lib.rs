@@ -46,7 +46,7 @@ pub use auth_websocket::{
 // Re-export jolt-utils JWT types at the jolt-core surface so user crates that
 // consume `AuthJwtLayer` (JOLT-RS-072) don't need a direct `jolt-utils` dep
 // just to build a `JwtConfig` or read a `JwtClaims` from extensions.
-pub use jolt_utils::jwt::{JwtClaims, JwtConfig, JwtDecodeError};
+pub use jolt_utils::jwt::{Algorithm as JwtAlgorithm, JwtClaims, JwtConfig, JwtDecodeError, JwtEncodeError, encode as jwt_encode};
 pub use cookie::Cookie;
 pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};

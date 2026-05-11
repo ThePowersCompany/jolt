@@ -55,10 +55,33 @@
 //!    struct-literal construction pattern while still surfacing every custom
 //!    claim through the typed [`JwtClaims`] extension key.
 
-use jsonwebtoken::{decode as jwt_decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{
+    decode as jwt_decode, encode as jwks_encode, DecodingKey, EncodingKey, Header, Validation,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+
+/// Symmetric signing algorithms supported by the framework. Mirrors
+/// jsonwebtoken's HMAC-SHA variants so the module doc "HS-only" scope is
+/// enforced at the type level. JOLT-RS-149 (encode) and JOLT-RS-150 (decode)
+/// surface this as a public parameter on their convenience functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Algorithm {
+    HS256,
+    HS384,
+    HS512,
+}
+
+impl From<Algorithm> for jsonwebtoken::Algorithm {
+    fn from(a: Algorithm) -> Self {
+        match a {
+            Algorithm::HS256 => jsonwebtoken::Algorithm::HS256,
+            Algorithm::HS384 => jsonwebtoken::Algorithm::HS384,
+            Algorithm::HS512 => jsonwebtoken::Algorithm::HS512,
+        }
+    }
+}
 
 /// Verification-side JWT configuration. Carries the symmetric secret bytes and
 /// the expected algorithm; the same instance is reused across requests by
@@ -73,17 +96,21 @@ pub struct JwtConfig {
     pub secret: Vec<u8>,
     /// Expected algorithm. A token whose header carries a different `alg`
     /// will be rejected with [`JwtDecodeError::InvalidAlgorithm`].
-    pub algorithm: Algorithm,
+    pub algorithm: jsonwebtoken::Algorithm,
 }
 
 impl JwtConfig {
     /// Construct a config from a secret + algorithm. `secret` accepts any
-    /// `Into<Vec<u8>>` (e.g. `&[u8]`, `&str`) so the canonical
-    /// `JwtConfig::new(b"...", Algorithm::HS256)` form just works.
-    pub fn new(secret: impl Into<Vec<u8>>, algorithm: Algorithm) -> Self {
+    /// `Into<Vec<u8>>` (e.g. `&[u8]`, `&str`). `algorithm` accepts our own
+    /// [`Algorithm`] (recommended) or a bare
+    /// [`jsonwebtoken::Algorithm`] for backward compatibility.
+    pub fn new(
+        secret: impl Into<Vec<u8>>,
+        algorithm: impl Into<jsonwebtoken::Algorithm>,
+    ) -> Self {
         Self {
             secret: secret.into(),
-            algorithm,
+            algorithm: algorithm.into(),
         }
     }
 }
@@ -162,6 +189,36 @@ impl std::fmt::Display for JwtDecodeError {
 
 impl std::error::Error for JwtDecodeError {}
 
+/// Error returned by [`encode`] when JWT signing fails. Wraps the underlying
+/// [`jsonwebtoken::errors::Error`]; callers that need detail can inspect the
+/// [`Display`] rendering.
+#[derive(Debug, Clone)]
+pub struct JwtEncodeError(pub String);
+
+impl std::fmt::Display for JwtEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JWT encode failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for JwtEncodeError {}
+
+/// Sign `claims` with `secret` using `algorithm` and return the compact
+/// JWT string (`header.payload.signature`). JOLT-RS-149.
+///
+/// This is the signing-side convenience entrypoint. Callers that need a full
+/// [`JwtConfig`] (e.g. for round-trip encode→decode verification) should
+/// construct a config and call [`decode`] separately.
+pub fn encode(
+    claims: &JwtClaims,
+    secret: &[u8],
+    algorithm: Algorithm,
+) -> Result<String, JwtEncodeError> {
+    let header = Header::new(algorithm.into());
+    jwks_encode(&header, claims, &EncodingKey::from_secret(secret))
+        .map_err(|e| JwtEncodeError(e.to_string()))
+}
+
 /// Validate `token` against `config` and return the parsed [`JwtClaims`] on
 /// success or a typed [`JwtDecodeError`] on failure.
 ///
@@ -228,7 +285,7 @@ mod tests {
 
     fn sign_hs256(secret: &[u8], claims: &JwtClaims) -> String {
         encode(
-            &Header::new(Algorithm::HS256),
+            &Header::new(Algorithm::HS256.into()),
             claims,
             &EncodingKey::from_secret(secret),
         )
@@ -320,7 +377,7 @@ mod tests {
         };
         // Sign with HS384 but configure validation for HS256.
         let token = encode(
-            &Header::new(Algorithm::HS384),
+            &Header::new(Algorithm::HS384.into()),
             &claims,
             &EncodingKey::from_secret(secret),
         )
@@ -388,5 +445,50 @@ mod tests {
             out.custom.get("iat").is_none(),
             "explicit `iat` field must NOT double-up in the flatten target",
         );
+    }
+
+    #[test]
+    fn encode_produces_three_segment_jwt_string() {
+        // PRD-mandated 149 verification: encode() output is a compact JWT
+        // with the canonical header.payload.signature shape, and the same
+        // output round-trips through the existing decode() path.
+        let secret = b"jolt-rs-149-encode-test";
+        let claims = JwtClaims {
+            sub: Some("bob".to_owned()),
+            exp: Some(now_secs() + 3600),
+            iat: Some(now_secs()),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
+        };
+
+        let token = super::encode(&claims, secret, super::Algorithm::HS256)
+            .expect("must encode with HMAC-SHA256");
+
+        let segments: Vec<&str> = token.split('.').collect();
+        assert_eq!(
+            segments.len(),
+            3,
+            "JWT must have three segments (header.payload.signature), got {token}"
+        );
+        assert!(
+            !segments[0].is_empty(),
+            "header segment must be non-empty"
+        );
+        assert!(
+            !segments[1].is_empty(),
+            "payload segment must be non-empty"
+        );
+        assert!(
+            !segments[2].is_empty(),
+            "signature segment must be non-empty"
+        );
+
+        // Round-trip: decode the same token with the same secret+algorithm.
+        let config = JwtConfig::new(secret.to_vec(), jsonwebtoken::Algorithm::HS256);
+        let out = super::decode(&token, &config).expect("encode→decode round-trip must succeed");
+        assert_eq!(out.sub.as_deref(), Some("bob"));
+        assert_eq!(out.exp, claims.exp);
     }
 }

@@ -5660,7 +5660,32 @@ Files changed:
 - jolt-core/tests/ws_pubsub_integration.rs — 1 edit.
 - prd.json — JOLT-RS-148 passes: true.
 
+## 2026-05-11 — JOLT-RS-149: jwt::encode() + Algorithm enum (opens phase35)
+
+PRD item: JOLT-RS-149 (priority 149, phase35-jwt-utils) — Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) → Result<String>. Algorithm enum: HS256, HS384, HS512. Opens phase35.
+
+Verification:
+- `cargo test -p jolt-utils` → 7/7 passed (6 prior + 1 new: `encode_produces_three_segment_jwt_string`), 0 failed.
+- `cargo test --workspace --lib` → 585 passed (584 prior + 1 new), 0 failed.
+- `cargo test -p jolt-core --test ws_auth_upgrade --test ws_macro --test ws_pubsub_integration` → all 7 passed.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Introduced a Jolt-owned `Algorithm` enum (`HS256 | HS384 | HS512`) in `jolt-utils/src/jwt.rs`. Provides `From<Algorithm> for jsonwebtoken::Algorithm` so the encode/decode functions transparently bridge to jsonwebtoken under the hood. Jolt's `Algorithm` is intentionally a simpler surface — just three HMAC-SHA variants matching the module's "HS-only scope" architectural decision.
+- `JwtConfig.algorithm` field type widened to `jsonwebtoken::Algorithm` (from bare `Algorithm` which previously imported jsonwebtoken's). `JwtConfig::new()` now accepts `impl Into<jsonwebtoken::Algorithm>`, meaning both our `Algorithm::HS256` and the raw `jsonwebtoken::Algorithm::HS256` work. This preserves backward compatibility with the ~20+ call sites across jolt-core's test modules that import `jsonwebtoken::Algorithm` directly and pass `Algorithm::HS256` to `JwtConfig::new()`.
+- New `pub fn encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) -> Result<String, JwtEncodeError>`. Uses `jsonwebtoken::encode` internally; the return error wraps the upstream error's Display rendering in a simple `JwtEncodeError(String)` newtype (Display + Error impls). Chose a plain string wrapper over a full error enum because JWT encode failures are uniformly "misconfigured key/algorithm/claims" — unlike decode which needs distinct variants for downstream Layer code to produce correct 401 bodies (expired vs. bad signature vs. malformed).
+- The test module's `sign_hs256` helper continues to use raw `jsonwebtoken::encode` with `jsonwebtoken::Algorithm::HS256` (via `.into()` from our enum). Existing tests are unchanged; `sign_hs256` is test-only and doesn't need to exercise the public API.
+- `encode_produces_three_segment_jwt_string` test asserts (a) three non-empty dot-separated segments, (b) round-trip through the existing `decode()` function.
+- Added re-exports in jolt-core's lib.rs: `JwtAlgorithm` (aliased from our `jolt_utils::jwt::Algorithm` to avoid name conflicts), `JwtEncodeError`, and `jwt_encode` (the encode function). `Algorithm` is aliased because `jolt_core` already has other `Algorithm` collisions downstream.
+
+Files changed:
+- jolt-utils/src/jwt.rs — added `Algorithm` enum + `From<Algorithm> for jsonwebtoken::Algorithm`; widened `JwtConfig.algorithm` to `jsonwebtoken::Algorithm`; made `JwtConfig::new` accept `impl Into<jsonwebtoken::Algorithm>`; added `JwtEncodeError` struct; added `pub fn encode(...)`; added `encode_produces_three_segment_jwt_string` test.
+- jolt-core/src/lib.rs — added `JwtAlgorithm`, `JwtEncodeError`, `jwt_encode` re-exports.
+- prd.json — JOLT-RS-149 passes: true.
+
 Blockers / next notes:
-- JOLT-RS-149 (priority 149): "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) -> Result<String>." The test helper `sign_hs256` already does this inline via jsonwebtoken::encode; 149 is about surfacing it as a public API. New `Algorithm` enum per PRD (HS256/HS384/HS512), mapping to jsonwebtoken::Algorithm.
-- JOLT-RS-150: decode (already exists as `pub fn decode(...)`, needs updating to handle the new all-Optional claims shape). Current implementation returns `Result<JwtClaims, JwtDecodeError>` — works unmodified since jsonwebtoken's decode deserializes into the target type and Option fields parse correctly. Verification may need additional tests for the new fields (nbf/iss/aud validation).
+- JOLT-RS-150 (priority 150): "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) → Result<JwtClaims>." A new convenience decode function mirroring encode's signature. The existing `decode(token, config: &JwtConfig)` function already handles all validation; 150 just wraps it with `JwtConfig::new(secret, algorithm.into())` + the decode call. Minimal effort.
+- JOLT-RS-151 (priority 151, closes phase35): "Write JWT tests: all three algorithms, custom claims, expired token, not-before token, wrong audience, wrong issuer, malformed token, wrong secret." Many already covered by existing tests (expired, wrong secret, malformed, custom claims). New tests needed: HS384/HS512 algorithm variants, nbf validation, iss/aud validation.
 - The `ws_macro.rs` generated-code doc comments reference `JwtClaims::extra` in explanatory text — not functional, but worth cleaning up when that file is next touched.
