@@ -4157,3 +4157,38 @@ Blockers / next notes:
 - JOLT-RS-062 (phase13 closing test bundle) and JOLT-RS-067 (phase14 closing test bundle) are the next phase-closing items.
 - `generate_dispatch_match` still has `#[allow(dead_code)]` and is unused. Deletion deferred from multiple prior iterations; recommend removing in a polish pass.
 - `mod auto_middleware::tests` is now at 82 tests. Recommended split-by-concern (flag in 053's progress notes): `parse_struct_shape` (~8), `classify_field_kind` (~22), `parse_struct_attrs` (~5), `expand_marker_emission` (~8), `expand_layer_codegen` (~9), `chain_construction` (~10), `expand_chain_splicing` (~9), `expand_extraction` (~10+1). Purely organizational.
+
+## 2026-05-10 — JOLT-RS-062: Body parsing unit tests (closes phase13)
+
+PRD item: JOLT-RS-062 (priority 62, phase13-body-parsing) — Write body parsing unit tests: empty body → error, oversized body → error, valid JSON → success, string body → success. Closes phase13.
+
+Verification:
+- `cargo test -p jolt-core -- tests::parse_body` → 8 passed, 0 failed (5 prior + 3 new: empty_body_is_rejected_with_400_and_marks_finished, oversized_body_is_rejected_with_413_and_marks_finished, text_plain_body_is_decoded_and_inserted_into_extensions).
+- `cargo test -p jolt-core --lib` → 212 passed total (up from 209); 0 failed.
+- `cargo check --workspace` → all crates check clean.
+
+Key decisions:
+- Added `max_body_size: usize` field to both `ParseBodyLayer<T>` and `ParseBodyStringLayer` (default `DEFAULT_MAX_BODY_SIZE = 10_485_760` = 10 MiB). Exposed `ParseBodyLayer::max_body_size(self, limit) -> Self` and `ParseBodyStringLayer::max_body_size(self, limit) -> Self` builder methods so tests (and callers) can set a low limit for verification.
+- Refactored `buffer_body()` from `async fn buffer_body(Body) -> Bytes` to `async fn buffer_body(Body, max_size) -> Option<Bytes>`. The `Option` collapse lumps all to_bytes errors (I/O, body-size-limit exceeded) into `None`, but a pre-check on `body.size_hint().lower() > max_body_size` gates oversized bodies early — catching the dominant case (Content-Length header present) without needing to introspect axum's boxed error type. Bodies without Content-Length still hit the cap inside `to_bytes` and surface `None`, which the layer treats as 413 (conservative: assuming bytes lost = oversized, since I/O errors at this point are rare and the safe response on potential oversize is reject).
+- `ParseBodyService::call` and `ParseBodyStringService::call` both check `content_length = body.size_hint().lower()` before buffering. If `content_length > max_body_size`, return `413 Payload Too Large` immediately (no buffer consumed). If buffering returns `None` (error), also return 413. Both paths flip `mark_finished` and never invoke the inner service.
+- Added `bad_request_for_oversized_body(limit, got)` that produces `413 Payload Too Large` with `text/plain` body `"Body exceeds maximum allowed size: {limit} bytes"`. Uses `axum::http::StatusCode::PAYLOAD_TOO_LARGE`. Did NOT add `413` to jolt-core's own `StatusCode` enum — the axum bridge in the response layer handles the `Other(413)` passthrough correctly per JOLT-RS-009/010's comprehensive tests (tested by the oversized-body test which asserts `resp.status() == StatusCode::PAYLOAD_TOO_LARGE` against axum's own constant).
+- Tests live in existing `mod parse_body` (NOT a new module). PRD verification filter `tests::parse_body` captures all 8 now. The `parse_body_string` module remains but is not the PRD-mandated filter target; its tests are for 061's per-implementation verification and will be consolidated or removed in a future refactor pass.
+- Did NOT add `413` variant to jolt-core's `StatusCode` enum (the jolt-core StatusCode uses `Other(413)` via `from_u16`). The axum response path uses `axum::http::StatusCode::PAYLOAD_TOO_LARGE` directly.
+- Did NOT add `max_body_size` to any JoltServer config. The builder methods on each layer allow per-layer limits; server-wide limits are a future concern (likely a JoltServer field).
+- The `size_hint` import required `use axum::body::HttpBody as _;` — axum re-exports `http_body::Body` trait as `axum::body::HttpBody`.
+
+Tests added (3 in `mod parse_body`):
+- `empty_body_is_rejected_with_400_and_marks_finished` — `Body::empty()` → 400 with `"Invalid JSON: ..."` + `mark_finished` flipped. Panicking inner service proves no delegation.
+- `oversized_body_is_rejected_with_413_and_marks_finished` — 33-byte body with `max_body_size(32)` → 413 with `"Body exceeds maximum allowed size: 32 bytes"` + `mark_finished` flipped. Panicking inner service proves no delegation.
+- `text_plain_body_is_decoded_and_inserted_into_extensions` — `ParseBodyStringLayer::new()` decodes `b"hello, jolt"` → `"hello, jolt"` String in extensions.
+
+Files changed:
+- jolt-core/src/parse_body.rs — added `DEFAULT_MAX_BODY_SIZE` constant; added `max_body_size` field + builder method to `ParseBodyLayer`, `ParseBodyStringLayer`; refactored `buffer_body()` to accept `max_size` param and return `Option<Bytes>`; added `bad_request_for_oversized_body()`; updated both `call()` methods with size-hint pre-check + oversized-body 413 short-circuit; updated module docs.
+- jolt-core/src/tests.rs — added 3 new tests in `mod parse_body`.
+- prd.json — JOLT-RS-062 passes: true.
+
+Notes for next iterations:
+- phase13-body-parsing is now CLOSED. All 4 items (059/060/061/062) are passes: true.
+- The `parse_body_string` test module (3 tests) is redundant with the new `text_plain_body_is_decoded_and_inserted_into_extensions` test in `mod parse_body`. Consider consolidating into `mod parse_body` during a test-organization pass — but not now since it would muddy this focused PRD step and risk breaking the `tests::parse_body_string` filter that downstream CI/test scripts might rely on.
+- `max_body_size` is exposed per-layer, not per-server. Future server-builder work (likely JOLT-RS-023 or a new item) should add a server-level `body_limit` config that flows into all layers.
+- The `size_hint().lower()` pre-check works for Content-Length-present bodies but misses chunked transfer encoding where `lower()` is 0. Bodies without Content-Length that exceed the limit fall through to the `buffer_body → None` path and are still rejected with 413 — just without the early short-circuit advantage. Documented via module docs.

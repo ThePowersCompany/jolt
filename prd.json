@@ -909,7 +909,7 @@
       "verification": [
         "cargo test -p jolt-core -- tests::parse_body passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-063",

@@ -3127,6 +3127,129 @@ mod parse_body {
             "the 400 is returned directly from call(), not stashed in RequestExt",
         );
     }
+
+    #[tokio::test]
+    async fn empty_body_is_rejected_with_400_and_marks_finished() {
+        // JOLT-RS-062: empty body → error. An empty body cannot deserialize
+        // into any T (serde_json fails to parse zero bytes as a valid JSON
+        // value for a struct), so ParseBodyLayer must short-circuit with 400.
+        let inner = tower::service_fn(|_: AxumRequest| async move {
+            panic!("ParseBodyService must short-circuit on empty body and never call inner");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let layer = ParseBodyLayer::<TestBody>::new();
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/test")
+            .header("content-type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "empty body must surface 400 Bad Request",
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), u32::MAX as usize)
+            .await
+            .unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("400 body is UTF-8");
+        assert!(
+            body_text.starts_with("Invalid JSON: "),
+            "empty body must produce 'Invalid JSON: ...' text; got {body_text:?}",
+        );
+        assert!(
+            request_ext.is_finished(),
+            "ParseBodyService must flip RequestExt::mark_finished on empty body",
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected_with_413_and_marks_finished() {
+        // JOLT-RS-062: oversized body → error. A body exceeding the
+        // configured max_body_size must short-circuit with 413 Payload Too
+        // Large and flip the finished latch, without invoking the inner svc.
+        let inner = tower::service_fn(|_: AxumRequest| async move {
+            panic!("ParseBodyService must short-circuit on oversized body and never call inner");
+            #[allow(unreachable_code)]
+            Ok::<Response, Infallible>(Response::new(Body::empty()))
+        });
+        let limit: usize = 32;
+        let layer = ParseBodyLayer::<TestBody>::new().max_body_size(limit);
+        let svc = layer.layer(inner);
+
+        let request_ext = Arc::new(RequestExt::new());
+        // Build a body that exceeds the 32-byte limit.
+        let large_payload = b"x".repeat(limit + 1);
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/test")
+            .header("content-type", "application/json")
+            .body(Body::from(large_payload))
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&request_ext));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "oversized body must surface 413 Payload Too Large",
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), u32::MAX as usize)
+            .await
+            .unwrap();
+        let body_text = std::str::from_utf8(&body_bytes).expect("413 body is UTF-8");
+        assert!(
+            body_text.starts_with("Body exceeds maximum allowed size:"),
+            "413 body must state the size limit; got {body_text:?}",
+        );
+        assert!(
+            request_ext.is_finished(),
+            "ParseBodyService must flip RequestExt::mark_finished on oversized body",
+        );
+    }
+
+    #[tokio::test]
+    async fn text_plain_body_is_decoded_and_inserted_into_extensions() {
+        // JOLT-RS-062: string body → success. A text/plain body must be
+        // decoded as UTF-8 String and inserted into request extensions.
+        use crate::ParseBodyStringLayer;
+
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        let inner = tower::service_fn(move |req: AxumRequest| {
+            let captured = Arc::clone(&captured_clone);
+            async move {
+                if let Some(body) = req.extensions().get::<String>() {
+                    *captured.lock().unwrap() = Some(body.clone());
+                }
+                Ok::<Response, Infallible>(Response::new(Body::empty()))
+            }
+        });
+        let layer = ParseBodyStringLayer::new();
+        let svc = layer.layer(inner);
+
+        let payload = b"hello, jolt";
+        let req = AxumRequest::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/text")
+            .body(Body::from(&payload[..]))
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            captured.lock().unwrap().clone(),
+            Some("hello, jolt".to_string()),
+            "text/plain body must be decoded as UTF-8 and land in extensions as String",
+        );
+    }
 }
 
 mod parse_body_string {
