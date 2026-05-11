@@ -5074,3 +5074,35 @@ Blockers / next notes:
 - JOLT-RS-130 tests will need `tokio::task::spawn` for concurrent publishes and possibly `std::thread::spawn` + blocking runtimes for parallel test scenarios. The `try_recv()` sync pattern used here won't work for `Lagged` detection — that requires the channel to overflow capacity (256 default), which means the test needs to publish 257+ messages without consuming them. That's a load-bearing edge case: the current capacity is 256, so the 257th message should produce a `Lagged` on the first subscriber. JOLT-RS-130's agent should check whether the next subscriber gets the full history or just the uncorrupted tail.
 - Multi-channel isolation: `subscribe("a")` + `subscribe("b")` + publish to "a" → only the "a" subscriber receives. Straightforward with the existing API.
 - The `subscribe()` method creates a channel via `or_insert_with` if it doesn't exist, same as `publish()`. This means calling `subscribe("ch")` with no publisher creates an empty channel — the receiver will block on `recv()` or return `TryRecvError::Empty` on `try_recv()`. This is intentional — subscribers should be able to pre-subscribe before any publisher exists. The DashMap entry persists until the channel has zero senders AND zero receivers (broadcast drops when all handles are gone).
+
+## 2026-05-11 — JOLT-RS-130: Comprehensive pubsub tests (multi-channel isolation, late subscriber, concurrent publishes) — closes phase30
+
+PRD item: JOLT-RS-130 (priority 130, phase30-pubsub-core) — Write pubsub unit tests: multi-channel isolation (msg on channel A not received on B), late subscriber (doesn't get old messages), concurrent publishes.
+
+Verification:
+- `cargo test -p jolt-core -- tests::pubsub` → 8/8 passed (5 prior + 3 new), 0 failed, 223 filtered out; finished in 0.00s.
+- `cargo test -p jolt-core --lib` → 231 passed total (up from 228); 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: cargo is the verification tool.
+
+Key decisions:
+- Three new tests added to `mod pubsub` in `tests.rs`:
+  1. `multi_channel_isolation_message_on_a_not_received_on_b` — subscribes to "channel-a" and "channel-b", publishes to "channel-a", asserts `try_recv()` on "a" returns message payload "for-a" and `try_recv()` on "b" is `Err` (Empty). Locks in the per-channel isolation contract: messages on one channel are never delivered to subscribers of another.
+  2. `late_subscriber_does_not_receive_old_messages` — publishes a message, THEN subscribes, asserts `try_recv()` on the late subscriber returns `Err`. Locks in the broadcast channel's "no history" behavior: subscribers only receive messages published after they subscribe. If a future refactor switches from tokio::sync::broadcast to a different channel primtive (e.g. a ring buffer with replay), this test catches the behavioral change.
+  3. `concurrent_publishes_all_delivered` — spawns 10 tokio tasks each publishing one uniquely-named message, awaits all tasks, then drains the receiver and asserts all 10 distinct payloads are present. Uses `#[tokio::test]` (requires tokio runtime for `tokio::task::spawn`). The PubSub is wrapped in `Arc` so all spawned tasks share the same DashMap. This locks in thread-safety: if a future refactor replaces DashMap with a `!Send` / `!Sync` type, the Arc::clone across spawn boundaries fails to compile.
+- All three tests are plain `#[test]` except the concurrent test which uses `#[tokio::test]`. The sync tests continue the existing pattern (5 prior tests were all `#[test]`) — `broadcast::Sender::send()` and `receiver::try_recv()` are synchronous, so async is only needed when spawning tasks.
+- Did NOT add a `Lagged` detection test. The JOLT-RS-129 progress notes flagged the need for a lagged test (publish 257+ messages without consuming, verify `TryRecvError::Lagged`). This was deferred because: (a) the PRD verification only asks for multi-channel isolation, late subscriber, and concurrent publishes — not lagged handling; (b) the broadcast capacity is 256, so testing lag requires either lowering the capacity (exposing a config parameter that doesn't exist yet) or publishing 257+ messages, which doubles test time for an edge case JOLT-RS-132 (WS forward task `Lagged` handling) is explicitly assigned to cover. Adding lagged coverage speculatively here would steal scope from 132.
+- Did NOT add `send_timeout` or any async-receive tests. The `try_recv()` sync path already covers the delivery contract; async `recv()` is structurally identical.
+- The `received.contains(&expected)` assertion in the concurrent test tolerates out-of-order delivery — `tokio::sync::broadcast` deliveries are causally ordered per-sender but concurrent sends from different tasks may interleave. The assertion checks for presence, not position, matching the real-world semantic of "all messages were delivered."
+
+Files changed:
+- jolt-core/src/tests.rs — added `multi_channel_isolation_message_on_a_not_received_on_b`, `late_subscriber_does_not_receive_old_messages`, `concurrent_publishes_all_delivered` to `mod pubsub`.
+- prd.json — JOLT-RS-130 passes: true.
+
+Blockers / next notes:
+- **phase30-pubsub-core is now CLOSED.** All five items (126/127/128/129/130) are passes: true. Publish and subscribe are fully implemented and comprehensively tested.
+- JOLT-RS-131 (priority 131, phase31-ws-pubsub-integration): "In WebSocketHandler::on_open, provide ws.subscribe(channel) that calls PubSub::subscribe and spawns a tokio task to forward messages to WS sender." This requires the `PubSub` to be accessible from within the `ws!` macro expansion. The natural integration point: add a `pubsub: Arc<PubSub>` field to `JoltServer`, pass it through server state into the WS upgrade handler, and expose a `ws.subscribe(channel)` convenience in the `WebSocketHandler` trait (or as a free function that the generated handler closure captures).
+- JOLT-RS-132 (priority 132): "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue." This is where `Lagged` handling belongs — not here. The forward task is essentially `tokio::spawn(async move { while let Ok(msg) = rx.recv().await { sender.send_text(&msg.payload).ok(); } })` with a match on `RecvError::Lagged(n)` that emits a `tracing::warn!` and continues.
+- The `Arc<PubSub>` inside `JoltServer` design has implications: DashMap is already `Send + Sync`, so `Arc<PubSub>` sharing across WS connections is cheap. The `PubSub::publish` and `PubSub::subscribe` methods are all `&self`, compatible with `Arc` sharing.
+- Concurrent test uses 10 tasks — deliberately fewer than the broadcast capacity (256) so no lag can occur. If the number is raised to test stress, bump the capacity or add a per-test capacity override.

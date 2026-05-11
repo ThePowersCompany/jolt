@@ -6733,4 +6733,77 @@ mod pubsub {
         drop(rx);
         assert_eq!(ps.publish("test", msg), 0);
     }
+
+    #[test]
+    fn multi_channel_isolation_message_on_a_not_received_on_b() {
+        let ps = PubSub::new();
+        let mut rx_a = ps.subscribe("channel-a");
+        let mut rx_b = ps.subscribe("channel-b");
+        let msg = PubSubMessage {
+            channel: "channel-a".into(),
+            payload: "for-a".into(),
+            sender_id: None,
+        };
+        ps.publish("channel-a", msg);
+        let received = rx_a
+            .try_recv()
+            .expect("subscriber on channel-a should receive the message");
+        assert_eq!(received.payload, "for-a");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "subscriber on channel-b must not receive channel-a messages"
+        );
+    }
+
+    #[test]
+    fn late_subscriber_does_not_receive_old_messages() {
+        let ps = PubSub::new();
+        let msg = PubSubMessage {
+            channel: "test".into(),
+            payload: "before-sub".into(),
+            sender_id: None,
+        };
+        ps.publish("test", msg);
+        let mut rx = ps.subscribe("test");
+        assert!(
+            rx.try_recv().is_err(),
+            "late subscriber must not receive messages published before subscribe"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_publishes_all_delivered() {
+        use std::sync::Arc;
+        let ps = Arc::new(PubSub::new());
+        let mut rx = ps.subscribe("concurrent");
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let ps = Arc::clone(&ps);
+            handles.push(tokio::task::spawn(async move {
+                let msg = PubSubMessage {
+                    channel: "concurrent".into(),
+                    payload: format!("msg-{}", i),
+                    sender_id: None,
+                };
+                ps.publish("concurrent", msg);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let mut received = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg.payload);
+        }
+        assert_eq!(received.len(), 10, "all 10 concurrent publishes must be delivered");
+        for i in 0..10 {
+            let expected = format!("msg-{}", i);
+            assert!(
+                received.contains(&expected),
+                "message '{expected}' missing from received set"
+            );
+        }
+    }
 }
