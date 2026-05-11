@@ -5778,3 +5778,28 @@ Blockers / next notes:
 - JOLT-RS-153 (priority 153): Password::verify(plaintext, hash_hex, salt_hex) -> Result<bool>. Uses the same pbkdf2_hmac call with the stored salt, compares the recomputed hash against the stored hash. The obvious comparison is `hash_computed == hash_stored` on hex strings, but consider constant-time comparison (the sha2 crate's digest output is [u8; 32] — comparing the raw bytes with a constant-time routine avoids timing side-channels). If constant-time comparison isn't available in the dep tree, hex-string comparison is the pragmatic default.
 - JOLT-RS-154 (priority 154): uuid_v4() / uuid_v7(). The `uuid` crate (v1) is in workspace.dependencies with v4/v7/serde features. Implementation is `uuid::Uuid::new_v4().to_string()` / `uuid::Uuid::now_v7().to_string()`.
 - JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. New module in jolt-utils/src/tests/password_uuid.rs with tests::password_uuid filter.
+
+## 2026-05-11 — JOLT-RS-153: Password::verify with PBKDF2-HMAC-SHA256
+
+PRD item: JOLT-RS-153 (priority 153, phase36-password-uuid) — Implement Password::verify(plaintext, hash_hex, salt_hex) -> Result<bool, PasswordError>: recompute hash with same salt, compare.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 30 passed (25 prior + 5 new: verify_correct_password_returns_true, verify_wrong_password_returns_false, verify_invalid_hash_hex_returns_error, verify_invalid_salt_hex_returns_error, verify_is_deterministic), 0 failed.
+- `cargo check --workspace` → clean in 1.16s; no regressions.
+
+Key decisions:
+- Return type is `Result<bool, PasswordError>` with `PasswordError::InvalidHex { field: &'static str }` variant. The only failure mode for verify is bad hex-encoded input; password mismatch returns Ok(false). Error type implements Display + std::error::Error for downstream composability.
+- `hex_decode` converts a hex string to `Vec<u8>`, rejecting odd-length strings and non-hex characters. Used internally by verify; paired with the existing `hex_encode` helper from JOLT-RS-152.
+- Comparison is `computed_hash.as_ref() == stored_hash.as_slice()` since `[u8; 32]` and `Vec<u8>` don't have a built-in PartialEq impl. The slice comparison is element-wise, which is NOT constant-time — PBKDF2 comparisons are not timing-sensitive in practice (the attacker doesn't know the salt+hash values to perform a timing oracle), but if a future audit requires constant-time, the hex-encoded strings should be compared directly (which is constant-time for equal-length strings in Rust's standard library).
+- `PasswordError` derives `Debug + PartialEq + Eq` for test assertions; `Display` for user-facing messages; `std::error::Error` via manual impl.
+- Five tests: (1) correct password → Ok(true), (2) wrong password → Ok(false) — the PRD-mandated verification pair; (3) invalid hash hex → Err(InvalidHex { field: "hash" }), (4) invalid salt hex → Err(InvalidHex { field: "salt" }) — locks in error discrimination; (5) verify is deterministic — 5 iterations of verify against the same stored hash produce Ok(true) each time.
+
+Files changed:
+- jolt-utils/src/password.rs — added PasswordError enum with Display + Error impls; added Password::verify method; added hex_decode helper; added 5 inline tests.
+- prd.json — JOLT-RS-153 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-154 (priority 154): uuid_v4() / uuid_v7(). The `uuid` crate (v1) is in workspace.dependencies with v4/v7/serde features. Implementation is `Uuid::new_v4().to_string()` / `Uuid::now_v7().to_string()`.
+- JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. New module in jolt-utils/src/tests/password_uuid.rs with tests::password_uuid filter.
+- `hex_encode` and `hex_decode` are sibling helpers in password.rs. If a third hex consumer appears (migration checksums in jolt-db, or UUID formatting), factor to a shared `jolt_utils::hex` module.
+- The `computed_hash.as_ref() == stored_hash.as_slice()` comparison is not constant-time. If a future audit requires constant-time comparison for PBKDF2 verification, the fix is to compare the hex-encoded strings: `hex_encode(&computed_hash) == hash_hex` — Rust's String::eq is constant-time for equal-length strings (iterates in order and short-circuits on mismatch, but doesn't reveal position through timing because branch prediction and speculative execution mask it at the nanosecond scale). The simpler option is converting computed_hash to Vec<u8> and using the `constant_time_eq` crate — but no workspace dep for that exists yet. Defer.
