@@ -114,11 +114,19 @@ impl HttpMethod {
 /// `sig.inputs` (first arg must be `&self`) and `sig.output` (must be
 /// `Response<T>` or `Result<Response<T>, E>`); JOLTR-RS-041 will read
 /// `sig.ident` and `http_method` to emit the dispatch match arm.
+///
+/// `error_handler` captures the optional `#[error_handler(path)]` magic-marker
+/// attribute attached to a method (PRD #10). When present, the wrapper's
+/// `Err(E)` branch routes the error through `path(err)` instead of the
+/// default `JoltRError::to_response(&err)` bridge. The attribute is only
+/// meaningful on methods that return `Result<Response<T>, E>` — using it on a
+/// bare `Response<T>` handler is rejected at validation time.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields are read by tests this iteration; JOLTR-RS-040/041 read them in codegen.
 pub(crate) struct DiscoveredMethod {
     pub(crate) http_method: HttpMethod,
     pub(crate) sig: Signature,
+    pub(crate) error_handler: Option<syn::Path>,
 }
 
 /// Walk `item.items`, find each `ImplItem::Fn` whose attribute list contains
@@ -142,26 +150,71 @@ pub(crate) fn scan_methods(item: &ItemImpl) -> syn::Result<Vec<DiscoveredMethod>
             continue;
         };
         let mut matched: Option<HttpMethod> = None;
+        let mut error_handler: Option<syn::Path> = None;
         for attr in &method_fn.attrs {
-            let Some(verb) = verb_from_attr(attr) else {
+            if let Some(verb) = verb_from_attr(attr) {
+                if matched.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "method has more than one HTTP verb attribute (use only one of #[get], #[post], #[put], #[patch], #[delete])",
+                    ));
+                }
+                matched = Some(verb);
                 continue;
-            };
-            if matched.is_some() {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "method has more than one HTTP verb attribute (use only one of #[get], #[post], #[put], #[patch], #[delete])",
-                ));
             }
-            matched = Some(verb);
+            if let Some(path) = parse_error_handler_attr(attr)? {
+                if error_handler.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "method has more than one #[error_handler(...)] attribute",
+                    ));
+                }
+                error_handler = Some(path);
+            }
         }
         if let Some(http_method) = matched {
             discovered.push(DiscoveredMethod {
                 http_method,
                 sig: method_fn.sig.clone(),
+                error_handler,
             });
         }
     }
     Ok(discovered)
+}
+
+/// Recognize `#[error_handler(fn_path)]` on a method and parse the inner path.
+///
+/// PRD #10 (default error handler): a method tagged `#[error_handler(my_fn)]`
+/// routes its `Err(E)` branch through `my_fn(err)` instead of the default
+/// `JoltRError::to_response(&err)` conversion. The attribute path must be a
+/// bare identifier `error_handler` (path-style `#[crate::error_handler(...)]`
+/// is not matched, mirroring the narrow surface used by verb markers); the
+/// argument list must parse as a `syn::Path` (`my_handler`, `crate::errors::map`,
+/// etc.).
+///
+/// Returns `Ok(None)` when the attribute is not an `error_handler` marker at
+/// all. Returns `Err(...)` when the marker is present but malformed (empty
+/// args, multiple args, non-path tokens) so the user gets a span-pointed
+/// diagnostic.
+fn parse_error_handler_attr(attr: &Attribute) -> syn::Result<Option<syn::Path>> {
+    let Some(ident) = attr.path().get_ident() else {
+        return Ok(None);
+    };
+    if ident != "error_handler" {
+        return Ok(None);
+    }
+    let path: syn::Path = attr.parse_args().map_err(|e| {
+        syn::Error::new(
+            e.span(),
+            "#[error_handler(...)] argument must be a function path (e.g. `#[error_handler(my_handler)]`)",
+        )
+    })?;
+    Ok(Some(path))
+}
+
+fn is_error_handler_attr(attr: &Attribute) -> bool {
+    attr.path().get_ident().is_some_and(|i| i == "error_handler")
 }
 
 /// Extract the verb from a single attribute, if it is one of the recognized
@@ -185,14 +238,37 @@ fn verb_from_attr(attr: &Attribute) -> Option<HttpMethod> {
 /// a time rather than a cascade — `compile_error!` already handles cascades
 /// poorly). If all signatures validate, returns `Ok(())`.
 ///
-/// JOLTR-RS-041 will call this between `scan_methods` and codegen so the
-/// dispatch match-arm emission can assume every signature is well-formed.
+/// PRD #10 layers an additional cross-attribute check on top of the
+/// per-signature validation: a method tagged `#[error_handler(fn)]` MUST
+/// return `Result<Response<T>, E>`. A bare `Response<T>` handler cannot fail
+/// at the type level, so an error_handler attribute on one is unreachable
+/// glue and the macro rejects it loudly rather than silently emit dead code.
 #[allow(dead_code)] // tests consume it; lib.rs wires it in once JOLTR-RS-041 lands.
 pub(crate) fn validate_methods(methods: &[DiscoveredMethod]) -> syn::Result<()> {
     for method in methods {
-        validate_signature(&method.sig)?;
+        let kind = validate_signature(&method.sig)?;
+        if method.error_handler.is_some() && !matches!(kind, ReturnKind::ResultResponse) {
+            return Err(syn::Error::new_spanned(
+                method.error_handler.as_ref().unwrap(),
+                "#[error_handler(...)] is only valid on methods returning `Result<Response<T>, E>` (a bare `Response<T>` handler has no error branch)",
+            ));
+        }
     }
     Ok(())
+}
+
+/// Shape of an endpoint method's return type, as classified by
+/// [`validate_return_type`]. Threaded through to the wrapper codegen so the
+/// `Result` path can emit the `Err` branch's `JoltRError::to_response` bridge
+/// (PRD #10) without re-scanning the signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReturnKind {
+    /// `fn(&self) -> Response<T>` — no error branch.
+    Response,
+    /// `fn(&self) -> Result<Response<T>, E>` — `E` is expected to implement
+    /// [`::joltr_core::JoltRError`] (default handler) OR be accepted by the
+    /// user's `#[error_handler(fn)]` function.
+    ResultResponse,
 }
 
 /// Validate a single handler signature.
@@ -215,10 +291,9 @@ pub(crate) fn validate_methods(methods: &[DiscoveredMethod]) -> syn::Result<()> 
 /// On failure the [`syn::Error`] carries a span pointing at the offending arg
 /// or return-type token, so `compile_error!` underlines the right code.
 #[allow(dead_code)] // tests consume it; lib.rs wires it in once JOLTR-RS-041 lands.
-pub(crate) fn validate_signature(sig: &Signature) -> syn::Result<()> {
+pub(crate) fn validate_signature(sig: &Signature) -> syn::Result<ReturnKind> {
     validate_receiver(sig)?;
-    validate_return_type(&sig.output)?;
-    Ok(())
+    validate_return_type(&sig.output)
 }
 
 fn validate_receiver(sig: &Signature) -> syn::Result<()> {
@@ -260,7 +335,7 @@ fn validate_receiver(sig: &Signature) -> syn::Result<()> {
     Ok(())
 }
 
-fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
+fn validate_return_type(output: &ReturnType) -> syn::Result<ReturnKind> {
     let ty = match output {
         ReturnType::Default => {
             return Err(syn::Error::new_spanned(
@@ -278,7 +353,7 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
     };
     let name = last.ident.to_string();
     match name.as_str() {
-        "Response" => Ok(()),
+        "Response" => Ok(ReturnKind::Response),
         "Result" => {
             let PathArguments::AngleBracketed(args) = &last.arguments else {
                 return Err(syn::Error::new_spanned(
@@ -299,7 +374,7 @@ fn validate_return_type(output: &ReturnType) -> syn::Result<()> {
                 ));
             };
             if inner_seg.ident == "Response" {
-                Ok(())
+                Ok(ReturnKind::ResultResponse)
             } else {
                 Err(syn::Error::new_spanned(
                     inner,
@@ -327,13 +402,15 @@ fn last_path_segment(ty: &Type) -> Option<&syn::PathSegment> {
 }
 
 /// Strip the magic-marker verb attributes (`#[get]`, `#[post]`, `#[put]`,
-/// `#[patch]`, `#[delete]`) from every `ImplItem::Fn` in `item`. Called from
-/// the proc-macro entry point before re-emitting the impl block: rustc would
-/// otherwise error with "cannot find attribute `get` in this scope" because
-/// the verb attributes are recognized only by `#[endpoint]`'s scanner — they
-/// are not registered as their own proc-macros (see 039's progress notes).
+/// `#[patch]`, `#[delete]`) and the `#[error_handler(...)]` marker from every
+/// `ImplItem::Fn` in `item`. Called from the proc-macro entry point before
+/// re-emitting the impl block: rustc would otherwise error with "cannot find
+/// attribute `get` in this scope" because these markers are recognized only
+/// by `#[endpoint]`'s scanner — they are not registered as their own
+/// proc-macros (see 039's progress notes). PRD #10 added `#[error_handler]` to
+/// the strip-set on the same rationale.
 ///
-/// Non-fn impl items (consts, types) are untouched. Non-verb attributes
+/// Non-fn impl items (consts, types) are untouched. Non-marker attributes
 /// (`#[inline]`, `#[doc]`, ...) on methods are preserved.
 pub(crate) fn strip_verb_attrs(item: &mut ItemImpl) {
     for impl_item in &mut item.items {
@@ -342,7 +419,7 @@ pub(crate) fn strip_verb_attrs(item: &mut ItemImpl) {
         };
         method_fn
             .attrs
-            .retain(|attr| verb_from_attr(attr).is_none());
+            .retain(|attr| verb_from_attr(attr).is_none() && !is_error_handler_attr(attr));
     }
 }
 
@@ -449,14 +526,14 @@ fn generate_handler_wrappers(
     let wrappers = methods.iter().map(|m| {
         let user_fn = &m.sig.ident;
         let wrapper_name = format_ident!("__jolt_handler_{}", user_fn);
+        let invoke_and_bridge = generate_wrapper_dispatch(m);
         quote! {
             #[doc(hidden)]
             pub fn #wrapper_name(__req: ::joltr_core::Request) -> ::joltr_core::EndpointFuture {
                 ::std::boxed::Box::pin(async move {
                     let _ = __req;
                     let __endpoint: Self = <Self as ::core::default::Default>::default();
-                    let __result = Self::#user_fn(&__endpoint);
-                    <_ as ::axum::response::IntoResponse>::into_response(__result)
+                    #invoke_and_bridge
                 })
             }
         }
@@ -465,6 +542,82 @@ fn generate_handler_wrappers(
         #[automatically_derived]
         impl #self_ty {
             #(#wrappers)*
+        }
+    }
+}
+
+/// Emit the per-method "call + bridge to `axum::response::Response`" body
+/// spliced into [`generate_handler_wrappers`]'s `Box::pin(async move { ... })`.
+///
+/// Two shapes, picked by re-inspecting `sig.output` rather than threading
+/// [`ReturnKind`] through `DiscoveredMethod` (the data is cheaply re-derivable
+/// and keeping the struct shallow avoids a parallel-state-update hazard if
+/// future PRDs change the validation pass):
+///
+/// 1. **`Response<T>`** — no error branch is reachable from the type, so the
+///    body collapses to the original 043 emit: a single
+///    `IntoResponse::into_response(__result)` call. Axum's `Response<T>:
+///    IntoResponse` impl (joltr-core/src/response.rs) does the conversion.
+///
+/// 2. **`Result<Response<T>, E>`** — the body splits on `Ok`/`Err`. The `Ok`
+///    arm reuses path 1. The `Err` arm has two sub-shapes:
+///
+///    - **No `#[error_handler]`** (PRD #10 default): emit
+///      `<_ as ::joltr_core::JoltRError>::to_response(&__err)` which produces
+///      a `Response<ErrorBody>`. That then bridges through `IntoResponse` to
+///      `axum::response::Response`. The implicit `E: JoltRError` bound is
+///      checked by rustc on the generated code — a missing impl shows up as a
+///      "trait bound not satisfied" diagnostic at the wrapper site, mirroring
+///      the way 043 handled missing `Default` impls.
+///    - **`#[error_handler(my_fn)]`** (PRD #10 escape hatch): emit `my_fn(__err)`
+///      to let the user customize the response (different body shape, attached
+///      headers, redirects, etc.). The macro requires `my_fn` to accept `E`
+///      by value (consumes the error — matches Rust's natural `match` arm
+///      ownership) and to return something implementing `IntoResponse`. Any
+///      other shape produces a rustc diagnostic on the call site rather than
+///      a macro-time error, because the macro can't introspect the user fn's
+///      signature.
+///
+/// All conversions route through axum's `IntoResponse` trait so the same set
+/// of bridges (`Response<T> -> axum::response::Response` impls in
+/// joltr-core/src/response.rs) backs both arms — no fork in the conversion
+/// codepath, no second blanket `From<E: JoltRError>` impl required (which
+/// would conflict with axum's own blanket impls — flagged in PRD #9's
+/// progress notes as the reason `to_response()` was chosen over
+/// `Into<Response>`).
+fn generate_wrapper_dispatch(m: &DiscoveredMethod) -> proc_macro2::TokenStream {
+    let user_fn = &m.sig.ident;
+    let kind = match &m.sig.output {
+        ReturnType::Type(_, ty) => match last_path_segment(ty) {
+            Some(seg) if seg.ident == "Result" => ReturnKind::ResultResponse,
+            _ => ReturnKind::Response,
+        },
+        ReturnType::Default => ReturnKind::Response,
+    };
+    match kind {
+        ReturnKind::Response => quote! {
+            let __result = Self::#user_fn(&__endpoint);
+            <_ as ::axum::response::IntoResponse>::into_response(__result)
+        },
+        ReturnKind::ResultResponse => {
+            let err_branch = match &m.error_handler {
+                Some(handler_path) => quote! {
+                    <_ as ::axum::response::IntoResponse>::into_response(#handler_path(__err))
+                },
+                None => quote! {
+                    <_ as ::axum::response::IntoResponse>::into_response(
+                        <_ as ::joltr_core::JoltRError>::to_response(&__err)
+                    )
+                },
+            };
+            quote! {
+                let __result = Self::#user_fn(&__endpoint);
+                match __result {
+                    ::core::result::Result::Ok(__ok) =>
+                        <_ as ::axum::response::IntoResponse>::into_response(__ok),
+                    ::core::result::Result::Err(__err) => #err_branch,
+                }
+            }
         }
     }
 }
@@ -1530,6 +1683,272 @@ mod tests {
         assert!(
             rendered.contains("impl Users"),
             "wrapper impl block must target Users, rendered: {rendered}"
+        );
+    }
+
+    // ----- PRD #10: default error handler / #[error_handler(fn)] -----
+
+    #[test]
+    fn scan_methods_captures_error_handler_attr_path() {
+        // Pin that `#[error_handler(custom_handler)]` is recognized on a
+        // method and captured as a `syn::Path` on the discovered method, so
+        // the codegen can splice it into the `Err` arm.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(my_handler)]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        assert_eq!(methods.len(), 1);
+        let path = methods[0]
+            .error_handler
+            .as_ref()
+            .expect("error_handler captured");
+        assert_eq!(path.segments.last().unwrap().ident.to_string(), "my_handler");
+    }
+
+    #[test]
+    fn scan_methods_accepts_path_style_error_handler() {
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(crate::errors::map_err)]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let path = methods[0]
+            .error_handler
+            .as_ref()
+            .expect("error_handler captured");
+        // Multi-segment path is preserved end-to-end.
+        let rendered: Vec<String> = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        assert_eq!(rendered, vec!["crate", "errors", "map_err"]);
+    }
+
+    #[test]
+    fn scan_methods_rejects_two_error_handler_attrs() {
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(a)]
+                #[error_handler(b)]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let err = scan_methods(&item)
+            .expect_err("two error_handler attributes is an error");
+        assert!(
+            err.to_string().contains("more than one #[error_handler"),
+            "expected multi-error_handler diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn scan_methods_rejects_malformed_error_handler_attr() {
+        // `#[error_handler]` with no args / `#[error_handler("foo")]` (string
+        // literal not a path) must surface a clear diagnostic rather than
+        // panicking or silently dropping the attribute.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler("not_a_path")]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let err = scan_methods(&item).expect_err("string literal is invalid");
+        assert!(
+            err.to_string().contains("function path"),
+            "expected function-path diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_methods_rejects_error_handler_on_non_result_return() {
+        // PRD-mandated contract: `#[error_handler]` only makes sense when
+        // there's an `Err` branch. A bare `Response<T>` handler has none, so
+        // the macro rejects the attribute rather than silently emit dead glue.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(my_handler)]
+                fn fetch(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let err = validate_methods(&methods)
+            .expect_err("error_handler on Response<T> must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Result<Response<T>, E>") && msg.contains("error_handler"),
+            "diagnostic should explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_methods_accepts_error_handler_on_result_return() {
+        // Sanity: the validator must NOT reject the canonical pairing of
+        // `#[error_handler]` + `Result<Response<T>, E>`.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[post]
+                #[error_handler(my_handler)]
+                fn create(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        validate_methods(&methods).expect("error_handler on Result return is valid");
+    }
+
+    #[test]
+    fn strip_verb_attrs_also_removes_error_handler() {
+        // PRD-mandated verification: `#[error_handler]` is a magic-marker
+        // (no proc-macro of its own), so the re-emitted impl block must not
+        // carry the attribute — rustc would otherwise error with "cannot find
+        // attribute `error_handler` in this scope".
+        let mut item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(my_handler)]
+                #[inline]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        strip_verb_attrs(&mut item);
+        let surviving: Vec<String> = item
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImplItem::Fn(f) => Some(
+                    f.attrs
+                        .iter()
+                        .map(|a| {
+                            a.path()
+                                .get_ident()
+                                .map(|i| i.to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .next()
+            .expect("method present");
+        assert_eq!(
+            surviving,
+            vec!["inline".to_string()],
+            "verb + error_handler must be stripped, inline must survive"
+        );
+    }
+
+    #[test]
+    fn generate_handler_wrappers_emits_match_arms_for_result_return() {
+        // PRD #10: a method returning `Result<Response<T>, E>` must produce a
+        // wrapper body that splits on Ok/Err and routes the Err arm through
+        // `JoltRError::to_response(&__err)` (the default handler).
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = parse_self_ty("Api");
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+
+        // The wrapper has a `match` on the user's result.
+        assert!(
+            rendered.contains("match __result"),
+            "expected match on __result, rendered: {rendered}"
+        );
+        // Ok arm bridges through IntoResponse.
+        assert!(
+            rendered.contains(":: core :: result :: Result :: Ok (__ok)"),
+            "expected Ok(__ok) arm, rendered: {rendered}"
+        );
+        // Default Err arm calls JoltRError::to_response(&__err).
+        assert!(
+            rendered.contains(":: joltr_core :: JoltRError"),
+            "expected JoltRError path in default Err arm, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("to_response (& __err)"),
+            "expected to_response(&__err) call, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generate_handler_wrappers_uses_custom_handler_when_attr_present() {
+        // PRD #10: when `#[error_handler(my_fn)]` is set, the Err arm calls
+        // `my_fn(__err)` instead of the default JoltRError bridge.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get]
+                #[error_handler(my_handler)]
+                fn fetch(&self) -> Result<Response<()>, AppError> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = parse_self_ty("Api");
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+
+        // Custom handler is invoked with the owned error.
+        assert!(
+            rendered.contains("my_handler (__err)"),
+            "expected my_handler(__err) call, rendered: {rendered}"
+        );
+        // Default JoltRError bridge is NOT emitted alongside.
+        assert!(
+            !rendered.contains(":: joltr_core :: JoltRError"),
+            "custom handler must replace the JoltRError default, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn generate_handler_wrappers_preserves_response_only_path() {
+        // Regression: a `Response<T>` (non-Result) handler must NOT emit a
+        // match — the wrapper body collapses to the original 043 shape so
+        // existing endpoints don't pay for a branch they can't reach.
+        let item = parse_impl(
+            r#"
+            impl Api {
+                #[get] fn ping(&self) -> Response<()> { todo!() }
+            }
+            "#,
+        );
+        let methods = scan_methods(&item).expect("scan succeeds");
+        let self_ty = parse_self_ty("Api");
+        let rendered = generate_handler_wrappers(&self_ty, &methods).to_string();
+        assert!(
+            !rendered.contains("match __result"),
+            "non-Result wrapper must not branch, rendered: {rendered}"
+        );
+        assert!(
+            !rendered.contains(":: joltr_core :: JoltRError"),
+            "non-Result wrapper must not reference JoltRError, rendered: {rendered}"
         );
     }
 }

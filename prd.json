@@ -88,7 +88,7 @@
       "description": "In the #[endpoint] codegen, when the handler returns Result<Response<T>, E>, wrap the call in a match that converts Err(E) via Into<Response>. Support a #[error_handler(fn)] attribute on individual methods for custom error formatting.",
       "files": ["joltr-macros/src/endpoint.rs"],
       "tests": ["joltr-macros/tests/endpoint_error.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "11",

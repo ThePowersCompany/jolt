@@ -25,3 +25,49 @@ Files changed:
 Next notes:
 - PRD #10 (default error handler in `#[endpoint]` macro) is unblocked. The macro should detect `Result<Response<T>, E>` return types and emit `match` arms that call `err.to_response()` and forward via the existing IntoResponse bridge.
 - Optional follow-up: provide a `#[derive(JoltRError)]` (joltr-macros) for enum errors with `#[joltr_error(status = 404, message = "...")]` per-variant attrs. Not in scope here.
+
+
+2026-05-11 PRD #10 — Default error handler in `#[endpoint]` macro
+
+Completed:
+- Extended joltr-macros/src/endpoint.rs:
+  - `DiscoveredMethod` carries a new `error_handler: Option<syn::Path>` field captured from a per-method `#[error_handler(fn_path)]` magic-marker attribute.
+  - `parse_error_handler_attr` recognizes a bare `error_handler` ident (path-style `#[crate::error_handler(...)]` is intentionally not matched), parses the inner tokens as a `syn::Path`, and surfaces a span-pointed diagnostic when the args are not a function path (e.g. a string literal).
+  - `scan_methods` rejects duplicate `#[error_handler]` attrs on the same method.
+  - New `ReturnKind { Response, ResultResponse }` returned by `validate_signature` / `validate_return_type`; `validate_methods` uses it to reject `#[error_handler]` on bare `Response<T>` handlers (unreachable glue).
+  - `strip_verb_attrs` extended to also strip `#[error_handler(...)]` so the re-emitted impl block does not surface an unknown attribute to rustc.
+  - `generate_handler_wrappers` delegates per-method body emission to `generate_wrapper_dispatch`, which:
+    - For `Response<T>`: keeps the JOLTR-RS-043 single-line `IntoResponse::into_response(__result)` shape unchanged (no branch).
+    - For `Result<Response<T>, E>` with no `#[error_handler]`: emits `match __result { Ok(__ok) => IntoResponse::into_response(__ok), Err(__err) => IntoResponse::into_response(<_ as ::joltr_core::JoltRError>::to_response(&__err)) }`.
+    - For `Result<Response<T>, E>` with `#[error_handler(my_fn)]`: emits the same match with `my_fn(__err)` (owned, matches Rust's `match` arm ownership) in the Err arm — no implicit `E: JoltRError` bound.
+- Added 9 new unit tests in joltr-macros/src/endpoint.rs (token-shape regression set):
+  - `scan_methods` captures simple and path-style `error_handler` args, rejects duplicates and string-literal args.
+  - `validate_methods` rejects `#[error_handler]` on `Response<T>` returns and accepts it on `Result<Response<T>, E>` returns.
+  - `strip_verb_attrs` also removes `#[error_handler(...)]`.
+  - `generate_handler_wrappers` emits match arms + `JoltRError::to_response(&__err)` by default, swaps to `my_handler(__err)` when the attribute is set, and leaves `Response<T>` wrappers branchless.
+- Added joltr-core/tests/endpoint_error.rs with 3 end-to-end integration tests through `JoltRServer::into_router()`:
+  - `default_err_branch_returns_json_error_body` — `Err(NotFound)` → 404 JSON `{ error, status: 404 }`.
+  - `default_ok_branch_still_returns_user_body` — regression: `Ok(Response<Greeting>)` still serializes the user body as JSON 200.
+  - `custom_error_handler_replaces_default_bridge` — `#[error_handler(map_custom_err)]` on a non-`JoltRError` error returns 418 with the custom body.
+
+Verification:
+- cargo check --workspace → clean.
+- cargo test -p joltr-macros --lib → 249 passed (up from 240; 9 new PRD #10 unit tests).
+- cargo test -p joltr-core --test endpoint_error → 3 passed.
+- cargo test -p joltr-core --test endpoint_integration --test error --test inventory_registration → 9 passed (regression sweep on the surface most likely affected by the wrapper-body refactor).
+
+Key decisions:
+- Custom error handler fn takes the error by value (`fn(E) -> impl IntoResponse`), not by reference. Rationale: a `match __result { Err(__err) => fn(__err) }` arm owns the binding, so passing by value gives the user fn full control (move semantics, destructuring) without the macro needing to introduce a temporary or a borrow. Users who want `fn(&E)` can write a one-line shim.
+- Re-derive `ReturnKind` at codegen time inside `generate_wrapper_dispatch` instead of threading it through `DiscoveredMethod`. Rationale: the data is cheap to re-derive from `sig.output` and keeping the struct shallow avoids a parallel-state hazard if a future PRD changes the validation pass without updating the codegen consumers.
+- Required `JoltRError` bound is implicit — the macro never spells `where E: JoltRError`; rustc surfaces a "trait bound not satisfied" diagnostic at the wrapper site if the user's error type doesn't implement the trait. Mirrors the JOLTR-RS-043 decision to let rustc enforce `Self: Default` rather than have the macro emit an explicit `where` clause.
+- `#[error_handler(...)]` is stripped from the re-emitted impl rather than registered as its own proc-macro. Mirrors the verb-marker (`#[get]`, `#[post]`, ...) strategy from 039 — keeps the magic surface narrow to inside `#[endpoint]`.
+- Wrapper body for bare `Response<T>` is unchanged (no `match`, no `JoltRError` reference). This pins that the PRD #10 changes pay nothing at the codegen level for handlers that don't have an `Err` branch.
+
+Files changed:
+- joltr-macros/src/endpoint.rs (DiscoveredMethod field, attr parser, validation, strip, wrapper-body split, +9 unit tests)
+- joltr-core/tests/endpoint_error.rs (new, 3 integration tests)
+- prd.json (item 10 → passes: true)
+
+Next notes:
+- PRD #9's optional follow-up (`#[derive(JoltRError)]` for enum errors with per-variant `#[joltr_error(status = N, message = "...")]`) remains the natural next polish — would let users skip the manual `match` in `status()`/`message()` and would compose cleanly with the macro-emitted default Err branch landed here.
+- The custom-handler path lets the user return any `impl IntoResponse`. If a future PRD wants a stricter contract (e.g. always `Response<ErrorBody>` so error responses are uniformly observable), we can tighten by replacing `IntoResponse::into_response(my_fn(__err))` with an explicit cast — backwards-compatible for users who already return `Response<ErrorBody>`.
