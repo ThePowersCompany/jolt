@@ -96,6 +96,10 @@ pub use inventory;
 // user crates `use jolt_core::ws;` instead of pulling in `jolt-macros`
 // directly.
 pub use jolt_macros::{endpoint, ws, AutoMiddleware, PatchQuery};
+// Re-export futures-util so the `ws!` macro's generated code (JOLT-RS-124)
+// can reference `::jolt_core::futures_util::SinkExt` / `StreamExt` without
+// forcing every user crate to add `futures-util` to its own Cargo.toml.
+pub use futures_util;
 pub use tower;
 
 #[cfg(test)]

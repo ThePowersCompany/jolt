@@ -1,176 +1,74 @@
-//! JOLT-RS-122 + JOLT-RS-123 integration tests for the `ws!` proc-macro.
+//! JOLT-RS-124 integration tests for the `ws!` proc-macro.
 //!
-//! - JOLT-RS-122: Verifies that `ws!` compiles and expands to a value carrying
-//!   the parsed path + subprotocol.
-//! - JOLT-RS-123 (this iteration): Verifies the tightened auth_fn signature
-//!   check (`fn(&str) -> Result<JwtClaims, AuthError>`) and the generated
-//!   `check_auth` method that wraps auth_fn → claims → handler.on_open dispatch.
+//! Verifies that `ws!` compiles and emits an async closure that axum can wire
+//! as a WebSocket route handler:
+//! - a valid token → 101 upgrade, handler lifecycle fires
+//! - an invalid token → 401 rejection
+//! - the handler trait-bound check (WebSocketHandler + Default + Send) works
+//! - the auth_fn signature check works
 //!
 //! This is an integration test because the proc-macro can only be exercised
 //! through cargo's compile pipeline.
-//!
-//! The ws! expansion now returns an anonymous struct with `.witness` (carrying
-//! path + subprotocol) and `.check_auth(token)` (exercising the auth route).
+
+use std::io::ErrorKind;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use axum::routing::get;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 use jolt_core::{
     ws, AuthError, JwtClaims, WebSocketHandler, WebSocketSender, WsMessage,
 };
 
-use axum::http::StatusCode;
+/// A static shared across all test handler instances so the ws! macro
+/// (which constructs the handler via `Default::default`) can write into
+/// the same log regardless of which specific instance it creates.
+static LIFECYCLE_LOG: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
 
-/// A trivial handler used as the second positional `ws!` argument. The macro
-/// emits a `const _: fn() = || { __jolt_ws_assert_handler::<EchoHandler>(); };`
-/// trait-bound check at the call site, so an impl is required for the macro
-/// invocation to compile. Overriding only `on_message` is enough — the other
-/// four lifecycle methods inherit no-op defaults from the trait.
-///
-/// JOLT-RS-123 requires `Default` on the handler type so the generated
-/// `check_auth` method can construct an instance via `<T>::default()`.
+fn lifecycle_log() -> &'static Mutex<Vec<&'static str>> {
+    LIFECYCLE_LOG.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// A handler that records lifecycle callbacks into the static LIFECYCLE_LOG.
+/// The ws! macro constructs this via `Default::default()`, and the impl
+/// writes into the static so multiple calls / instances converge on one log.
 #[derive(Default)]
-struct EchoHandler;
+struct LifecycleLogHandler;
 
-impl WebSocketHandler for EchoHandler {
-    async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender) {
-        if let WsMessage::Text(text) = msg {
-            let _ = sender.send_text(&text);
-        }
+impl WebSocketHandler for LifecycleLogHandler {
+    fn set_claims(&mut self, _claims: JwtClaims) {
+        lifecycle_log().lock().unwrap().push("set_claims");
     }
-}
-
-/// A second handler with generic args, used to pin that the macro accepts a
-/// complex `syn::Type` for the handler argument (not just a bare ident). A
-/// regression that hard-coded `Ident` parsing would surface as a compile
-/// error on the `ws!(... Adapter<EchoHandler> ...)` invocation below.
-#[derive(Default)]
-struct Adapter<H: WebSocketHandler + Default> {
-    inner: H,
-}
-
-impl<H: WebSocketHandler + Send + Default> WebSocketHandler for Adapter<H> {
-    async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender) {
-        self.inner.on_message(msg, sender).await;
+    async fn on_open(&mut self, _sender: WebSocketSender) {
+        lifecycle_log().lock().unwrap().push("on_open");
     }
-}
-
-/// JOLT-RS-123 auth function: matches the exact signature
-/// `fn(&str) -> Result<JwtClaims, AuthError>` required by the tightened
-/// compile-time check. Validates a hardcoded token for testing.
-fn validate_token(token: &str) -> Result<JwtClaims, AuthError> {
-    if token == "valid-token-123" {
-        Ok(JwtClaims {
-            sub: "user-123".to_owned(),
-            exp: 9999999999,
-            iat: None,
-            extra: Default::default(),
-        })
-    } else {
-        Err(AuthError::new(format!("invalid token: {token}")))
+    async fn on_ready(&mut self, _sender: WebSocketSender) {
+        lifecycle_log().lock().unwrap().push("on_ready");
     }
-}
-
-mod auth_module {
-    use jolt_core::{AuthError, JwtClaims};
-
-    pub fn validate(token: &str) -> Result<JwtClaims, AuthError> {
-        if token == "mod-valid-token" {
-            Ok(JwtClaims {
-                sub: "mod-user".to_owned(),
-                exp: 9999999999,
-                iat: None,
-                extra: Default::default(),
-            })
-        } else {
-            Err(AuthError::new("module-level auth rejected"))
-        }
+    async fn on_message(&mut self, _msg: WsMessage, _sender: WebSocketSender) {
+        lifecycle_log().lock().unwrap().push("on_message");
     }
-}
-
-#[test]
-fn canonical_invocation_returns_witness_with_path_and_subprotocol() {
-    let expanded = ws!(
-        "/chat",
-        EchoHandler,
-        subprotocol = "chat-v1",
-        auth_fn = validate_token
-    );
-    assert_eq!(expanded.witness.path, "/chat");
-    assert_eq!(expanded.witness.subprotocol, "chat-v1");
-}
-
-#[test]
-fn named_args_compose_in_reverse_order() {
-    let expanded = ws!(
-        "/ws",
-        EchoHandler,
-        auth_fn = validate_token,
-        subprotocol = "v2"
-    );
-    assert_eq!(expanded.witness.path, "/ws");
-    assert_eq!(expanded.witness.subprotocol, "v2");
-}
-
-#[test]
-fn auth_fn_accepts_module_qualified_path() {
-    let expanded = ws!(
-        "/chat",
-        EchoHandler,
-        subprotocol = "v1",
-        auth_fn = auth_module::validate
-    );
-    assert_eq!(expanded.witness.path, "/chat");
-    assert_eq!(expanded.witness.subprotocol, "v1");
-}
-
-#[test]
-fn handler_type_accepts_generic_args() {
-    let expanded = ws!(
-        "/chat",
-        Adapter<EchoHandler>,
-        subprotocol = "v1",
-        auth_fn = validate_token
-    );
-    assert_eq!(expanded.witness.path, "/chat");
-    assert_eq!(expanded.witness.subprotocol, "v1");
+    async fn on_close(&mut self) {
+        lifecycle_log().lock().unwrap().push("on_close");
+    }
+    async fn on_shutdown(&mut self) {
+        lifecycle_log().lock().unwrap().push("on_shutdown");
+    }
 }
 
 #[tokio::test]
-async fn check_auth_valid_token_returns_200_and_calls_handler_on_open() {
-    let expanded = ws!(
-        "/chat",
-        EchoHandler,
-        subprotocol = "v1",
-        auth_fn = validate_token
-    );
-    let response = expanded.check_auth("valid-token-123").await;
-    assert_eq!(response.status(), StatusCode::OK);
-}
+async fn valid_token_upgrade_succeeds_and_drives_lifecycle() {
+    let _ = tracing_subscriber::fmt().try_init();
 
-#[tokio::test]
-async fn check_auth_valid_token_stashes_claims_via_set_claims_before_on_open() {
-    use jolt_core::{AuthError, JwtClaims, WebSocketHandler, WebSocketSender};
+    // Clear the static log so this test starts fresh.
+    lifecycle_log().lock().unwrap().clear();
 
-    #[derive(Default)]
-    struct ClaimsVerifyingHandler {
-        claims_sub: Option<String>,
-    }
-
-    impl WebSocketHandler for ClaimsVerifyingHandler {
-        fn set_claims(&mut self, claims: JwtClaims) {
-            self.claims_sub = Some(claims.sub);
-        }
-        async fn on_open(&mut self, _: WebSocketSender) {
-            assert!(
-                self.claims_sub.as_deref() == Some("user-123"),
-                "set_claims must be called before on_open; sub was {:?}",
-                self.claims_sub,
-            );
-        }
-    }
-
-    fn claims_auth(token: &str) -> Result<JwtClaims, AuthError> {
-        if token == "good" {
+    fn test_auth(token: &str) -> Result<JwtClaims, AuthError> {
+        if token == "valid-token" {
             Ok(JwtClaims {
-                sub: "user-123".to_owned(),
+                sub: "user-1".to_owned(),
                 exp: 9999999999,
                 iat: None,
                 extra: Default::default(),
@@ -180,43 +78,275 @@ async fn check_auth_valid_token_stashes_claims_via_set_claims_before_on_open() {
         }
     }
 
-    let expanded = ws!(
-        "/chat",
-        ClaimsVerifyingHandler,
-        subprotocol = "v1",
-        auth_fn = claims_auth
+    let handler = ws!(
+        "/ws",
+        LifecycleLogHandler,
+        subprotocol = "chat-v1",
+        auth_fn = test_auth
     );
-    let response = expanded.check_auth("good").await;
-    assert_eq!(response.status(), StatusCode::OK);
-}
 
-#[tokio::test]
-async fn check_auth_invalid_token_returns_401() {
-    let expanded = ws!(
-        "/chat",
-        EchoHandler,
-        subprotocol = "v1",
-        auth_fn = validate_token
-    );
-    let response = expanded.check_auth("bad-token").await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
+    let app = axum::Router::new().route("/ws", get(handler));
 
-#[tokio::test]
-async fn check_auth_invalid_token_body_contains_error_message() {
-    let expanded = ws!(
-        "/chat",
-        EchoHandler,
-        subprotocol = "v1",
-        auth_fn = validate_token
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    let upgrade_request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Protocol: jolt-jwt, valid-token\r\n\
+         \r\n"
     );
-    let response = expanded.check_auth("bogus").await;
-    let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
-        .await
-        .unwrap();
-    let body_str = String::from_utf8_lossy(&body_bytes);
+    stream.write_all(upgrade_request.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = read_response(&mut stream, &mut buf).await;
+    let response = String::from_utf8_lossy(&buf[..n]);
+
     assert!(
-        body_str.contains("bogus"),
-        "401 body must contain the rejection detail, got: {body_str}"
+        response.starts_with("HTTP/1.1 101"),
+        "expected 101 Switching Protocols for valid token, got: {response}"
     );
+
+    // Allow a brief window for the lifecycle callbacks to fire.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let calls = lifecycle_log().lock().unwrap().clone();
+    assert!(
+        calls.contains(&"set_claims"),
+        "set_claims must be called; observed: {calls:?}"
+    );
+    assert!(calls.contains(&"on_open"), "on_open must be called; observed: {calls:?}");
+    assert!(
+        calls.contains(&"on_ready"),
+        "on_ready must be called; observed: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn invalid_token_is_rejected_with_401() {
+    let _ = tracing_subscriber::fmt().try_init();
+
+    #[derive(Default)]
+    struct EchoHandler;
+
+    impl WebSocketHandler for EchoHandler {}
+
+    fn my_auth(token: &str) -> Result<JwtClaims, AuthError> {
+        if token == "good" {
+            Ok(JwtClaims {
+                sub: "u".to_owned(),
+                exp: 9999999999,
+                iat: None,
+                extra: Default::default(),
+            })
+        } else {
+            Err(AuthError::new("bad token"))
+        }
+    }
+
+    let handler = ws!(
+        "/ws",
+        EchoHandler,
+        subprotocol = "chat-v1",
+        auth_fn = my_auth
+    );
+
+    let app = axum::Router::new().route("/ws", get(handler));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    let upgrade_request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Protocol: jolt-jwt, definitely-invalid\r\n\
+         \r\n"
+    );
+    stream.write_all(upgrade_request.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = read_response(&mut stream, &mut buf).await;
+    let response = String::from_utf8_lossy(&buf[..n]);
+
+    assert!(
+        response.starts_with("HTTP/1.1 401"),
+        "expected 401 for invalid token, got: {response}"
+    );
+    assert!(
+        !response.contains("HTTP/1.1 101"),
+        "must NOT upgrade for invalid token, got: {response}"
+    );
+}
+
+#[tokio::test]
+async fn missing_subprotocol_header_is_rejected_with_401() {
+    let _ = tracing_subscriber::fmt().try_init();
+
+    #[derive(Default)]
+    struct EchoHandler;
+
+    impl WebSocketHandler for EchoHandler {}
+
+    fn my_auth(token: &str) -> Result<JwtClaims, AuthError> {
+        if token == "good" {
+            Ok(JwtClaims {
+                sub: "u".to_owned(),
+                exp: 9999999999,
+                iat: None,
+                extra: Default::default(),
+            })
+        } else {
+            Err(AuthError::new("bad"))
+        }
+    }
+
+    let handler = ws!(
+        "/ws",
+        EchoHandler,
+        subprotocol = "chat-v1",
+        auth_fn = my_auth
+    );
+
+    let app = axum::Router::new().route("/ws", get(handler));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    // No Sec-WebSocket-Protocol header at all — must still be rejected.
+    let upgrade_request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n"
+    );
+    stream.write_all(upgrade_request.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = read_response(&mut stream, &mut buf).await;
+    let response = String::from_utf8_lossy(&buf[..n]);
+
+    assert!(
+        response.starts_with("HTTP/1.1 401"),
+        "expected 401 for missing subprotocol header, got: {response}"
+    );
+}
+
+#[tokio::test]
+async fn ws_macro_compiles_with_generic_handler_type() {
+    // Compile-time-only test: ws! must accept a handler with generic params.
+    // If the generic handler doesn't satisfy the trait bounds, the compile
+    // error surfaces at the ws! call site — this test only checks the happy
+    // path.
+    #[derive(Default)]
+    struct GenericAdapter<H: WebSocketHandler + Default>(H);
+
+    impl<H: WebSocketHandler + Default + Send> WebSocketHandler for GenericAdapter<H> {
+        async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender) {
+            self.0.on_message(msg, sender).await;
+        }
+    }
+
+    #[derive(Default)]
+    struct SimpleEcho;
+
+    impl WebSocketHandler for SimpleEcho {}
+
+    fn auth_ok(token: &str) -> Result<JwtClaims, AuthError> {
+        if token == "ok" {
+            Ok(JwtClaims {
+                sub: "u".to_owned(),
+                exp: 9999999999,
+                iat: None,
+                extra: Default::default(),
+            })
+        } else {
+            Err(AuthError::new("no"))
+        }
+    }
+
+    let handler = ws!(
+        "/ws",
+        GenericAdapter<SimpleEcho>,
+        subprotocol = "v1",
+        auth_fn = auth_ok
+    );
+
+    let app = axum::Router::new().route("/ws", get(handler));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Protocol: jolt-jwt, ok\r\n\
+         \r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = read_response(&mut stream, &mut buf).await;
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        response.starts_with("HTTP/1.1 101"),
+        "generic handler with valid token must upgrade, got: {response}"
+    );
+}
+
+/// HTTP-response reader for raw TCP WebSocket handshake tests.
+/// Reads until either the stream is exhausted, the double-CRLF that marks
+/// the end of the HTTP response headers is detected, or a WouldBlock timeout.
+async fn read_response(stream: &mut tokio::net::TcpStream, buf: &mut [u8]) -> usize {
+    let mut total = 0;
+    loop {
+        match stream.read(&mut buf[total..]).await {
+            Ok(0) | Err(_) if total > 0 && contains_empty_line(&buf[..total]) => break total,
+            Ok(0) => break total,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if total > 0 && contains_empty_line(&buf[..total]) {
+                    break total;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(_) => break total,
+            Ok(n) => {
+                total += n;
+                if contains_empty_line(&buf[..total]) {
+                    break total;
+                }
+            }
+        }
+    }
+}
+
+fn contains_empty_line(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.contains("\r\n\r\n") || s.contains("\n\n")
 }

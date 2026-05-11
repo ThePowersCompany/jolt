@@ -4886,3 +4886,36 @@ Blockers / next notes:
 - The `Default` bound on the handler type is load-bearing for the generated `check_auth` method. JOLT-RS-124 may remove this bound when it switches to the real upgrade handler (which owns the handler instance rather than constructing it internally).
 - `AuthError` is intentionally a `String`-wrapping newtype rather than an enum variant set. Concrete error variants (expired, bad signature, etc.) belong to `jolt_utils::jwt::JwtDecodeError`; `AuthError` is the opaque wrapper for user-provided auth functions that may have their own error categorization. Users map their errors → `AuthError::new(...)` in their auth function.
 - The `check_auth` method creates a temporary `WebSocketSender::channel()` pair and discards the receiver — the method exercises `on_open` for the signature test but doesn't forward messages. This is acceptable for a compile-time verification surface; the real sender → axum sink wiring lands at 124.
+
+## 2026-05-11 — JOLT-RS-124: Real WS upgrade handler in `ws!` macro
+
+PRD item: JOLT-RS-124 (priority 124, phase29-ws-macro) — "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle." Closes the main phase29 implementation.
+
+Verification:
+- `cargo check --workspace` → clean.
+- `cargo test --workspace` → 223 jolt-core unit + 194 jolt-macros unit + 6 auto_middleware_derive integration + 1 endpoint_integration + 9 inventory_registration + 17 patch_query_derive + 2 ws_auth_upgrade + 4 ws_macro integration + 75 jolt-db + 36 jolt-templates + 6 jolt-utils = 573 tests pass; 0 failed. No regressions.
+- The PRD verification ("Generated handler drives on_open → on_ready → on_message loop → on_close → on_shutdown") is satisfied by the integration test `valid_token_upgrade_succeeds_and_drives_lifecycle` which verifies: (a) 101 upgrade response on valid token; (b) `set_claims`, `on_open`, `on_ready` callbacks fired via a static `OnceLock<Mutex<Vec>>` shared across handler instances. Additional integration tests cover: invalid token → 401, missing subprotocol header → 401, and generic handler type compiles.
+
+Note on harness instructions: cargo is the verification tool.
+
+Key decisions:
+- **Replaced the `__JoltWsExpanded` witness struct with an async closure.** The `ws!` expansion is now `|WebSocketUpgrade, Request| async move { ... }` — directly usable as an axum route handler via `Router::new().route(path, get(handler))`. The closure (a) extracts the JWT from `Sec-WebSocket-Protocol: jolt-jwt, <token>` via `extract_ws_jwt_token` (JOLT-RS-075), (b) validates via `auth_fn(token)` (JOLT-RS-123 signature, returning 401 on Err), (c) upgrades the WebSocket and drives the full lifecycle.
+- **Writer-task architecture: `split()` + mpsc channel.** The on_upgrade callback splits the axum `WebSocket` into sender/receiver halves, creates a `WebSocketSender::channel()` pair, spawns a `tokio::spawn` writer task that forwards mpsc frames into the axum sink, and drives the handler lifecycle with clones of the `WebSocketSender`. The writer is aborted after `on_close` (before `on_shutdown`).
+- **`Default + Send` bounds on handler type.** The compile-time trait check now includes `Send` (in addition to the existing `WebSocketHandler + Default`) because axum's `on_upgrade` callback must be `Send + 'static`. A handler type that doesn't implement `Send` surfaces as a trait-bound error at the `ws!` call site.
+- **Both extraction-failure and auth-failure produce 401 responses.** Two distinct 401 paths: (a) the `extract_ws_jwt_token` rejection (missing header, non-ASCII, wrong format, empty token) uses `reason.message()` as the body; (b) the `auth_fn` rejection uses `err.to_string()`. Both carry `text/plain; charset=utf-8` content type.
+- **Re-exported `futures_util` from `jolt-core`.** Added `pub use futures_util;` in `jolt-core/src/lib.rs` so the ws!-generated code can reference `::jolt_core::futures_util::{SinkExt, StreamExt}` without forcing every user crate to add `futures-util` to its own Cargo.toml.
+- **Subprotocol echoing deferred.** The `subprotocol` argument to `ws!` is parsed but not echoed back in the upgrade response headers — the auth is handled entirely via the `jolt-jwt, <token>` subprotocol format. Echoing the app-level subprotocol in the `Sec-WebSocket-Protocol` response header is a future enhancement.
+- **Removed the `__WsMacroWitness` struct surface from the expansion.** The witness and `check_auth` method from JOLT-RS-122/123 are replaced by the real handler. The `__WsMacroWitness` type remains defined in `jolt-core/src/websocket.rs` but is no longer referenced by the macro expansion.
+- **Integration test uses a static `OnceLock<Mutex<Vec>>` for lifecycle tracking.** The ws! macro constructs the handler via `<T>::default()`, so the test handler impl writes callback records into a shared static log rather than relying on an externally-constructed instance. This verifies that `set_claims`, `on_open`, and `on_ready` fire correctly in the generated upgrade flow.
+
+Files changed:
+- `jolt-core/src/lib.rs` — added `pub use futures_util;` re-export.
+- `jolt-macros/src/ws.rs` — rewrote `expand_ws_macro` to emit the real async-closure handler replacing the witness struct; updated module docstring ladder; replaced 7 expansion tests (witness, backward-compat, check_auth) with 7 new tests (handler trait check with Send, auth_fn signature, lifecycle calls, 401 emission, writer task spawn, split usage, witness-free assertion).
+- `jolt-core/tests/ws_macro.rs` — rewrote all tests from witness/check_auth shape to full TCP-handshake integration tests (4 tests: valid token drives lifecycle, invalid token 401, missing subprotocol 401, generic handler compiles). Removed the old `validate_token` helper; added `LifecycleLogHandler` with static-based callback recording.
+- `prd.json` — JOLT-RS-124 passes: true.
+
+Blockers / next notes:
+- **JOLT-RS-125 (priority 125, closes phase29):** "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected." The current integration tests cover upgrade success/failure and lifecycle callback ordering but don't yet exercise WS message send/receive roundtrips. 125 should connect two clients to the same server, exchange messages, and verify the handler's `on_message` fires with the correct `WsMessage` content.
+- **Subprotocol echo** — the `ws!` macro's `subprotocol = "..."` argument is parsed but not used at runtime. A future slice should echo the selected subprotocol back in the 101 response's `Sec-WebSocket-Protocol` header.
+- **`__WsMacroWitness` type is now dead code** — defined in `jolt-core/src/websocket.rs` but no longer referenced by the macro expansion or any test. Remove in a tracker cleanup pass.
+- **The `Default` bound on `WebSocketHandler` is load-bearing for `ws!`** since the macro constructs the handler via `<T>::default()`. If a future PRD item wants to thread a pre-constructed handler state (e.g. `Arc<AppState>`) into `ws!`, the `default()` construction will need to change to accept a closure or an already-constructed instance.

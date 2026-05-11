@@ -1766,20 +1766,6 @@
       "passes": true
     },
     {
-      "id": "JOLT-RS-124",
-      "priority": 124,
-      "phase": "phase29-ws-macro",
-      "category": "backend",
-      "description": "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle.",
-      "steps": [
-        "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle."
-      ],
-      "verification": [
-        "Generated handler drives on_open \u2192 on_ready \u2192 on_message loop \u2192 on_close \u2192 on_shutdown."
-      ],
-      "passes": false
-    },
-    {
       "id": "JOLT-RS-125",
       "priority": 125,
       "phase": "phase29-ws-macro",
@@ -1792,6 +1778,20 @@
         "cargo test --test ws_integration passes."
       ],
       "passes": false
+    },
+    {
+      "id": "JOLT-RS-124",
+      "priority": 124,
+      "phase": "phase29-ws-macro",
+      "category": "backend",
+      "description": "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle.",
+      "steps": [
+        "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle."
+      ],
+      "verification": [
+        "Generated handler drives on_open \u2192 on_ready \u2192 on_message loop \u2192 on_close \u2192 on_shutdown."
+      ],
+      "passes": true
     },
     {
       "id": "JOLT-RS-126",

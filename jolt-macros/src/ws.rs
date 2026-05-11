@@ -1,31 +1,23 @@
 //! `ws!` function-like proc-macro — phase29 entry point.
 //!
 //! Phase29 ladder:
-//! - JOLT-RS-122 (this iteration): parse the `ws!(path, HandlerType,
-//!   subprotocol = "proto", auth_fn = fn_name)` call form and emit a witness
-//!   expression that type-checks every argument. The two positional args
-//!   (path, handler type) come first; the two named args (`subprotocol`,
-//!   `auth_fn`) may appear in either order after them. On success the
-//!   expansion is a block expression that:
-//!   1. emits a `const _: fn() = ...` closure containing a
-//!      `fn _check<T: ::jolt_core::WebSocketHandler>()` invocation on the
-//!      parsed handler type — this is a compile-time-only trait-bound check,
-//!      not a runtime call,
-//!   2. emits a `let _ = #auth_fn;` so the resolved auth-fn path is
-//!      type-checked as a value at the call site (123 will tighten this to
-//!      `fn(&str) -> Result<JwtClaims, _>`),
-//!   3. returns a `::jolt_core::__WsMacroWitness { path, subprotocol }`
-//!      literal carrying the two string-literal args. The witness is the
-//!      observable surface that tests in `jolt-core/tests/ws_macro.rs` read
-//!      to verify the macro expanded with the right values.
-//! - JOLT-RS-123: tighten the `auth_fn` signature check to
-//!   `fn(&str) -> Result<JwtClaims, AuthError>` (the trait-check closure is
-//!   the natural place to splice that in), and route an `Err(_)` to a 401
-//!   response.
-//! - JOLT-RS-124: replace the witness-struct return with the real axum WS
-//!   upgrade-handler — extract subprotocol, validate token via auth_fn, drive
-//!   the [`jolt_core::WebSocketHandler`] lifecycle through 120's `WsMessage`
-//!   variants.
+//! - JOLT-RS-122: parse the `ws!(path, HandlerType, subprotocol = "proto",
+//!   auth_fn = fn_name)` call form and emit a witness expression.
+//! - JOLT-RS-123: tighten the `auth_fn` signature check and route Err to 401.
+//! - JOLT-RS-124 (this iteration): replace the witness-struct return with the
+//!   real axum WS upgrade-handler — extract subprotocol, validate token via
+//!   auth_fn, drive the [`jolt_core::WebSocketHandler`] lifecycle through 120's
+//!   `WsMessage` variants. The expansion is an async closure that axum can
+//!   wire directly as a route handler:
+//!   1. compile-time-checks handler type (`WebSocketHandler + Default + Send`)
+//!      and auth_fn (`fn(&str) -> Result<JwtClaims, AuthError>`),
+//!   2. at runtime, extracts the JWT from `Sec-WebSocket-Protocol:
+//!      jolt-jwt, <token>` via [`jolt_core::extract_ws_jwt_token`],
+//!   3. validates the token via `#auth_fn`; on Err returns 401,
+//!   4. on Ok, upgrades the WebSocket and spawns a writer task that forwards
+//!      mpsc-sent frames into the axum sink,
+//!   5. drives the handler lifecycle: set_claims → on_open → on_ready →
+//!      on_message loop → on_close → on_shutdown.
 //! - JOLT-RS-125: phase29 closing integration test (full connect / send /
 //!   receive roundtrip against a running axum server).
 //!
@@ -164,19 +156,29 @@ impl Parse for WsMacroInput {
 
 /// Top-level driver for `ws!(...)`.
 ///
-/// Parses via [`WsMacroInput`]'s `Parse` impl and emits a block expression
-/// witness. On parse failure the emission is a single `compile_error!` token
-/// (with the span the parser attached) — no partial codegen. Mirrors
+/// Parses via [`WsMacroInput`]'s `Parse` impl and emits an async-closure
+/// expression that axum can wire as a route handler. On parse failure the
+/// emission is a single `compile_error!` token (with the span the parser
+/// attached) — no partial codegen. Mirrors
 /// [`crate::patch_query::expand_patch_query`]'s contract from JOLT-RS-110.
+///
+/// The emitted closure:
+/// 1. extract JWT from `Sec-WebSocket-Protocol: jolt-jwt, <token>` via
+///    [`jolt_core::extract_ws_jwt_token`] (JOLT-RS-075),
+/// 2. validate the token via `#auth_fn` (JOLT-RS-123 signature), returning
+///    401 on rejection,
+/// 3. upgrade the WebSocket and drive the [`jolt_core::WebSocketHandler`]
+///    lifecycle (JOLT-RS-118..121) through on_open → on_ready → on_message
+///    loop → on_close → on_shutdown.
 pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
     let parsed: WsMacroInput = match syn::parse2(input) {
         Ok(p) => p,
         Err(err) => return err.to_compile_error(),
     };
     let WsMacroInput {
-        path,
+        path: _path,
         handler_type,
-        subprotocol,
+        subprotocol: _subprotocol,
         auth_fn,
     } = parsed;
 
@@ -185,62 +187,146 @@ pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
             // Compile-time trait-bound check on the handler type. Lives inside
             // a `const _: fn() = || { ... };` so the closure body is type-
             // checked at compile time but never invoked at runtime. A handler
-            // type that doesn't implement `WebSocketHandler + Default` surfaces
-            // here as a `the trait bound ... is not satisfied` diagnostic at the
-            // call site of `ws!`.
+            // type that doesn't implement `WebSocketHandler + Default + Send`
+            // surfaces here as a `the trait bound ... is not satisfied`
+            // diagnostic at the call site of `ws!`. The `Send` bound is
+            // required because the handler is moved into the `on_upgrade`
+            // callback which axum requires to be `Send + 'static`.
             const _: fn() = || {
-                fn __jolt_ws_assert_handler<__T: ::jolt_core::WebSocketHandler + Default>() {}
+                fn __jolt_ws_assert_handler<
+                    __T: ::jolt_core::WebSocketHandler + Default + Send,
+                >() {}
                 __jolt_ws_assert_handler::<#handler_type>();
             };
-            // Tightened JOLT-RS-123 signature check: auth_fn must be a callable
-            // matching `fn(&str) -> Result<JwtClaims, AuthError>`. Uses a const
-            // block so the check runs at compile time with zero runtime cost.
-            // If auth_fn's signature doesn't match exactly, the compiler
-            // surfaces a type-mismatch diagnostic at the ws! call site.
+            // JOLT-RS-123 signature check: auth_fn must match
+            // `fn(&str) -> Result<JwtClaims, AuthError>`. Uses a const block
+            // so the check runs at compile time with zero runtime cost.
             const _: fn() = || {
-                fn __jolt_ws_assert_auth_fn<__F: Fn(&str) -> Result<::jolt_core::JwtClaims, ::jolt_core::AuthError>>(__f: __F) {
+                fn __jolt_ws_assert_auth_fn<
+                    __F: Fn(&str)
+                        -> Result<
+                            ::jolt_core::JwtClaims,
+                            ::jolt_core::AuthError,
+                        >,
+                >(__f: __F) {
                     let _ = __f;
                 }
                 __jolt_ws_assert_auth_fn(#auth_fn);
             };
-            // Anonymous struct carrying both the witness fields for
-            // backward-compatible path/subprotocol assertions AND a testable
-            // auth-check method that exercises the auth_fn → claims →
-            // handler.on_open dispatch path JOLT-RS-123 requires.
-            struct __JoltWsExpanded {
-                witness: ::jolt_core::__WsMacroWitness,
-            }
-            impl __JoltWsExpanded {
-                pub async fn check_auth(self, token: &str) -> ::axum::response::Response {
-                    match #auth_fn(token) {
-                        Err(err) => {
-                            ::axum::response::Response::builder()
+            // Return an async closure that axum can wire directly as a route
+            // handler. The closure takes `WebSocketUpgrade` + `Request` as
+            // extractors, handles auth, and returns a `Response`.
+            |__ws: ::axum::extract::ws::WebSocketUpgrade,
+             __req: ::axum::extract::Request| async move {
+                // Extract the JWT from the Sec-WebSocket-Protocol header
+                // (canonical form: `jolt-jwt, <token>`). On any extraction
+                // failure (missing header, non-ASCII, wrong format, empty
+                // token) short-circuit with 401.
+                let __token: ::std::string::String =
+                    match ::jolt_core::extract_ws_jwt_token(
+                        __req
+                            .headers()
+                            .get(::axum::http::header::SEC_WEBSOCKET_PROTOCOL),
+                    ) {
+                        ::std::result::Result::Ok(t) => t,
+                        ::std::result::Result::Err(reason) => {
+                            return ::axum::response::Response::builder()
                                 .status(::axum::http::StatusCode::UNAUTHORIZED)
                                 .header(
                                     ::axum::http::header::CONTENT_TYPE,
-                                    ::axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                                    ::axum::http::HeaderValue::from_static(
+                                        "text/plain; charset=utf-8",
+                                    ),
                                 )
-                                .body(::axum::body::Body::from(err.to_string()))
-                                .expect("401 response builder always succeeds with static headers")
+                                .body(::axum::body::Body::from(reason.message()))
+                                .expect(
+                                    "401 response builder always succeeds with static headers",
+                                );
                         }
-                        Ok(claims) => {
-                            let mut handler = <#handler_type>::default();
-                            handler.set_claims(claims);
-                            let (sender, _rx) = ::jolt_core::WebSocketSender::channel();
-                            handler.on_open(sender).await;
-                            ::axum::response::Response::builder()
-                                .status(::axum::http::StatusCode::OK)
-                                .body(::axum::body::Body::empty())
-                                .expect("200 response builder always succeeds with empty body")
-                        }
+                    };
+                // Validate the JWT via the user-supplied auth_fn. On failure
+                // (expired, bad signature, custom rejection) short-circuit with
+                // 401 carrying the auth error's Display text as the body.
+                let __claims: ::jolt_core::JwtClaims = match #auth_fn(&__token) {
+                    ::std::result::Result::Ok(c) => c,
+                    ::std::result::Result::Err(err) => {
+                        return ::axum::response::Response::builder()
+                            .status(::axum::http::StatusCode::UNAUTHORIZED)
+                            .header(
+                                ::axum::http::header::CONTENT_TYPE,
+                                ::axum::http::HeaderValue::from_static(
+                                    "text/plain; charset=utf-8",
+                                ),
+                            )
+                            .body(::axum::body::Body::from(
+                                err.to_string(),
+                            ))
+                            .expect(
+                                "401 response builder always succeeds with static headers",
+                            );
                     }
-                }
-            }
-            __JoltWsExpanded {
-                witness: ::jolt_core::__WsMacroWitness {
-                    path: #path,
-                    subprotocol: #subprotocol,
-                },
+                };
+                // Perform the WebSocket upgrade. The callback receives the raw
+                // WebSocket, splits it into a sender/receiver pair, spawns a
+                // writer task, creates the handler, and drives the full
+                // lifecycle.
+                __ws.on_upgrade(
+                    move |__socket: ::axum::extract::ws::WebSocket| async move {
+                        use ::jolt_core::futures_util::{
+                            SinkExt as __JoltSinkExt,
+                            StreamExt as __JoltStreamExt,
+                        };
+                        let (mut __tx, mut __rx) = __socket.split();
+                        let (__sender, __writer_rx) =
+                            ::jolt_core::WebSocketSender::channel();
+                        // Writer task: reads frames from the mpsc channel
+                        // (fed by handler callbacks) and forwards them into
+                        // the axum sink. When the channel closes (either
+                        // because the WebSocketSender was dropped or
+                        // explicitly closed), the task exits gracefully.
+                        let __writer = ::tokio::spawn(async move {
+                            let mut __writer_rx = __writer_rx;
+                            while let ::std::option::Option::Some(
+                                __msg,
+                            ) = __writer_rx.recv().await
+                            {
+                                if __tx.send(__msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        // Construct the handler and drive the lifecycle.
+                        let mut __handler = <#handler_type as ::std::default::Default>::default();
+                        __handler.set_claims(__claims);
+                        __handler.on_open(__sender.clone()).await;
+                        __handler.on_ready(__sender.clone()).await;
+                        // Read loop: receive frames from the client, map
+                        // axum → WsMessage, and dispatch to the handler.
+                        // A Close frame breaks the loop; the handler's
+                        // on_close and on_shutdown run afterwards.
+                        while let ::std::option::Option::Some(
+                            ::std::result::Result::Ok(__msg),
+                        ) = __rx.next().await
+                        {
+                            let __ws_msg =
+                                ::jolt_core::WsMessage::from(__msg);
+                            let __is_close =
+                                ::std::matches!(
+                                    &__ws_msg,
+                                    ::jolt_core::WsMessage::Close(_)
+                                );
+                            __handler
+                                .on_message(__ws_msg, __sender.clone())
+                                .await;
+                            if __is_close {
+                                break;
+                            }
+                        }
+                        __handler.on_close().await;
+                        __writer.abort();
+                        __handler.on_shutdown().await;
+                    },
+                )
             }
         }
     }
@@ -388,50 +474,23 @@ mod tests {
     }
 
     #[test]
-    fn expand_emits_witness_struct_literal_on_well_formed_input() {
+    fn expand_emits_handler_trait_check_with_send_bound() {
         let tokens = TokenStream::from_str(
             r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
         )
         .expect("test input parses as TokenStream");
         let out = expand_ws_macro(tokens).to_string();
         assert!(
-            out.contains("__WsMacroWitness"),
-            "emission must construct the witness struct, got: {out}"
-        );
-        assert!(
-            out.contains("\"/chat\""),
-            "emission must splice the path literal, got: {out}"
-        );
-        assert!(
-            out.contains("\"chat-v1\""),
-            "emission must splice the subprotocol literal, got: {out}"
-        );
-        assert!(
-            out.contains("validate_token"),
-            "emission must reference the auth_fn path, got: {out}"
-        );
-        assert!(
             out.contains("__jolt_ws_assert_handler"),
-            "emission must include the trait-bound check, got: {out}"
+            "emission must include the handler trait-bound check, got: {out}"
         );
         assert!(
             out.contains("WebSocketHandler"),
-            "emission must reference the WebSocketHandler bound, got: {out}"
-        );
-    }
-
-    #[test]
-    fn expand_emits_compile_error_on_bad_input() {
-        let tokens = TokenStream::from_str(r#"42, Handler"#)
-            .expect("test input parses as TokenStream");
-        let out = expand_ws_macro(tokens).to_string();
-        assert!(
-            out.contains("compile_error"),
-            "parse failure must emit compile_error!, got: {out}"
+            "handler check must reference WebSocketHandler, got: {out}"
         );
         assert!(
-            !out.contains("__WsMacroWitness"),
-            "no partial codegen on parse failure, got: {out}"
+            out.contains("Default") && out.contains("Send"),
+            "handler check must include Default + Send bounds, got: {out}"
         );
     }
 
@@ -457,54 +516,107 @@ mod tests {
     }
 
     #[test]
-    fn expand_emits_check_auth_method() {
+    fn expand_emits_web_socket_upgrade_and_lifecycle() {
         let tokens = TokenStream::from_str(
             r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
         )
         .expect("test input parses as TokenStream");
         let out = expand_ws_macro(tokens).to_string();
         assert!(
-            out.contains("check_auth"),
-            "emission must include the check_auth method, got: {out}"
+            out.contains("on_upgrade"),
+            "emission must call WebSocketUpgrade::on_upgrade, got: {out}"
+        );
+        assert!(
+            out.contains("extract_ws_jwt_token"),
+            "emission must call the WS JWT extractor, got: {out}"
         );
         assert!(
             out.contains("set_claims"),
-            "check_auth must call handler.set_claims, got: {out}"
+            "emission must call handler.set_claims, got: {out}"
         );
         assert!(
             out.contains("on_open"),
-            "check_auth must call handler.on_open, got: {out}"
+            "emission must call handler.on_open, got: {out}"
         );
+        assert!(
+            out.contains("on_ready"),
+            "emission must call handler.on_ready, got: {out}"
+        );
+        assert!(
+            out.contains("on_message"),
+            "emission must call handler.on_message, got: {out}"
+        );
+        assert!(
+            out.contains("on_close"),
+            "emission must call handler.on_close, got: {out}"
+        );
+        assert!(
+            out.contains("on_shutdown"),
+            "emission must call handler.on_shutdown, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_unauthorized_on_extraction_or_auth_failure() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
         assert!(
             out.contains("StatusCode :: UNAUTHORIZED")
                 || out.contains("StatusCode::UNAUTHORIZED"),
-            "check_auth must return 401 on auth failure, got: {out}"
+            "emission must return 401 on auth failure, got: {out}"
         );
     }
 
     #[test]
-    fn expand_emits_handler_default_bound_check() {
+    fn expand_emits_writer_task_spawn() {
         let tokens = TokenStream::from_str(
             r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
         )
         .expect("test input parses as TokenStream");
         let out = expand_ws_macro(tokens).to_string();
         assert!(
-            out.contains("Default"),
-            "handler trait check must include Default bound, got: {out}"
+            out.contains("spawn"),
+            "emission must spawn a writer task, got: {out}"
+        );
+        assert!(
+            out.contains("WebSocketSender"),
+            "emission must use WebSocketSender, got: {out}"
         );
     }
 
     #[test]
-    fn expand_still_contains_backward_compatible_witness_struct() {
+    fn expand_uses_split_for_ws_read_write() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
+        // quote renders `.split()` as `. split ()` (with spaces). Match
+        // on the constituent tokens rather than the formatting-sensitive
+        // canonical string.
+        assert!(
+            out.contains("split") && out.contains("()"),
+            "emission must split the WebSocket for read/write, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_no_longer_emits_witness_struct() {
         let tokens = TokenStream::from_str(
             r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
         )
         .expect("test input parses as TokenStream");
         let out = expand_ws_macro(tokens).to_string();
         assert!(
-            out.contains("__WsMacroWitness"),
-            "expansion must still construct the witness struct for backward compat, got: {out}"
+            !out.contains("__WsMacroWitness"),
+            "JOLT-RS-124 removes the witness struct; emission must not contain it, got: {out}"
+        );
+        assert!(
+            !out.contains("check_auth"),
+            "JOLT-RS-124 removes the check_auth method, got: {out}"
         );
     }
 }
