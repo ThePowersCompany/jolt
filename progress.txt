@@ -6065,3 +6065,26 @@ Files changed:
 
 Notes for next iterations:
 - JOLT-RS-164 (priority 164): Implement Deserialize for Optional<T> — present non-null → Some(v), present null → Null, absent → NotProvided. Requires a custom `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Optional<T>` with a visitor that handles the three states. The test fixture from 163 can be reused (round-trip: serialize → deserialize). The Deserialize impl is the last piece of the Optional<T> tri-state surface.
+
+## 2026-05-11 — JOLT-RS-164: Deserialize for Optional<T>
+
+PRD item: JOLT-RS-164 (priority 164, phase38-json-optional-types) — Implement Deserialize for Optional<T> where T: Deserialize: present non-null → Some(v), present null → Null, absent → NotProvided.
+
+Verification:
+- `cargo test -p jolt-core -- tests::optional` → 4 passed (construct_all_three_variants, default_is_not_provided, serialize_struct_with_optional_fields, deserialize_present_non_null_is_some_present_null_is_null_absent_is_not_provided).
+- `cargo test -p jolt-core --lib` → all 277 tests pass.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Delegated to `Option::<T>::deserialize(deserializer)?`: serde's built-in Option<T> deserializer returns Some(v) for present non-null and None for present null — exactly the semantics needed. Wrapped Some into Optional::Some, None into Optional::Null.
+- `NotProvided` is never returned from the `deserialize` impl. The containing struct must use `#[serde(default)]` on `Optional<T>` fields so serde invokes `Default::default()` (= NotProvided) when the field is absent from JSON. This is the same pattern the Serialize side uses with `#[serde(skip_serializing_if = "Optional::is_not_provided")]`.
+- The Deserialize impl uses a simple `match Option::<T>::deserialize(deserializer)? { Some(v) => ..., None => ... }` — no custom visitor needed. serde's built-in Option deserializer already distinguishes present-non-null from present-null.
+
+Files changed:
+- jolt-core/src/optional.rs — added `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Optional<T>`, updated doc comment.
+- jolt-core/src/tests.rs — added `deserialize_present_non_null_is_some_present_null_is_null_absent_is_not_provided` test in `mod optional`.
+- prd.json — JOLT-RS-164 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-165 (priority 165, phase39-tsexport-basic): Implement proc_macro_derive for TsExport — walk struct fields, collect field name + Rust type. First item in the TypeScript typegen phase. Requires work in jolt-macros.
+- phase38-json-optional-types still has items 160-163 (all passes: true) and 164 (passes: true). The Optional<T> tri-state surface is now complete — both Serialize and Deserialize are wired, and struct-level serde attributes handle the NotProvided boundary.

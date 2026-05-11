@@ -7805,4 +7805,22 @@ mod optional {
             "NotProvided field must be absent from JSON output, got: {json}"
         );
     }
+
+    #[test]
+    fn deserialize_present_non_null_is_some_present_null_is_null_absent_is_not_provided() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct TestInput {
+            #[serde(default)]
+            a: Optional<i32>,
+            #[serde(default)]
+            b: Optional<i32>,
+            #[serde(default)]
+            c: Optional<i32>,
+        }
+
+        let input: TestInput = serde_json::from_str(r#"{"a": 1, "b": null}"#).unwrap();
+        assert_eq!(input.a, Optional::Some(1));
+        assert_eq!(input.b, Optional::Null);
+        assert_eq!(input.c, Optional::NotProvided);
+    }
 }

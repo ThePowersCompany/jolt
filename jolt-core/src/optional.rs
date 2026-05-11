@@ -12,8 +12,13 @@
 /// serialization; `Null` fields render as JSON `null`; `Some(T)` fields
 /// render as the inner value.
 ///
-/// Deserialize is not implemented here — it belongs to JOLT-RS-164 in
-/// phase38.
+/// # Deserialization (JOLT-RS-164)
+///
+/// Present non-null value → `Some(T)`, present null → `Null`.
+/// `NotProvided` is never returned from deserialization — the containing
+/// struct must use `#[serde(default)]` on `Optional<T>` fields so serde
+/// invokes `Default::default()` (= `NotProvided`) when the field is absent
+/// from the JSON.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Optional<T> {
     Some(T),
@@ -55,6 +60,15 @@ impl<T: serde::Serialize> serde::Serialize for Optional<T> {
             Self::Some(v) => v.serialize(serializer),
             Self::Null => serializer.serialize_none(),
             Self::NotProvided => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Optional<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Option::<T>::deserialize(deserializer)? {
+            Some(val) => Ok(Optional::Some(val)),
+            None => Ok(Optional::Null),
         }
     }
 }
