@@ -1758,8 +1758,11 @@ mod tests {
         create_migration_file, read_migration_files, sha256_hex,
     };
 
-    #[test]
-    fn default_pins_max_connections_to_10() {
+    mod connection {
+        use super::{DbConfig, JoltDb};
+
+        #[test]
+        fn default_pins_max_connections_to_10() {
         // PRD-mandated default surfaces verbatim. A derived Default would
         // give `0`; this asserts the hand-written impl is what's in effect.
         assert_eq!(DbConfig::default().max_connections, 10);
@@ -1970,6 +1973,7 @@ mod tests {
             result.is_err(),
             "expected Err from health_check against unreachable server, got Ok",
         );
+    }
     }
 
     // ---- JOLT-RS-086: JoltDb::query_as + TypedQuery<T> ----

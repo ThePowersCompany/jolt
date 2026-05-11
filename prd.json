@@ -1231,7 +1231,7 @@
       "verification": [
         "cargo test -p jolt-db -- tests::connection passes (requires running Postgres)."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-086",

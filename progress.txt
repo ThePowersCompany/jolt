@@ -4348,3 +4348,30 @@ Blockers / next notes:
 - Phase18-early-termination is now CLOSED. All 4 items (078/079/080/081) are passes: true.
 - Next highest-priority pass:false items: JOLT-RS-085 (priority 85, DB connection test), JOLT-RS-087 (priority 87, query helpers .fetch_all/.fetch_one/.fetch_optional), JOLT-RS-089 (priority 89, query helper tests). All are DB-dependent tests in phase19/phase20.
 - The `mod early_termination` block now has 15 tests total (11 JOLT-RS-078 layer-skip + 4 JOLT-RS-081 integration). The test module-level docstring (lines 5631-5648) only references JOLT-RS-078; a future housekeeping pass should update it to also mention JOLT-RS-081.
+
+## 2026-05-11 — JOLT-RS-085: DB connection tests under `tests::connection`
+
+PRD item: JOLT-RS-085 (priority 85, phase19-db-connection) — Write DB connection test: connect to test DB, verify pool is alive, verify health check passes.
+
+Verification:
+- `cargo test -p jolt-db -- tests::connection` → 15/15 passed (all connection-related tests in one filter path); 0 failed.
+- `cargo test -p jolt-db --lib` → 69/69 passed; 0 failed.
+- `cargo check --workspace` → all crates check clean; no regressions.
+
+Note on harness instructions: same as prior entries — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool. The PRD verification line names `cargo test -p jolt-db -- tests::connection passes` explicitly; the 15 tests grouped here satisfy that filter.
+
+Key decisions:
+- Restructured existing connection-related tests (DbConfig, JoltDb::connect, JoltDb::pool, JoltDb::health_check) from the flat `mod tests` into a `mod connection` submodule. The PRD verification command `cargo test -p jolt-db -- tests::connection passes` requires a submodule path filter, which the flat layout couldn't satisfy. The existing tests already covered the required behaviors (connect Ok/Err, pool alive, health_check Ok/Err); the delta is purely structural.
+- `mod connection` imports only `use super::{DbConfig, JoltDb};` — the two production types it exercises. The outer `mod tests` continues to import these (plus MigrationError, MigrationFile, TypedQuery, etc.) for the remaining tests (query_as, transaction, listen/notify, migrations). No import duplication problems because `use` in nested modules is additive, not exclusive.
+- All 15 tests in `mod connection` are unchanged in body — same assertions, same env-gated `JOLT_TEST_DATABASE_URL` convention, same error-path fixtures (127.0.0.1:1 + 1s acquire timeout). Preserving exact test logic means the refactor is zero-risk for behavioral regressions.
+- Did NOT move the `_migrations`-related tests (JOLT-RS-098 connect auto-creates _migrations, JOLT-RS-099 applied_migrations, JOLT-RS-100 migrate, etc.) into `mod connection`. Those tests exercise the migration pipeline, not the connection abstraction, and belong in their own submodules (future JOLT-RS-097/101/105 slices per the established jolt-core pattern of `tests::migration_files`, `tests::migration_apply`, `tests::migration_safety`). JOLT-RS-085 is scoped to the DB connection primitive (connect + pool + health_check) and its configuration record (DbConfig).
+- Did NOT add new tests. The PRD step list identifies exactly the three behaviors already tested (connect, pool alive, health check), and the existing 15 tests cover those plus error paths and config defaults — adding more would be scope creep for a refactoring slice.
+- The `mod connection` block sits immediately after the outer `mod tests` use block, before the JOLT-RS-086 query_as tests, following the natural phase ordering (phase19 connection tests → phase20 query tests → phase21 listen/notify → phase22+ migrations). Same ordering convention used in jolt-core's `src/tests.rs`.
+
+Files changed:
+- jolt-db/src/lib.rs — wrapped existing connection tests in `mod connection { ... }` with local `use super::{DbConfig, JoltDb};` import.
+- prd.json — JOLT-RS-085 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-087 (priority 87): .fetch_all()/.fetch_one()/.fetch_optional() tests. The terminal verbs are implemented on TypedQuery<T> (lines 1447-1468). The PRD verification calls for "each fetch variant works for 0/1/N rows" — existing tests already include `query_as_fetch_one_returns_test_row`, `query_as_fetch_optional_returns_none_for_empty`, `query_as_fetch_all_returns_all_rows`, and `query_as_with_bind_round_trips_parameter`. These likely also need structural reorganization into a `tests::query_helpers` submodule per JOLT-RS-089's verification filter (`cargo test -p jolt-db -- tests::query_helpers`). Same refactoring pattern as JOLT-RS-085 — move existing tests, don't write new ones.
+- JOLT-RS-085 is the first jolt-db test to adopt the jolt-core pattern of a named submodule filter path. Future jolt-db test slices (migration_files, migration_apply, query_helpers, listen_notify, migration_safety) should follow the same convention — one `mod <name>` per phase, one test-filter target.
