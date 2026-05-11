@@ -5689,3 +5689,28 @@ Blockers / next notes:
 - JOLT-RS-150 (priority 150): "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) → Result<JwtClaims>." A new convenience decode function mirroring encode's signature. The existing `decode(token, config: &JwtConfig)` function already handles all validation; 150 just wraps it with `JwtConfig::new(secret, algorithm.into())` + the decode call. Minimal effort.
 - JOLT-RS-151 (priority 151, closes phase35): "Write JWT tests: all three algorithms, custom claims, expired token, not-before token, wrong audience, wrong issuer, malformed token, wrong secret." Many already covered by existing tests (expired, wrong secret, malformed, custom claims). New tests needed: HS384/HS512 algorithm variants, nbf validation, iss/aud validation.
 - The `ws_macro.rs` generated-code doc comments reference `JwtClaims::extra` in explanatory text — not functional, but worth cleaning up when that file is next touched.
+
+## 2026-05-11 — JOLT-RS-150: Convenience jwt::decode_simple(token, secret, algorithm)
+
+PRD item: JOLT-RS-150 (priority 150, phase35-jwt-utils) — Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) → Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 9/9 passed (7 prior + 2 new: `encode_decode_simple_round_trip_preserves_claims`, `decode_simple_rejects_expired_token`), 0 failed.
+- `cargo check --workspace` → clean in 0.90s; no regressions.
+
+Note on harness instructions: same as prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Named the new function `decode_simple` rather than `decode` to avoid a name collision with the existing `decode(token, config: &JwtConfig)`. Rust has no function overloading, so two functions with the same name and different parameter types are illegal. `decode_simple` reads as "the simpler version of decode" — consumers who don't need fine-grained validation control call `decode_simple`; callers who already hold a `JwtConfig` continue using the existing `decode`.
+- Uses `Validation::new(algorithm.into())` directly (standard jsonwebtoken defaults) per the PRD's "Validate exp, nbf, iss, aud per jsonwebtoken::Validation" requirement. This means `validate_aud` is `true` (the jsonwebtoken default), unlike the config-based `decode()` which disables it per module decision 3. Since no audience is configured explicitly, tokens lacking an `aud` claim pass validation cleanly; tokens with an `aud` claim will be rejected (expected: the caller didn't configure which audiences to accept). Symmetric with `validate_iss` (enabled, empty set, rejects tokens with an `iss` claim) and `validate_nbf` (enabled, rejects tokens used before their nbf time).
+- Did NOT touch the existing `decode(token, config)` signature or behavior. The two functions coexist: one for `JwtConfig`-based callers (full control, relaxed aud default), one for inline-secret callers (standard validation, convenience). No callers in jolt-core reference `decode` directly via re-export (only `encode` is re-exported as `jwt_encode`), so no downstream re-export churn.
+- Two tests added: (1) `encode_decode_simple_round_trip_preserves_claims` — proves encode→decode_simple round-trip preserves sub/exp/iat; (2) `decode_simple_rejects_expired_token` — proves standard validation rejects expired tokens with `JwtDecodeError::Expired`. Both use HS256 (sufficient for correctness; HS384/HS512 coverage belongs to JOLT-RS-151's comprehensive test sweep).
+
+Files changed:
+- jolt-utils/src/jwt.rs — added `pub fn decode_simple(token, secret, algorithm) -> Result<JwtClaims, JwtDecodeError>` and 2 tests.
+- prd.json — JOLT-RS-150 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-151 (priority 151, closes phase35): comprehensive JWT tests across all three algorithms (HS384, HS512), nbf validation, iss/aud validation. Many cases already covered by the existing 9 tests (expired, bad signature, malformed, algorithm mismatch, custom claims round-trip). New coverage needed: HS384 encode/decode, HS512 encode/decode, nbf-future token rejected, iss-mismatch rejected, aud-mismatch rejected, wrong algorithm for decode_simple, decode_simple with wrong secret.
+- The name `decode_simple` is functional but not in the PRD spec. If a future PRD item renames it, a global find-and-replace across the crate is cheap (one call site in tests today).
+- No jolt-core re-exports of `decode_simple` yet; can be added when a caller materializes in core's auth layers (which currently use the config-based path).

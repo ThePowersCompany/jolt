@@ -2141,7 +2141,7 @@
       "verification": [
         "Unit test: round-trip encode\u2192decode preserves claims. Expired token \u2192 decode error."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-151",

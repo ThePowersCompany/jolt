@@ -203,6 +203,23 @@ impl std::fmt::Display for JwtEncodeError {
 
 impl std::error::Error for JwtEncodeError {}
 
+/// Convenience wrapper for [`decode`] that constructs a [`JwtConfig`] from
+/// individual `secret` + `algorithm` parameters and validates the token with
+/// the standard jsonwebtoken defaults (`exp`, `nbf`, `iss`, `aud` enabled).
+/// Prefer this over the config-based [`decode`] when you don't need
+/// fine-grained control over validation flags. JOLT-RS-150.
+pub fn decode_simple(
+    token: &str,
+    secret: &[u8],
+    algorithm: Algorithm,
+) -> Result<JwtClaims, JwtDecodeError> {
+    let key = DecodingKey::from_secret(secret);
+    let validation = Validation::new(algorithm.into());
+    jwt_decode::<JwtClaims>(token, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(map_error)
+}
+
 /// Sign `claims` with `secret` using `algorithm` and return the compact
 /// JWT string (`header.payload.signature`). JOLT-RS-149.
 ///
@@ -490,5 +507,55 @@ mod tests {
         let out = super::decode(&token, &config).expect("encode→decode round-trip must succeed");
         assert_eq!(out.sub.as_deref(), Some("bob"));
         assert_eq!(out.exp, claims.exp);
+    }
+
+    #[test]
+    fn encode_decode_simple_round_trip_preserves_claims() {
+        // PRD-mandated 150 verification: the convenience decode_simple() that
+        // takes individual (token, secret, algorithm) parameters must round-trip
+        // through encode() and use standard jsonwebtoken validation defaults
+        // (exp, nbf, iss, aud enabled).
+        let secret = b"jolt-rs-150-round-trip-secret";
+        let claims = JwtClaims {
+            sub: Some("eve".to_owned()),
+            exp: Some(now_secs() + 3600),
+            iat: Some(now_secs()),
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
+        };
+
+        let token = super::encode(&claims, secret, super::Algorithm::HS256)
+            .expect("must encode with HMAC-SHA256");
+
+        let out = super::decode_simple(&token, secret, super::Algorithm::HS256)
+            .expect("encode→decode_simple round-trip must succeed");
+        assert_eq!(out.sub.as_deref(), Some("eve"));
+        assert_eq!(out.exp, claims.exp);
+        assert_eq!(out.iat, claims.iat);
+    }
+
+    #[test]
+    fn decode_simple_rejects_expired_token() {
+        // PRD-mandated 150 verification: decode_simple() must reject expired
+        // tokens with JwtDecodeError::Expired when standard validation is used.
+        let secret = b"jolt-rs-150-expired";
+        let claims = JwtClaims {
+            sub: Some("carol".to_owned()),
+            exp: Some(1_000),
+            iat: None,
+            nbf: None,
+            iss: None,
+            aud: None,
+            custom: HashMap::new(),
+        };
+
+        let token = super::encode(&claims, secret, super::Algorithm::HS256)
+            .expect("must encode expired token");
+
+        let err = super::decode_simple(&token, secret, super::Algorithm::HS256)
+            .expect_err("expired token must reject with decode_simple");
+        assert_eq!(err, JwtDecodeError::Expired);
     }
 }
