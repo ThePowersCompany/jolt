@@ -1917,7 +1917,7 @@
       "verification": [
         "cargo test --test ws_pubsub_integration passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-135",

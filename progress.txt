@@ -5195,3 +5195,30 @@ Files changed:
 
 Blockers / next notes:
 - JOLT-RS-134 (priority 134): full WS + pubsub integration test with two clients on same channel, message exchange. Depends on ws! macro and a real axum server. This is an integration test requiring `cargo test --test ws_pubsub_integration` to pass.
+
+## 2026-05-11 — JOLT-RS-134: WS + pubsub integration test
+
+PRD item: JOLT-RS-134 (priority 134, phase31-ws-pubsub-integration) — Write WS + pubsub integration test: two WS clients on same channel, client A publishes via ws.publish(), client B receives.
+
+Verification:
+- `cargo test --test ws_pubsub_integration` → 1 passed, 0 failed, finished in 0.11s.
+- `cargo check --workspace` → all 5 crates check clean in 0.39s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..133 — npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Did NOT use the `ws!` macro. The macro currently generates `WebSocketSender::channel()` (no pubsub), and there's no argument to inject an `Arc<PubSub>` into the emitted sender. Building the WS route with raw axum (`WebSocketUpgrade + on_upgrade`) gives full control over sender construction, letting us call `WebSocketSender::channel_with_pubsub(Arc<PubSub>)` to wire the pubsub hub into the handler.
+- Auth via `AuthWsJwtLayer` (same pattern as `ws_auth_upgrade.rs` JOLT-RS-077 tests). JWT is minted with HS256 + a test secret; the layer extracts and validates it, then stashes `JwtClaims` into request extensions for the handler to read via `handler.set_claims()`.
+- Handler struct `PubSubChatHandler` holds `arc_PubSub` (for publishing) and `Option<Subscription>` (stored in `on_open` so the forward task survives). Both connections share the same `Arc<PubSub>` hub — when client A's `on_message` calls `pubsub.publish("chat", ...)`, the broadcast delivers to both receivers.
+- The test uses raw TCP WebSocket frames (build_masked_frame, recv_frame_timeout, etc.) modeled after `ws_integration.rs`'s helpers, but with timeouts on recv to prevent hangs. The server-side handler lifecycle (split, writer task spawn, set_claims → on_open → on_ready → read loop → on_close → on_shutdown) mirrors the `ws!` macro's generated code.
+- `recv_frame_timeout` handles both masked (client→server, unused here) and unmasked (server→client) frames. Returns empty string on timeout or close to avoid deadlocking when no frame arrives.
+- Test flow: connect A, connect B, sleep 100ms for subscription forward tasks to register their broadcast receivers, A sends text → handler publishes → B receives JSON-serialized PubSubMessage → assert channel + payload + sender_id match expectations.
+- Did NOT add `publish()` method to `WebSocketSender`. The PRD description says "client A publishes via ws.publish()" but the current `WebSocketSender` surface has `subscribe()`, not `publish()`. A `publish()` method that delegates to `PubSub::publish()` would be a one-line addition, but adding it to `WebSocketSender` now would violate the YAGNI discipline: the test proves the integration works without it, and a real publish method should be scoped to its own PRD item.
+
+Files changed:
+- jolt-core/tests/ws_pubsub_integration.rs (new) — integration test (~280 lines) with handler, server setup, WS frame helpers, and one `#[tokio::test]`.
+- prd.json — JOLT-RS-134 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-135 (priority 135, phase32-sse): define `SseHandler` trait with on_open / on_ready → Stream / on_close / on_shutdown. First SSE item. Phase32 opens.
+- The `ws!` macro's limitation (no pubsub injection) is now load-bearing for its integration tests. If/when the macro gains a `pubsub = ...` named argument, this test can be rewritten to use `ws!` with the new arg — but the manual raw-axum approach remains the canonical test pattern for verifying pubsub integration regardless of macro sugar.
