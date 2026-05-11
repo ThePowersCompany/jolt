@@ -4547,3 +4547,34 @@ Blockers / next notes:
 - The `TestDir` fixture is currently private to `mod tests` in jolt-templates. If jolt-db's migration-file tests (JOLT-RS-094+) need a similar fixture, consider extracting to a shared test-utils crate or duplicating per-crate per the existing convention.
 - The next unfinished item in priority order is JOLT-RS-110 (priority 110, phase26-patchquery-parsing): "Implement proc_macro_derive for PatchQuery: walk struct fields using syn, collect field name + type." Passes: false.
 - JOLT-RS-111 also passes: false — "Parse #[patch(table_name)] attribute on the struct to extract the target table name." These two items are coupled (111's attribute parsing depends on 110's field-walk setup) and should likely be tackled together or in immediate sequence.
+
+## 2026-05-11 — JOLT-RS-111: #[patch("table_name")] attribute parsing
+
+PRD item: JOLT-RS-111 (priority 111, phase26-patchquery-parsing) — Parse the struct-level `#[patch("table_name")]` attribute on `#[derive(PatchQuery)]` structs to extract the target table name.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 159 passed, 0 failed (7 new tests: extract_table_name, absent_table_is_none, duplicate_rejected, non_string_rejected, non_list_form_rejected, expand_emits_table_name, expand_emits_none). All pre-existing 152 tests pass cleanly.
+- `cargo test -p jolt-core --test patch_query_derive` → 5 passed, 0 failed (3 pre-existing field-count tests + 2 new table-name tests: `table_patch_derive_emits_table_name`, `empty_patch_missing_table_returns_none`).
+- `cargo test -p jolt-core --lib` → 219 passed, 0 failed; no regressions.
+- `cargo check --workspace` → all 5 crates check clean; no regressions in any sibling crate.
+
+Note on harness instructions: same as prior items — auto-prompt's `npm run type-check` / Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `table_name: Option<String>` field to `PatchQueryInput` (JOLT-RS-110's parse struct). The field is `Option` because table-name-less patches are syntactically valid; downstream codegen (114+) surfaces the SQL error.
+- New `parse_patch_table_attr(attrs: &[Attribute]) -> Result<Option<String>>` helper walks the DeriveInput's attrs for `#[patch("table_name")]`. Uses `attr.meta` directly (not `attr.parse_args()`) because the Meta is already populated by syn at parse time. Accepts `Meta::List` form only (`#[patch("users")]`); rejects `Meta::NameValue` (`#[patch = "users"]`) with a descriptive error.
+- `expand_patch_query` emits two marker consts: `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` (existing from 110) and `__JOLT_PATCH_QUERY_TABLE_NAME`. When a table name is present, the const is `&'static str = "users"`. When absent, it's `Option<&'static str> = None` — the type difference lets the integration test assert both presence and absence without ambiguity.
+- Unit tests construct attributes via `syn::parse_quote!(patch(#table))` + manual `Attribute` struct creation (with `style: AttrStyle::Outer`) because `TokenStream::from_str` + `parse2::<DeriveInput>` cannot parse unknown proc-macro helper attributes outside the compiler context.
+- All seven new unit tests pass: positive (extracts table name, `None` on absent), negative (duplicate rejected, non-string arg rejected, non-list form rejected), and expansion (table-name emitted, Option::None emitted).
+- Integration test added `UserTablePatch` struct with `#[patch("users")]` attribute and two assertions: correct table name for the attributed struct, `Option::None` for the un-attributed `EmptyPatch` struct. Reuses the local `Optional<T>` enum stand-in from 110's integration test.
+
+Files changed:
+- jolt-macros/src/patch_query.rs — added `table_name: Option<String>` to `PatchQueryInput`; added `parse_patch_table_attr()` helper; updated `parse_patch_query_input()` to call it; updated `expand_patch_query()` to emit `__JOLT_PATCH_QUERY_TABLE_NAME`; added 7 new unit tests + 3 test helpers (`with_patch_attr`, `with_non_list_patch_attr`, `with_non_string_patch_attr`).
+- jolt-core/tests/patch_query_derive.rs — added `#[patch("users")]` attributed struct `UserTablePatch`; added 2 new tests (`table_patch_derive_emits_table_name`, `empty_patch_missing_table_returns_none`); updated module docstring to cover 110 + 111.
+- prd.json — JOLT-RS-111 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-112 (priority 112, phase26): "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state." This is the natural next step — it extends `PatchQueryField` with a classification flag (is_optional) and inspects field types to spot `Optional<T>` patterns in the syn AST.
+- JOLT-RS-113 (priority 113): builds `Vec<PatchField>` internal representation from the now-classified fields. These three slices (111/112/113) are tightly coupled and form the phase26 parsing stack.
+- The `table_name: Option<String>` field on `PatchQueryInput` is consumed by JOLT-RS-114+ codegen (the `to_patch_query` method needs the table name to generate `UPDATE <table> SET ...`).
+- All integration tests continue to work through the same `#[derive(PatchQuery)]` → compile-time const pattern. When 112 adds field classification, the integration test will need a runtime-observable marker (similar to `__JOLT_PATCH_QUERY_FIELD_COUNT`) or a check on the classification flag count.

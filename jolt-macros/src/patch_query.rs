@@ -25,19 +25,21 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, Ident, Type};
+use syn::{parse2, Data, DataStruct, DeriveInput, Fields, Ident, LitStr, Meta, Type};
 
 /// Parsed shape of a `#[derive(PatchQuery)]` input.
 ///
 /// JOLT-RS-110 captures the struct identifier and per-field metadata (name +
-/// type, verbatim). Later phase26 slices extend [`PatchQueryField`] with
-/// optional-detection state (112) and column-name overrides; this slice keeps
-/// the shape minimal so 111-117 have a single place to add fields without
-/// breaking the parse entry point.
+/// type, verbatim). JOLT-RS-111 adds the struct-level `#[patch("table_name")]`
+/// attribute extraction into [`table_name`]. Later phase26 slices extend
+/// [`PatchQueryField`] with optional-detection state (112) and column-name
+/// overrides; this slice keeps the shape minimal so 111-117 have a single place
+/// to add fields without breaking the parse entry point.
 #[derive(Debug)]
 pub(crate) struct PatchQueryInput {
     pub(crate) ident: Ident,
     pub(crate) fields: Vec<PatchQueryField>,
+    pub(crate) table_name: Option<String>,
 }
 
 /// One field on a `#[derive(PatchQuery)]` struct. Captured verbatim from
@@ -78,10 +80,11 @@ pub(crate) fn parse_patch_query_input(
     input: DeriveInput,
 ) -> syn::Result<PatchQueryInput> {
     let ident = input.ident.clone();
+    let table_name = parse_patch_table_attr(&input.attrs)?;
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
-            Ok(PatchQueryInput { ident, fields })
+            Ok(PatchQueryInput { ident, fields, table_name })
         }
         Data::Enum(e) => Err(syn::Error::new_spanned(
             e.enum_token,
@@ -92,6 +95,49 @@ pub(crate) fn parse_patch_query_input(
             "#[derive(PatchQuery)] can only be applied to structs, not unions",
         )),
     }
+}
+
+/// Parse the struct-level `#[patch("table_name")]` attribute.
+///
+/// JOLT-RS-111: walks the DeriveInput's attrs for one matching
+/// `#[patch("table_name")]`, extracts the string-literal argument, and returns
+/// it. If the attribute is absent, returns `Ok(None)` (table-name-less patches
+/// are syntactically valid; downstream codegen surfaces the error). If the
+/// attribute is present but malformed (wrong shape, missing string literal,
+/// duplicate), returns a `syn::Error`.
+fn parse_patch_table_attr(
+    attrs: &[syn::Attribute],
+) -> syn::Result<Option<String>> {
+    let mut found: Option<String> = None;
+    for attr in attrs {
+        if !attr.path().is_ident("patch") {
+            continue;
+        }
+        let meta = &attr.meta;
+        let inner: TokenStream = match meta {
+            Meta::List(list) => list.tokens.clone(),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "expected #[patch(\"table_name\")] with a string literal argument",
+                ));
+            }
+        };
+        let lit: LitStr = parse2(inner).map_err(|_| {
+            syn::Error::new_spanned(
+                meta,
+                "expected #[patch(\"table_name\")] with a single string literal argument",
+            )
+        })?;
+        if found.is_some() {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "duplicate #[patch(\"...\")] attribute: only one table name is allowed",
+            ));
+        }
+        found = Some(lit.value());
+    }
+    Ok(found)
 }
 
 fn parse_struct_fields(
@@ -142,11 +188,24 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
     };
     let ident = &parsed.ident;
     let field_count = parsed.fields.len();
+    let table_name_const = match &parsed.table_name {
+        Some(t) => quote! {
+            #[doc(hidden)]
+            pub const __JOLT_PATCH_QUERY_TABLE_NAME: &'static str = #t;
+        },
+        None => {
+            quote! {
+                #[doc(hidden)]
+                pub const __JOLT_PATCH_QUERY_TABLE_NAME: ::core::option::Option<&'static str> = ::core::option::Option::None;
+            }
+        }
+    };
     quote! {
         #[automatically_derived]
         impl #ident {
             #[doc(hidden)]
             pub const __JOLT_PATCH_QUERY_FIELD_COUNT: usize = #field_count;
+            #table_name_const
         }
     }
 }
@@ -160,6 +219,42 @@ mod tests {
     fn parse_derive(src: &str) -> DeriveInput {
         let tokens = TokenStream::from_str(src).expect("test input parses as TokenStream");
         parse2::<DeriveInput>(tokens).expect("test input parses as DeriveInput")
+    }
+
+    fn with_patch_attr(mut input: DeriveInput, table: &str) -> DeriveInput {
+        let meta: syn::Meta = syn::parse_quote!(patch(#table));
+        let attr = syn::Attribute {
+            pound_token: syn::token::Pound::default(),
+            style: syn::AttrStyle::Outer,
+            bracket_token: syn::token::Bracket::default(),
+            meta,
+        };
+        input.attrs.push(attr);
+        input
+    }
+
+    fn with_non_list_patch_attr(mut input: DeriveInput) -> DeriveInput {
+        let meta: syn::Meta = syn::parse_quote!(patch = "users");
+        let attr = syn::Attribute {
+            pound_token: syn::token::Pound::default(),
+            style: syn::AttrStyle::Outer,
+            bracket_token: syn::token::Bracket::default(),
+            meta,
+        };
+        input.attrs.push(attr);
+        input
+    }
+
+    fn with_non_string_patch_attr(mut input: DeriveInput) -> DeriveInput {
+        let meta: syn::Meta = syn::parse_quote!(patch(42));
+        let attr = syn::Attribute {
+            pound_token: syn::token::Pound::default(),
+            style: syn::AttrStyle::Outer,
+            bracket_token: syn::token::Bracket::default(),
+            meta,
+        };
+        input.attrs.push(attr);
+        input
     }
 
     #[test]
@@ -319,6 +414,143 @@ mod tests {
         assert!(
             !out.contains("__JOLT_PATCH_QUERY_FIELD_COUNT"),
             "no partial codegen on parse failure, got: {out}"
+        );
+    }
+
+    // ── JOLT-RS-111: #[patch("table_name")] attribute parsing ──
+
+    #[test]
+    fn parse_patch_table_attr_extracts_table_name() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.table_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn parse_patch_table_attr_returns_none_when_absent() {
+        let input = parse_derive(
+            r#"
+            struct NoTable {
+                name: Optional<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.table_name, None);
+    }
+
+    #[test]
+    fn parse_patch_table_attr_rejects_duplicate_attribute() {
+        let input = with_patch_attr(
+            with_patch_attr(
+                parse_derive(
+                    r#"
+                    struct DupePatch {
+                        name: Optional<String>,
+                    }
+                    "#,
+                ),
+                "users",
+            ),
+            "accounts",
+        );
+        let err = parse_patch_query_input(input)
+            .expect_err("duplicate #[patch] must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate"),
+            "diagnostic must mention duplicate, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_patch_table_attr_rejects_non_string_argument() {
+        let input = with_non_string_patch_attr(
+            parse_derive(
+                r#"
+                struct BadPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+        );
+        let err = parse_patch_query_input(input)
+            .expect_err("non-string #[patch] arg must be rejected");
+        assert!(
+            err.to_string().contains("string literal"),
+            "diagnostic must mention string literal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_patch_table_attr_rejects_non_list_form() {
+        let input = with_non_list_patch_attr(
+            parse_derive(
+                r#"
+                struct BadPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+        );
+        let err = parse_patch_query_input(input)
+            .expect_err("NameValue #[patch] must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string literal") || msg.contains("expected"),
+            "diagnostic must describe expected shape, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_table_name_when_present() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("__JOLT_PATCH_QUERY_TABLE_NAME"),
+            "emission must declare the table-name const, got: {out}"
+        );
+        assert!(
+            out.contains("\"users\""),
+            "table-name const must carry the parsed table name (\"users\"), got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_none_table_name_when_absent() {
+        let input = parse_derive(
+            r#"
+            struct NoTable {
+                name: Optional<String>,
+            }
+            "#,
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("__JOLT_PATCH_QUERY_TABLE_NAME"),
+            "emission must declare the table-name const even when absent, got: {out}"
+        );
+        assert!(
+            out.contains("Option::None") || out.contains("core :: option :: Option :: None"),
+            "absent table must emit Option::None, got: {out}"
         );
     }
 }

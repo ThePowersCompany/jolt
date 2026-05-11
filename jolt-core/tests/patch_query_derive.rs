@@ -1,8 +1,8 @@
-//! JOLT-RS-110 PRD-mandated integration test.
+//! JOLT-RS-110 / JOLT-RS-111 PRD-mandated integration tests.
 //!
 //! Verifies that `#[derive(PatchQuery)]` compiles on a struct with
-//! `Optional<T>` fields — the PRD's verification line: "Derive compiles on a
-//! struct with Optional<T> fields."
+//! `Optional<T>` fields (110) and that the struct-level `#[patch("table")]`
+//! attribute is parsed and emitted (111).
 //!
 //! This is an integration test (not a unit test) because the derive macro can
 //! only be exercised through cargo's compile pipeline. The proc-macro crate's
@@ -10,11 +10,11 @@
 //! type-check the derive against a real `DeriveInput` from a downstream crate.
 //!
 //! The hidden `__JOLT_PATCH_QUERY_FIELD_COUNT` const emitted by the 110 derive
-//! is the observable witness that parsing succeeded. Later phase26/27 items
-//! (111-117) replace the marker const with the real `to_patch_query` method
-//! and the `#[patch("table")]` attribute parsing; the const stays alongside
-//! the new surfaces until a runtime-witness test from a later slice makes it
-//! redundant.
+//! and the `__JOLT_PATCH_QUERY_TABLE_NAME` const emitted by 111 are the
+//! observable witnesses that parsing succeeded. Later phase26/27 items
+//! (112-117) replace the marker consts with the real `to_patch_query` method;
+//! the consts stay alongside the new surfaces until a runtime-witness test
+//! from a later slice makes them redundant.
 //!
 //! `Optional<T>` is defined locally in this file because the framework's own
 //! `jolt_utils::Optional` tri-state type has not been introduced yet (its
@@ -93,4 +93,27 @@ fn mixed_patch_derive_counts_optional_and_plain_fields_together() {
     // concern. A regression that pre-filtered by optional-ness would report 2
     // (Optional-only) or 0 here.
     assert_eq!(MixedPatch::__JOLT_PATCH_QUERY_FIELD_COUNT, 4);
+}
+
+// ── JOLT-RS-111: #[patch("table_name")] attribute parsing ──
+
+/// The PRD-mandated surface: a struct with `#[patch("users")]` to verify the
+/// table-name attribute is parsed through the derive and emitted as an
+/// observable compile-time constant.
+#[derive(PatchQuery)]
+#[patch("users")]
+#[allow(dead_code)]
+struct UserTablePatch {
+    name: Optional<String>,
+    email: Optional<String>,
+}
+
+#[test]
+fn table_patch_derive_emits_table_name() {
+    assert_eq!(UserTablePatch::__JOLT_PATCH_QUERY_TABLE_NAME, "users");
+}
+
+#[test]
+fn empty_patch_missing_table_returns_none() {
+    assert!(EmptyPatch::__JOLT_PATCH_QUERY_TABLE_NAME.is_none());
 }
