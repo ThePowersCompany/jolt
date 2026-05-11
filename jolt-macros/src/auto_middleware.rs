@@ -2620,4 +2620,64 @@ mod tests {
             "extraction helper must be emitted, rendered: {rendered}"
         );
     }
+
+    #[test]
+    fn expand_auto_middleware_with_body_query_and_request_fields_produces_all_surfaces() {
+        // JOLT-RS-054: declare struct with body + query_params(HashMap) + req(Request)
+        // fields, expand through the full pipeline, verify every observable surface
+        // (marker consts, Layer/Service impl, extraction method with all three
+        // field-initialization expressions, chain markers for query and body steps).
+        let input = parse_derive(
+            r#"
+            struct Mixed {
+                body: CreateUserRequest,
+                query_params: HashMap<String, String>,
+                req: Request,
+            }
+            "#,
+        );
+        let rendered = expand_auto_middleware(input).to_string();
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT"),
+            "marker const for field count, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__JOLT_AUTO_MIDDLEWARE_CORS"),
+            "marker const for cors, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Layer < __S > for Mixed"),
+            "Layer impl for the struct, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: jolt_core :: tower :: Service <"),
+            "Service impl for the wrapper, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("fn __jolt_extract_from"),
+            "extraction helper method, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__req . json :: < CreateUserRequest > ()"),
+            "body extraction via json, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(":: core :: clone :: Clone :: clone (& __req . query_params)"),
+            "query_params extraction via clone, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                ":: jolt_core :: Request as :: core :: clone :: Clone > :: clone (__req)"
+            ),
+            "req extraction via Clone on Request, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("jolt::middleware::step::parse_query"),
+            "parse_query chain marker, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("jolt::middleware::step::parse_body"),
+            "parse_body chain marker, rendered: {rendered}"
+        );
+    }
 }

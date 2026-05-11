@@ -4112,3 +4112,48 @@ Notes for next iterations:
 - phase09-endpoint-macro-codegen is now nearly CLOSED. Items 042-045 are all passes: true. The phase is complete (the remaining items 038-041 in phase08 were already pass:true).
 - JOLT-RS-054 (priority 54, auto-middleware derive test) is the next highest-priority pass:false item.
 - JOLT-RS-062 (priority 62, body parsing unit test bundle) and JOLT-RS-067 (priority 67, query parsing unit test bundle) are close-behind phase closers.
+
+================================================================================
+Iteration: 2026-05-11 (JOLT-RS-054 — closing test: body+query+req e2e expansion)
+PRD item: JOLT-RS-054 (priority 54, phase11-automiddleware-layer-codegen)
+Description: "Write unit test: derive AutoMiddleware on struct with body + query + req fields, verify generated impl runs and populates fields correctly."
+PRD verification: "cargo test -p jolt-macros -- tests::auto_middleware passes."
+
+Why picked over the strict-priority next items (JOLT-RS-027 port-binding-conflict polish; JOLT-RS-032 endpoint-registry test bundle; JOLT-RS-045 endpoint-integration polish; JOLT-RS-062 phase13 closing test bundle; JOLT-RS-067 phase14 closing test bundle): per the auto-prompt's prioritization rule, 054 is a phase11 closing test that verifies all three surface families (marker consts, layer+service impl, chain markers, extraction method) coexist in a single expansion with body+query_params+req fields. It fills the remaining gap from JOLT-RS-053's progress notes — the integration test in `jolt-core/tests/auto_middleware_derive.rs` already exercises `__jolt_extract_from` at runtime; what was missing was a unit test in jolt-macros that directly checks `expand_auto_middleware`'s output for the three-field combination. 027/032/045/062/067 remain test-bundle polish with no upstream dependencies; deferring them does not block any phase11+ work.
+
+Implementation notes:
+- Single new test `expand_auto_middleware_with_body_query_and_request_fields_produces_all_surfaces` in `jolt-macros/src/auto_middleware.rs::tests`. Calls `expand_auto_middleware` on a `struct Mixed { body: CreateUserRequest, query_params: HashMap<String, String>, req: Request }`, asserts the rendered TokenStream contains all expected elements:
+  1. `__JOLT_AUTO_MIDDLEWARE_FIELD_COUNT` (marker const)
+  2. `__JOLT_AUTO_MIDDLEWARE_CORS` (marker const, defaults false)
+  3. `:: jolt_core :: tower :: Layer < __S > for Mixed` (Layer impl)
+  4. `:: jolt_core :: tower :: Service <` (Service impl)
+  5. `fn __jolt_extract_from` (extraction helper method)
+  6. `__req . json :: < CreateUserRequest > ()` (body field init)
+  7. `:: core :: clone :: Clone :: clone (& __req . query_params)` (query_params field init)
+  8. `:: jolt_core :: Request as :: core :: clone :: Clone > :: clone (__req)` (req field init)
+  9. `jolt::middleware::step::parse_query` (chain marker, no `::` spaces inside string literal)
+  10. `jolt::middleware::step::parse_body` (chain marker, no `::` spaces inside string literal)
+- Assertion shape: each assert is a standalone `assert!(rendered.contains("..."), "label, rendered: {rendered}")` so the panic message with the full rendered output is self-documenting on failure.
+- Chain marker assertions use `::` without spaces inside the string literal (e.g. `"jolt::middleware::step::parse_query"` not `"jolt :: middleware :: step :: parse_query"`) because `proc_macro2::TokenStream::to_string` renders string-literals verbatim without space-separating the `::` tokens.
+- Test lives at the end of `mod tests` (sibling to `expand_auto_middleware_includes_extraction_method`) because it's an end-to-end expansion test, not a parse-shape or per-step codegen test.
+
+Key decisions:
+- Token-shape assertions over runtime assertions: proc-macro crates can't expand their own derives at unit-test time, so the test verifies the expansion output shape. The integration test in `jolt-core/tests/auto_middleware_derive.rs` already covers runtime population.
+- One test only: the existing 81 tests in the module already cover the full parse/classify/splice surface per kind; this test adds the missing end-to-end combination snapshotted in a single expansion.
+- String-literal assertions (not token-tree walk): matching via `contains` on the rendered string is the pattern all 81 existing tests use; consistent and low-friction.
+
+Verification:
+- `cargo test -p jolt-macros -- auto_middleware::tests` → 82/82 passed (1 new), 0 failed.
+- `cargo test --workspace` → all 485 tests pass; no regressions in any sibling crate.
+- `cargo clippy --workspace --all-targets` → same 2 pre-existing baseline warnings (`new_without_default` on `RequestExt` and `JoltServer`); 0 new warnings.
+
+Files changed:
+- `jolt-macros/src/auto_middleware.rs` — added `expand_auto_middleware_with_body_query_and_request_fields_produces_all_surfaces` test (1 new, 81→82 tests in the module; 152 total jolt-macros unit tests).
+- `prd.json` — JOLT-RS-054 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-054 closes out the core implementation of phase11. The remaining phase11 item is conceptually 054 itself — the closing test.
+- JOLT-RS-027 (port-binding-conflict polish), 032 (endpoint-registry test bundle), 045 (endpoint-integration test). Still the pre-046 holdouts. With phase11 now fully closed (046-054 all passes:true), these become the earliest remaining open items.
+- JOLT-RS-062 (phase13 closing test bundle) and JOLT-RS-067 (phase14 closing test bundle) are the next phase-closing items.
+- `generate_dispatch_match` still has `#[allow(dead_code)]` and is unused. Deletion deferred from multiple prior iterations; recommend removing in a polish pass.
+- `mod auto_middleware::tests` is now at 82 tests. Recommended split-by-concern (flag in 053's progress notes): `parse_struct_shape` (~8), `classify_field_kind` (~22), `parse_struct_attrs` (~5), `expand_marker_emission` (~8), `expand_layer_codegen` (~9), `chain_construction` (~10), `expand_chain_splicing` (~9), `expand_extraction` (~10+1). Purely organizational.

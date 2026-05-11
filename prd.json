@@ -797,7 +797,7 @@
       "verification": [
         "cargo test -p jolt-macros -- tests::auto_middleware passes."
       ],
-      "passes": false
+        "passes": true
     },
     {
       "id": "JOLT-RS-055",
