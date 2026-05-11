@@ -2393,7 +2393,8 @@
       "verification": [
         "Unit test: struct with all basic types → correct TS interface string."
       ],
-      "passes": false
+      "passes": true,
+      "_note": "Duplicate of completed JOLT-RS-166 (line 2368). Marked true 2026-05-11 — same work, already verified."
     },
     {
       "id": "JOLT-RS-169",

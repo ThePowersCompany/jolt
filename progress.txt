@@ -6143,3 +6143,23 @@ Notes for next iterations:
 - JOLT-RS-168 (priority 168): Generate the `export interface StructName { ... }` TS definition with sorted fields. Can now use `TsExportField::ts_type` to populate the RHS of each property.
 - JOLT-RS-169 (priority 169): `#[ts(rename = "newName")]` support. Will need `attributes(ts)` added to the derive declaration in lib.rs.
 - The `rust_type_to_ts` function is intentionally narrow — only path-based types with identity matching. When cross-crate type resolution (e.g., a struct defined in another crate) is needed, that's a separate feature.
+
+## 2026-05-11 — JOLT-RS-166 (duplicate fix): duplicate entry marked complete
+
+PRD item: JOLT-RS-166 (priority 166, phase39-tsexport-basic, duplicate entry at ~line 2396) — Duplicate of the completed JOLT-RS-166 at priority 166. Same description, same steps, same verification. The `rust_type_to_ts` function and all 14 type-mapping tests already exist and pass (verified in the original 2026-05-11 JOLT-RS-166 round).
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 216 passed, 0 failed (unchanged; no new code needed — work was already done).
+- `cargo check --workspace` → clean in 0.43s; no regressions.
+
+Key decisions:
+- Marked `passes: true` with a `_note` field documenting it as a duplicate. Did not write any new code — the type-mapping work was completed under the original JOLT-RS-166 entry.
+
+Files changed:
+- prd.json — duplicate JOLT-RS-166 passes: true, added `_note`.
+- (no code changes — `rust_type_to_ts` and tests already shipped in the prior JOLT-RS-166 round)
+
+Notes for next iterations:
+- JOLT-RS-169 (priority 169, `#[ts(rename = "newName")]` support) is the next legitimate unfinished item. Requires: (a) adding `attributes(ts)` to the `#[proc_macro_derive(TsExport)]` declaration in lib.rs, (b) parsing `#[ts(rename = "...")]` on fields in `parse_struct_fields`, (c) storing the rename string in `TsExportField`, (d) emitting it into the marker consts so tests can observe it.
+- JOLT-RS-170 (flatten), JOLT-RS-171 (doc comments), JOLT-RS-172 (closing tests) follow.
+- JOLT-RS-167 and JOLT-RS-168 are both marked passes: true in the PRD — skip them.
