@@ -97,7 +97,7 @@
       "description": "Create joltr-types binary crate in workspace. It collects all #[derive(TsExport)] structs via linkme/inventory at link time, renders TypeScript interfaces/enums/unions, and writes types.d.ts to the workspace root.",
       "files": ["joltr-types/Cargo.toml", "joltr-types/src/main.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "12",

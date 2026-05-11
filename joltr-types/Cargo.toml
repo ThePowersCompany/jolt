@@ -1,0 +1,22 @@
+[package]
+name = "joltr-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Binary entry point: walks the `linkme`/`inventory` registry populated by
+# `#[derive(TsExport)]` and writes a TypeScript declaration file.
+#
+# Marked `path = "src/main.rs"` explicitly so the scaffold lives entirely
+# inside `src/main.rs` for PRD #11 (JOLTR-RS-176). PRD #12 (JOLTR-RS-177)
+# adds `src/lib.rs` with the richer `TsTypeDef` and rendering surface; the
+# binary will then move to `joltr_types::main_entry()`-style glue while
+# this `[[bin]]` block stays intact.
+[[bin]]
+name = "joltr-types"
+path = "src/main.rs"
+
+[dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]

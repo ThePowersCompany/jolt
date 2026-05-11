@@ -71,3 +71,44 @@ Files changed:
 Next notes:
 - PRD #9's optional follow-up (`#[derive(JoltRError)]` for enum errors with per-variant `#[joltr_error(status = N, message = "...")]`) remains the natural next polish — would let users skip the manual `match` in `status()`/`message()` and would compose cleanly with the macro-emitted default Err branch landed here.
 - The custom-handler path lets the user return any `impl IntoResponse`. If a future PRD wants a stricter contract (e.g. always `Response<ErrorBody>` so error responses are uniformly observable), we can tighten by replacing `IntoResponse::into_response(my_fn(__err))` with an explicit cast — backwards-compatible for users who already return `Response<ErrorBody>`.
+
+
+2026-05-11 PRD #11 — TsExport: joltr-types binary crate (scaffold)
+
+Completed:
+- Added `joltr-types` as a new workspace member (root Cargo.toml `members` list).
+- `joltr-types/Cargo.toml` — `[[bin]] name = "joltr-types", path = "src/main.rs"`. Single runtime dep on `inventory` (workspace). No lib target yet; that arrives with PRD #12.
+- `joltr-types/src/main.rs` — end-to-end pipeline:
+  - `pub struct TsTypeDef { name, body }` placeholder + `inventory::collect!(TsTypeDef)` collection point.
+  - `HEADER` const matches the legacy Zig generator's `// === DO NOT MODIFY ===` marker so editors/tooling that key off that string keep working across the port.
+  - `render()` walks `inventory::iter::<TsTypeDef>` in insertion order, prefixed by `HEADER`.
+  - `resolve_out_path()` honours `JOLTR_TYPES_OUT` first (test sandbox), otherwise writes to `<workspace_root>/types.d.ts` derived from `env!("CARGO_MANIFEST_DIR").parent()`.
+  - `main()` writes the rendered string and logs the byte count + destination.
+- `joltr-types/tests/ts_export_integration.rs` — 2 integration tests that spawn `CARGO_BIN_EXE_joltr-types` with `JOLTR_TYPES_OUT` redirected into `target/joltr-types-test-<nanos>-<suffix>.d.ts`:
+  - `binary_writes_header_to_redirected_output` — exit 0, file contents start with the canonical header.
+  - `binary_emits_one_entry_per_inventory_submission` — pins the pre-#12 invariant that the body is exactly the header (no submissions yet); this test will fail loudly when PRD #12 wires `#[derive(TsExport)]` into `inventory::submit!`, surfacing the integration moment.
+
+Verification:
+- cargo check --workspace → clean (only new `joltr-types` checked).
+- cargo build --workspace → clean (binary + lib targets all link).
+- cargo test -p joltr-types → 2 passed (both integration tests).
+- cargo test -p joltr-core --test inventory_registration → 9 passed (regression sweep: the new crate adds a second `inventory::collect!` site in the workspace; this confirms the existing endpoint registry collection is unaffected).
+- Smoke run: `JOLTR_TYPES_OUT=/tmp/... cargo run -q -p joltr-types` wrote 92 bytes (header only) — pipeline functional.
+
+Key decisions:
+- Output path is overridable via `JOLTR_TYPES_OUT` env var. Rationale: a `cargo test` of the binary would otherwise clobber the developer's workspace-level `types.d.ts` (which is `.gitignore`d but still locally meaningful). The env override keeps the integration test hermetic and discoverable on failure (artifacts land in `target/`, not auto-deleted on assertion failure so they can be inspected).
+- `TsTypeDef` placeholder is `name + body: &'static str` rather than the richer `kind + fields + generics + docs` shape PRD #12 specifies. Rationale: PRD #11's file list is only `Cargo.toml + src/main.rs` (no `lib.rs`); putting a richer struct in `main.rs` would mean #12 has to delete it and recreate it in `lib.rs`. Keeping the placeholder minimal makes #12's move feel like a refactor rather than a rewrite, and the rendering surface in `render()` is small enough to swap in one edit.
+- Binary-only crate (no `[lib]` target yet) — `inventory::submit!` from external crates can't target a symbol that's binary-private, so PRD #12 will add `joltr-types/src/lib.rs` and re-home `TsTypeDef` + `inventory::collect!` there. Calling this out so #12 doesn't get surprised by having to add a `[lib]` target alongside touching `lib.rs`.
+- Workspace root resolved via `env!("CARGO_MANIFEST_DIR").parent()` instead of walking up looking for a `Cargo.toml` with `[workspace]`. Rationale: `joltr-types` lives one level deep in the workspace by convention (mirrors `joltr-core`, `joltr-macros`, ...); a parent-of-manifest-dir hop is deterministic and cheap, and the layout move would itself be a workspace-wide refactor that would change this anyway.
+- The second integration test (`binary_emits_one_entry_per_inventory_submission`) is intentionally a tripwire for PRD #12. When #12 adds the first `inventory::submit!` from the `#[derive(TsExport)]` proc-macro, this test will fail — that's the signal to update the assertion alongside #12's macro changes, which keeps the inventory plumbing visibly tested rather than silently empty.
+
+Files changed:
+- Cargo.toml (workspace `members` list: + `joltr-types`)
+- joltr-types/Cargo.toml (new)
+- joltr-types/src/main.rs (new)
+- joltr-types/tests/ts_export_integration.rs (new)
+- prd.json (item 11 → passes: true)
+
+Next notes:
+- PRD #12 is now unblocked: add `joltr-types/src/lib.rs` exposing the full `TsTypeDef { name, kind: Interface|Enum|Union, fields, generics, docs }` plus the `inventory::collect!` collection point; flip `main.rs` to import from the lib; update `joltr-macros/src/ts_export.rs` to emit `inventory::submit!` per derive site; and update the empty-registry tripwire test to assert the new expected output.
+- The placeholder `body: &'static str` field will go away — #12's rendering happens inside `joltr-types` rather than at submit time, so the macro only ships the structured data, not pre-rendered strings.

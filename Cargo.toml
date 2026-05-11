@@ -6,6 +6,7 @@ members = [
     "joltr-db",
     "joltr-utils",
     "joltr-templates",
+    "joltr-types",
 ]
 
 [workspace.package]
