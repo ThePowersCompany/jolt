@@ -5907,5 +5907,28 @@ Files changed:
 - prd.json — JOLT-RS-157 passes: true.
 
 Blockers / next notes:
-- JOLT-RS-158 (priority 158): Define static MIME_TABLE as `phf::Map<&str, &str>`. Requires adding `phf` (v0.11, feature = "macros") to workspace deps. The `phf_macros` crate provides the `phf_map!` macro for compile-time perfect-hash map construction. jolt-utils is the natural home.
+- JOLT-RS-158 (priority 158): COMPLETED. MIME_TABLE uses LazyLock<HashMap> instead of phf::Map (see entry below for rationale).
 - JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>` — depends on 158's MIME_TABLE.
+
+## 2026-05-11 — JOLT-RS-158: static MIME_TABLE (opens phase37)
+
+PRD item: JOLT-RS-158 (priority 158, phase37-datetime-email-mime) — Define static MIME_TABLE mapping common extensions to content types.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 84 passed (7 new mime tests + 77 existing); 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Key decisions:
+- Used `std::sync::LazyLock<HashMap<&'static str, &'static str>>` instead of `phf::Map`. Rust 1.95 supports `LazyLock` in std. `phf` is not in workspace deps and would require adding `phf` (v0.11, feature = "macros") to the workspace plus a proc-macro dep. 21-entry static MIME table doesn't benefit meaningfully from a compile-time perfect hash; `LazyLock` initializes once on first access with negligible overhead. If compile-time immutability or embedded/no_std enforcement is later needed, swapping in `phf` is a mechanical migration.
+- Added `content_type_for_extension(ext: &str) -> Option<&'static str>` convenience function alongside the raw table. The PRD verifies `MIME_TABLE[".html"]` directly through the table (test `html_extension_returns_text_html`) and also exercises the wrapper (`content_type_for_extension_returns_correct_type`). This avoids exposing the table visibility decision prematurely — JOLT-RS-159 will decide whether callers access the table directly or through the function.
+- Included 21 common extensions: .html/.htm (text/html), .css, .js/.mjs, .json, .png, .jpg/.jpeg, .gif, .svg, .ico, .webp, .txt, .xml, .pdf, .zip, .mp4, .webm, .mp3, .wasm. No exotic types (font/woff2, model/gltf, etc.) — add when a concrete consumer needs them.
+- Module file is `jolt-utils/src/mime.rs` — inserted alphabetically between `jwt` and `password` in lib.rs's module list.
+- Seven inline tests: (1) html/css/js/json/png lookup; (2) unknown extension → None; (3) content_type_for_extension wrapper round-trip. All sync, no external deps.
+
+Files changed:
+- jolt-utils/src/mime.rs (new) — `MIME_TABLE` (LazyLock<HashMap>) + `content_type_for_extension` + 7 inline unit tests.
+- jolt-utils/src/lib.rs — added `pub mod mime;`.
+- prd.json — JOLT-RS-158 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>`. Extract extension (lowercase), lookup in MIME_TABLE. Fallback `None` for unknown or missing extension. The `content_type_for_extension` helper in mime.rs provides the table access; 159 just needs path→extension extraction logic (e.g. `Path::new(s).extension()?.to_str()?.to_ascii_lowercase()` with leading dot prepend).

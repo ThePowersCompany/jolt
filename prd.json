@@ -2253,7 +2253,7 @@
       "verification": [
         "Unit test: MIME_TABLE[\".html\"] == \"text/html\"."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-159",
