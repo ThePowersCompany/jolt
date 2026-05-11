@@ -67,7 +67,7 @@ pub use request_ext::RequestExt;
 pub use response::{JsonBody, Response};
 pub use router::Router;
 pub use server::{CorsConfig, JoltServer, TlsConfig};
-pub use sse::{SseEvent, SseHandler, SseStream};
+pub use sse::{into_sse_response, SseEvent, SseHandler, SseStream};
 pub use status::StatusCode;
 // JOLT-RS-118 surface: the WebSocket lifecycle trait (five async callbacks
 // with no-op defaults).

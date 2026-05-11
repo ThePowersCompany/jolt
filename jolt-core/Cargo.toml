@@ -27,3 +27,7 @@ dashmap = { workspace = true }
 # library, which gives end-to-end coverage without forcing `jolt-utils` to
 # expose an `encode` helper on its public surface yet.
 jsonwebtoken = { workspace = true }
+
+# Used by SSE adapter tests (JOLT-RS-137) to collect axum response bodies
+# into bytes for assertion.
+http-body-util = { workspace = true }

@@ -1959,7 +1959,7 @@
       "verification": [
         "Integration test: GET /events \u2192 200 with text/event-stream, events streamed."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-138",

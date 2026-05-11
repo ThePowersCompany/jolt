@@ -12,7 +12,10 @@
 //! - JOLT-RS-138: keep-alive comment events every 15s to prevent proxy
 //!   timeouts.
 
+use std::convert::Infallible;
+use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::response::sse::Event as AxumSseEvent;
@@ -102,10 +105,11 @@ pub type SseStream = Pin<Box<dyn Stream<Item = SseEvent> + Send>>;
 ///     }
 /// }
 /// ```
-#[allow(async_fn_in_trait)]
 pub trait SseHandler {
     /// Called once when a new SSE connection is opened.
-    async fn on_open(&mut self) {}
+    fn on_open(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called after [`on_open`](Self::on_open). Returns the stream of
     /// [`SseEvent`] items that will be written to the SSE connection.
@@ -118,9 +122,92 @@ pub trait SseHandler {
 
     /// Called once when the SSE client disconnects or the connection is
     /// torn down.
-    async fn on_close(&mut self) {}
+    fn on_close(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called once after [`on_close`](Self::on_close) when the connection
     /// is fully shut down.
-    async fn on_shutdown(&mut self) {}
+    fn on_shutdown(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+}
+
+/// Stream adapter that owns an [`SseHandler`] and calls `on_close` /
+/// `on_shutdown` when the inner event stream terminates or is dropped
+/// (client disconnect).
+///
+/// Not part of the public API — callers go through
+/// [`into_sse_response`].
+struct SseCleanupStream<H: SseHandler + Send + 'static> {
+    inner: SseStream,
+    handler: Option<H>,
+}
+
+impl<H: SseHandler + Send + 'static> Drop for SseCleanupStream<H> {
+    fn drop(&mut self) {
+        if let Some(mut handler) = self.handler.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    handler.on_close().await;
+                    handler.on_shutdown().await;
+                });
+            }
+        }
+    }
+}
+
+impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
+    type Item = Result<AxumSseEvent, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // SAFETY: we only access `inner` and `handler` through &mut, never
+        // move them out. `handler.take()` is a zero-sized pointer swap.
+        let this = unsafe { self.as_mut().get_unchecked_mut() };
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(Some(Ok(AxumSseEvent::from(event)))),
+            Poll::Ready(None) => {
+                if let Some(mut handler) = this.handler.take() {
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            handler.on_close().await;
+                            handler.on_shutdown().await;
+                        });
+                    }
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Converts an [`SseHandler`] implementation into an axum SSE response.
+///
+/// This is the wiring function that bridges the Jolt SSE trait to axum's
+/// wire-level SSE support.  Call it from an axum handler (or inside the
+/// `ws!` / `#[endpoint]` generation path) to serve SSE:
+///
+/// ```ignore
+/// async fn events_handler() -> impl IntoResponse {
+///     let handler = MySseHandler::new();
+///     into_sse_response(handler).await
+/// }
+/// ```
+///
+/// # Lifecycle
+///
+/// 1. `handler.on_open().await`
+/// 2. `handler.on_ready()` stream is mapped to axum SSE events and written
+///    to the response body.
+/// 3. When the stream ends (naturally) or the client disconnects,
+///    `handler.on_close()` and `handler.on_shutdown()` fire in a
+///    background task.
+pub async fn into_sse_response<H: SseHandler + Send + 'static>(mut handler: H) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
+    handler.on_open().await;
+    let inner = handler.on_ready();
+    axum::response::Sse::new(SseCleanupStream {
+        inner,
+        handler: Some(handler),
+    })
 }

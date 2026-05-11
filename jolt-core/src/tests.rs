@@ -6809,8 +6809,12 @@ mod pubsub {
 }
 
 mod sse {
-    use crate::{SseEvent, SseHandler, SseStream};
+    use crate::{into_sse_response, SseEvent, SseHandler, SseStream};
+    use axum::response::IntoResponse;
     use futures_util::StreamExt;
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     struct UnitHandler;
@@ -6828,6 +6832,30 @@ mod sse {
                 (0..c).map(move |i| SseEvent::new("tick", &format!("tick-{}", i))),
             );
             Box::pin(s)
+        }
+    }
+
+    struct CloseTrackHandler {
+        closed: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
+        item_count: u32,
+    }
+
+    impl SseHandler for CloseTrackHandler {
+        fn on_ready(&mut self) -> SseStream {
+            let c = self.item_count;
+            let s = futures_util::stream::iter(
+                (0..c).map(move |i| SseEvent::new("ev", &format!("data-{}", i))),
+            );
+            Box::pin(s)
+        }
+
+        async fn on_close(&mut self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+
+        async fn on_shutdown(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
         }
     }
 
@@ -6910,5 +6938,106 @@ mod sse {
             items.push(event.data);
         }
         assert_eq!(items, vec!["tick-0", "tick-1", "tick-2"]);
+    }
+
+    #[tokio::test]
+    async fn into_sse_response_produces_event_stream_content_type() {
+        let response = into_sse_response(UnitHandler).await.into_response();
+        let headers = response.headers();
+        let content_type = headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("SSE response must have content-type header");
+        assert!(
+            content_type
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream"),
+            "SSE response content-type must be text/event-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn into_sse_response_streams_events() {
+        let handler = TickHandler { count: 2 };
+        let sse_response = into_sse_response(handler).await;
+        let response = sse_response.into_response();
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // Each SseEvent::new("tick", "tick-N") maps to "event: tick\ndata: tick-N\n\n"
+        assert!(
+            body_str.contains("event: tick"),
+            "SSE body must contain event: tick lines, got: {body_str:?}"
+        );
+        assert!(
+            body_str.contains("tick-0"),
+            "body must contain first event data, got: {body_str:?}"
+        );
+        assert!(
+            body_str.contains("tick-1"),
+            "body must contain second event data, got: {body_str:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn into_sse_response_calls_on_close_on_natural_end() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handler = CloseTrackHandler {
+            closed: closed.clone(),
+            shutdown: shutdown.clone(),
+            item_count: 1,
+        };
+        let sse_response = into_sse_response(handler).await;
+        let response = sse_response.into_response();
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(
+            body_str.contains("data-0"),
+            "body must contain event data"
+        );
+        // Allow the spawned cleanup task to run
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "on_close must be called after stream ends"
+        );
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "on_shutdown must be called after stream ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn into_sse_response_calls_on_close_on_drop() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handler = CloseTrackHandler {
+            closed: closed.clone(),
+            shutdown: shutdown.clone(),
+            item_count: 2,
+        };
+        let sse_response = into_sse_response(handler).await;
+        // Drop the Sse response before reading all events — simulates client disconnect
+        drop(sse_response);
+        // Allow the spawned cleanup task to run
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "on_close must be called on drop (client disconnect)"
+        );
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "on_shutdown must be called on drop (client disconnect)"
+        );
     }
 }

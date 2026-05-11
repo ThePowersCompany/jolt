@@ -1124,6 +1124,7 @@ dependencies = [
  "axum",
  "dashmap",
  "futures-util",
+ "http-body-util",
  "inventory",
  "jolt-macros",
  "jolt-utils",

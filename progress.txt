@@ -5291,3 +5291,32 @@ Blockers / next notes:
 - JOLT-RS-137 (priority 137): SSE endpoint adapter that creates `axum::response::Sse` from `handler.on_ready()` stream. The `SseHandler` trait and `SseEvent`→axum Event mapping are now both solid; 137 is pure adapter code.
 - JOLT-RS-138 (priority 138): keep-alive at 15s to prevent proxy timeouts.
 - The `#[derive(Debug)]` omission on `SseEvent` is deliberate per this item's call. If a future test or logging path needs it, add it then — no re-derive penalty.
+
+## 2026-05-11 — JOLT-RS-137: SSE endpoint adapter
+
+PRD item: JOLT-RS-137 (priority 137, phase32-sse) — Implement SSE endpoint adapter: creates axum::response::Sse from handler.on_ready() stream. Handles client disconnect (on_close).
+
+Verification:
+- `cargo test -p jolt-core --lib` → 253 passed, 0 failed (4 new SSE adapter tests).
+- `cargo check --workspace` → all crates check clean in 0.63s; no regressions.
+
+Key decisions:
+- Added `into_sse_response<H: SseHandler + Send + 'static>(handler) -> axum::response::Sse<impl Stream<...>>` public function. Calls `handler.on_open().await`, then wraps `handler.on_ready()` stream in a private `SseCleanupStream<H>` adapter.
+- `SseCleanupStream<H>` implements `Stream<Item = Result<AxumSseEvent, Infallible>>` mapping each `SseEvent` through the existing `From<SseEvent> for AxumSseEvent` impl.
+- Cleanup lifecycle: on stream end (`Ready(None)`), spawns `handler.on_close()` + `handler.on_shutdown()` via `Handle::spawn`. On Drop (client disconnect before stream end), the same cleanup fires in `Drop::drop` as a safety net.
+- Changed `SseHandler` trait from AFIT (`async fn on_open(&mut self) {}`) to RPITIT (`fn on_open(&mut self) -> impl Future<Output = ()> + Send { async {} }`) for all three async lifecycle methods. This makes the returned futures `Send` — required by `tokio::spawn` in the cleanup path. Existing `#[tokio::test]` handlers using `async fn` in impls continue to work because the compiler propagates the Send bound from the trait definition.
+- `into_sse_response` requires `H: Send + 'static` (required by axum's `Sse::new` and tokio's `Handle::spawn`). This is the correct contract: SSE handlers are long-lived per-connection objects and must outlive the async task that serves them.
+- Used `unsafe { self.as_mut().get_unchecked_mut() }` in `poll_next` to access the handler field without requiring `H: Unpin`. The safety invariant is that we only ever call `Option::take()` (pointer swap, not move) and poll the already-boxed `SseStream`.
+- Added `http-body-util = "0.1"` to workspace dependencies and `jolt-core` dev-dependencies so SSE tests can collect axum response bodies for assertion.
+
+Files changed:
+- jolt-core/src/sse.rs — rewrote trait from AFIT to RPITIT with Send bounds; added `SseCleanupStream` stream wrapper + Drop impl + `into_sse_response` public function; added imports for `Infallible`, `Future`, `Context`, `Poll`.
+- jolt-core/src/lib.rs — added `pub use sse::into_sse_response;` re-export.
+- jolt-core/src/tests.rs — added `CloseTrackHandler` fixture (Arc<AtomicBool> tracking on_close/on_shutdown calls) and 4 new tests: content-type assertion, event streaming verification, on_close fired on natural stream end, on_close fired on drop (client disconnect).
+- jolt-core/Cargo.toml — added `http-body-util` dev-dependency.
+- Cargo.toml (workspace root) — added `http-body-util = "0.1"` to `[workspace.dependencies]`.
+- prd.json — JOLT-RS-137 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-138 (priority 138): keep-alive comment events every 15s to prevent proxy timeouts. The `into_sse_response` function is now the entry point; 138 can add a keep-alive interleaver inside the `SseCleanupStream` or as an additional wrapper around the inner stream.
+- The `unsafe` in `poll_next` is intentional to avoid `Unpin` bound on `H`. If the codebase later adopts `pin-project` or similar, this can be migrated to `#[pin]`-annotated fields.
