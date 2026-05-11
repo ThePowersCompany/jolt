@@ -80,7 +80,7 @@ pub use status::StatusCode;
 // only so 122's integration test can verify the macro parsed + expanded.
 // Re-exported at the crate root so user crates `use jolt_core::WebSocketHandler;`
 // without needing to know the internal module layout.
-pub use websocket::{CloseFrame, WebSocketHandler, WebSocketSender, WsMessage, WsSendError, __WsMacroWitness};
+pub use websocket::{CloseFrame, Subscription, WebSocketHandler, WebSocketSender, WsMessage, WsSendError, __WsMacroWitness};
 
 // Re-export `inventory` so the `#[endpoint]` macro can emit
 // `::jolt_core::inventory::submit!` without forcing every user crate to add

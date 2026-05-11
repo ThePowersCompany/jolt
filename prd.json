@@ -1875,7 +1875,7 @@
       "verification": [
         "Unit test: subscribe to \"chat\" channel, publish to \"chat\" \u2192 WS sender receives message."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-132",

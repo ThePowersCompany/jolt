@@ -1,21 +1,17 @@
 use dashmap::DashMap;
+use serde::Serialize;
 use tokio::sync::broadcast;
 
-/// Default capacity for per-channel broadcast channels.
 pub const PUBSUB_BROADCAST_CAPACITY: usize = 256;
 
-/// A message carried over a pub/sub channel.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PubSubMessage {
     pub channel: String,
     pub payload: String,
     pub sender_id: Option<String>,
 }
 
-/// In-memory publish/subscribe hub backed by tokio broadcast channels.
-///
-/// Each channel name maps to a [broadcast::Sender]; receivers are obtained via
-/// [PubSub::subscribe] and publish via [PubSub::publish].
+#[derive(Debug)]
 pub struct PubSub {
     channels: DashMap<String, broadcast::Sender<PubSubMessage>>,
 }

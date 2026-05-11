@@ -98,7 +98,10 @@
 use axum::extract::ws::Message as AxumMessage;
 use serde::Serialize;
 use std::fmt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+
+use crate::pubsub::PubSub;
 
 /// Server-side half of a WebSocket connection. Passed by value into
 /// [`WebSocketHandler::on_open`], [`WebSocketHandler::on_ready`], and
@@ -118,6 +121,7 @@ use tokio::sync::mpsc;
 #[non_exhaustive]
 pub struct WebSocketSender {
     tx: mpsc::UnboundedSender<AxumMessage>,
+    pubsub: Option<Arc<PubSub>>,
 }
 
 /// Error returned by the [`WebSocketSender`] send / close methods.
@@ -168,7 +172,27 @@ impl WebSocketSender {
     /// becomes a real concern under load).
     pub fn channel() -> (Self, mpsc::UnboundedReceiver<AxumMessage>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+        (Self { tx, pubsub: None }, rx)
+    }
+
+    /// Constructs a sender + writer-task feeder receiver pair with a
+    /// [`PubSub`] handle wired in. Handlers can then call
+    /// [`subscribe`](Self::subscribe) to receive pub/sub messages on this
+    /// connection. The `Arc` clone is stored inside the sender — clones of
+    /// the sender share the same pub/sub hub.
+    pub fn channel_with_pubsub(
+        pubsub: Arc<PubSub>,
+    ) -> (Self, mpsc::UnboundedReceiver<AxumMessage>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx, pubsub: Some(pubsub) }, rx)
+    }
+
+    /// Attach a [`PubSub`] handle to an already-constructed sender. Returns
+    /// `self` for builder-style chaining. If a pubsub handle was previously
+    /// attached it is silently replaced.
+    pub fn with_pubsub(mut self, pubsub: Arc<PubSub>) -> Self {
+        self.pubsub = Some(pubsub);
+        self
     }
 
     /// Sends a typed [`WsMessage`] frame.
@@ -215,6 +239,68 @@ impl WebSocketSender {
     /// axum's [`Message`](AxumMessage) type per decision 3).
     fn dispatch(&self, msg: AxumMessage) -> Result<(), WsSendError> {
         self.tx.send(msg).map_err(|_| WsSendError::Closed)
+    }
+
+    /// Subscribe this WebSocket connection to a pub/sub channel. Returns
+    /// `None` if no [`PubSub`] handle was wired into this sender (via
+    /// [`channel_with_pubsub`](Self::channel_with_pubsub) or
+    /// [`with_pubsub`](Self::with_pubsub)).
+    ///
+    /// On success, returns a [`Subscription`] handle. The subscription
+    /// spawns a tokio task that forwards every [`PubSubMessage`] on the
+    /// channel — serialized as JSON via [`send_json`](Self::send_json) —
+    /// to this WebSocket connection. The forward task exits cleanly when
+    /// the broadcast channel is closed, or when the subscription handle is
+    /// dropped (e.g. by the handler's [`WebSocketHandler::on_close`]).
+    ///
+    /// If the broadcast receiver lags (buffer overflow), a warning is
+    /// logged and the task continues with the next available message.
+    pub fn subscribe(&self, channel: &str) -> Option<Subscription> {
+        let pubsub = self.pubsub.as_ref()?;
+        let mut rx = pubsub.subscribe(channel);
+        let sender = self.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        if sender.send_json(&msg).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            lagged = n,
+                            "pubsub receiver lagged; skipping messages"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        Some(Subscription {
+            abort: handle.abort_handle(),
+        })
+    }
+}
+
+/// A live pub/sub subscription on a WebSocket connection.
+///
+/// Created by [`WebSocketSender::subscribe`]. The subscription spawns a
+/// background tokio task that forwards messages from a broadcast channel
+/// into the WebSocket writer. Dropping the [`Subscription`] aborts that
+/// task — the receiver is dropped (unsubscribing from the channel) and no
+/// further messages are forwarded.
+///
+/// Handlers should store the returned [`Subscription`] and drop it in
+/// [`WebSocketHandler::on_close`] to cleanly unsubscribe when the
+/// connection ends.
+pub struct Subscription {
+    abort: tokio::task::AbortHandle,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.abort.abort();
     }
 }
 
@@ -433,6 +519,7 @@ mod tests {
     //!   preserves the code and reason.
 
     use super::*;
+    use crate::pubsub::PubSubMessage;
 
     /// A minimal handler that overrides nothing. Witnesses claim (1):
     /// `WebSocketHandler` is implementable with all-default methods.
@@ -725,6 +812,144 @@ mod tests {
         assert!(
             std::error::Error::source(&wrapped).is_some(),
             "Serialize variant must expose its serde_json source"
+        );
+    }
+
+    // JOLT-RS-131 tests: subscribe + forward + unsubscribe on WebSocketSender.
+
+    #[test]
+    fn subscribe_returns_none_when_no_pubsub_configured() {
+        let (sender, _rx) = WebSocketSender::channel();
+        let sub = sender.subscribe("chat");
+        assert!(
+            sub.is_none(),
+            "subscribe without pubsub must return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_returns_some_when_pubsub_is_wired() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender, _rx) = WebSocketSender::channel_with_pubsub(pubsub);
+        let sub = sender.subscribe("chat");
+        assert!(sub.is_some(), "subscribe with pubsub must return Some");
+    }
+
+    #[tokio::test]
+    async fn with_pubsub_builder_attaches_pubsub_to_existing_sender() {
+        let (sender, _rx) = WebSocketSender::channel();
+        let pubsub = Arc::new(PubSub::new());
+        let sender = sender.with_pubsub(pubsub);
+        let sub = sender.subscribe("chat");
+        assert!(sub.is_some(), "with_pubsub must wire pubsub into sender");
+    }
+
+    #[tokio::test]
+    async fn published_message_is_forwarded_as_json_to_ws_writer() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+
+        let msg = PubSubMessage {
+            channel: "chat".to_string(),
+            payload: r#"{"text":"hello"}"#.to_string(),
+            sender_id: None,
+        };
+        pubsub.publish("chat", msg);
+
+        let frame = rx
+            .recv()
+            .await
+            .expect("forward task must dispatch published message");
+        match frame {
+            AxumMessage::Text(json) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&json).expect("forwarded body must be valid JSON");
+                assert_eq!(parsed["channel"], "chat");
+                assert_eq!(parsed["payload"], r#"{"text":"hello"}"#);
+            }
+            other => panic!("expected Text frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn message_on_channel_a_not_forwarded_to_subscriber_of_channel_b() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender_a, mut rx_a) =
+            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let (sender_b, mut rx_b) =
+            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let _sub_a = sender_a.subscribe("channel-a").expect("subscribe a");
+        let _sub_b = sender_b.subscribe("channel-b").expect("subscribe b");
+
+        pubsub.publish(
+            "channel-a",
+            PubSubMessage {
+                channel: "channel-a".to_string(),
+                payload: "for-a".to_string(),
+                sender_id: None,
+            },
+        );
+
+        let frame_a = rx_a
+            .recv()
+            .await
+            .expect("subscriber on channel-a must receive");
+        match frame_a {
+            AxumMessage::Text(json) => {
+                assert!(json.contains("for-a"), "got {json}");
+            }
+            other => panic!("expected Text on channel-a, got {other:?}"),
+        }
+
+        // channel-b must NOT have received anything.
+        let timeout = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            rx_b.recv(),
+        )
+        .await;
+        assert!(
+            timeout.is_err(),
+            "channel-b subscriber must not receive message on channel-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_subscription_stops_forwarding() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        {
+            let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+            // Publish one message — it arrives.
+            pubsub.publish(
+                "chat",
+                PubSubMessage {
+                    channel: "chat".to_string(),
+                    payload: "first".to_string(),
+                    sender_id: None,
+                },
+            );
+            let frame = rx.recv().await.expect("first message must arrive");
+            assert!(matches!(frame, AxumMessage::Text(_)));
+        }
+        // Subscription dropped above. Publish another message — it must NOT
+        // arrive because the forward task was aborted.
+        pubsub.publish(
+            "chat",
+            PubSubMessage {
+                channel: "chat".to_string(),
+                payload: "second".to_string(),
+                sender_id: None,
+            },
+        );
+        let timeout = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            rx.recv(),
+        )
+        .await;
+        assert!(
+            timeout.is_err(),
+            "dropping Subscription must abort the forward task; no second message must arrive"
         );
     }
 }

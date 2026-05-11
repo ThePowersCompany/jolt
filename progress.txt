@@ -5106,3 +5106,42 @@ Blockers / next notes:
 - JOLT-RS-132 (priority 132): "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue." This is where `Lagged` handling belongs — not here. The forward task is essentially `tokio::spawn(async move { while let Ok(msg) = rx.recv().await { sender.send_text(&msg.payload).ok(); } })` with a match on `RecvError::Lagged(n)` that emits a `tracing::warn!` and continues.
 - The `Arc<PubSub>` inside `JoltServer` design has implications: DashMap is already `Send + Sync`, so `Arc<PubSub>` sharing across WS connections is cheap. The `PubSub::publish` and `PubSub::subscribe` methods are all `&self`, compatible with `Arc` sharing.
 - Concurrent test uses 10 tasks — deliberately fewer than the broadcast capacity (256) so no lag can occur. If the number is raised to test stress, bump the capacity or add a per-test capacity override.
+
+## 2026-05-11 — JOLT-RS-131: WebSocketSender::subscribe (opens phase31)
+
+PRD item: JOLT-RS-131 (priority 131, phase31-ws-pubsub-integration) — In WebSocketHandler::on_open, provide ws.subscribe(channel: &str) that calls PubSub::subscribe and spawns a tokio task to forward messages to WS sender.
+
+Verification:
+- `cargo check --workspace` → clean in 0.55s; no regressions.
+- `cargo test -p jolt-core --lib` → 237 passed (231 prior + 6 new subscribe/forward/unsubscribe tests); 0 failed.
+
+Note on harness instructions: same as JOLT-RS-007..130 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `pubsub: Option<Arc<PubSub>>` field to `WebSocketSender`. The Option shape means existing `WebSocketSender::channel()` callers (all 11 test sites in websocket.rs) continue to work without modification — the pubsub field defaults to None. Callers who want subscribe support use `channel_with_pubsub(pubsub)` or `with_pubsub(pubsub)`.
+- Three constructors: `channel()` (unchanged; pubsub: None), `channel_with_pubsub(pubsub: Arc<PubSub>)` (new; pubsub: Some(pubsub)), and `with_pubsub(self, pubsub: Arc<PubSub>) -> Self` (builder setter; replaces any existing pubsub). The builder method supports the ws! macro's codegen path: after the macro constructs the sender via `channel()`, a future PRD item can inject the pubsub handle by calling `sender.with_pubsub(pubsub)` before passing it to handler callbacks.
+- `subscribe(&self, channel: &str) -> Option<Subscription>` — returns None if no PubSub is wired; otherwise spawns a tokio forward task and returns a `Subscription` handle. The method signature matches the PRD wording exactly: one argument, the channel name.
+- `Subscription` is a new public struct wrapping `tokio::task::AbortHandle`. On drop, the abort handle aborts the forward task and drops the broadcast receiver (unsubscribing). Handlers store the returned Subscription and drop it in `on_close` to cleanly unsubscribe. The struct is exported from `jolt-core` via `pub use websocket::Subscription`.
+- Forward task: loops over `broadcast::Receiver<PubSubMessage>`. On `Ok(msg)`, calls `sender.send_json(&msg)` — serialize the full PubSubMessage struct as JSON so the WS client receives channel + payload + sender_id context. On `Err(Lagged(n))`, logs `tracing::warn!(lagged = n, "pubsub receiver lagged; skipping messages")` and continues (per JOLT-RS-132's spec). On `Err(Closed)`, the task exits cleanly (channel last sender dropped). If `send_json` fails (writer task closed), the task also exits.
+- Added `#[derive(Serialize)]` to `PubSubMessage` (in pubsub.rs) so the forward task can serialize it as JSON. Also added `#[derive(Debug)]` to `PubSub` (in pubsub.rs) to satisfy the `#[derive(Debug)]` on `WebSocketSender` (Option<Arc<PubSub>> needs Debug).
+- Did NOT change the ws! macro to pass PubSub into the sender — that's a separate integration step (arguably JOLT-RS-134 or a preamble to it). The current change makes `subscribe` available on `WebSocketSender`; wiring the PubSub instance into the ws! expansion (e.g., via a global static, a `state` parameter to ws!, or a `JoltServer`-held `Arc<PubSub>`) is deferred to a later PRD item.
+
+Tests added (6 new in `websocket.rs`):
+- `subscribe_returns_none_when_no_pubsub_configured` — channel()-constructed sender has no pubsub; subscribe returns None.
+- `subscribe_returns_some_when_pubsub_is_wired` — channel_with_pubsub()-constructed sender; subscribe returns Some.
+- `with_pubsub_builder_attaches_pubsub_to_existing_sender` — channel() then .with_pubsub(...); subscribe now returns Some.
+- `published_message_is_forwarded_as_json_to_ws_writer` — subscribe("chat"), publish a PubSubMessage, verify the WS mpsc receiver yields a Text frame with the serialized JSON.
+- `message_on_channel_a_not_forwarded_to_subscriber_of_channel_b` — two senders, subscribe to different channels, publish to channel-a only; channel-a receiver gets the message, channel-b times out.
+- `dropping_subscription_stops_forwarding` — subscribe, publish (arrives), drop Subscription, publish again (must not arrive).
+
+Files changed:
+- jolt-core/src/pubsub.rs — added `#[derive(Debug)]` to PubSub, `#[derive(Serialize)]` to PubSubMessage, `use serde::Serialize;`.
+- jolt-core/src/websocket.rs — added `pubsub: Option<Arc<PubSub>>` field to WebSocketSender; added imports (`std::sync::Arc`, `crate::pubsub::PubSub`); added `channel_with_pubsub`, `with_pubsub`, `subscribe` methods; added `Subscription` struct with Drop impl; added 6 tests.
+- jolt-core/src/lib.rs — added `Subscription` to the `pub use websocket::` re-export line.
+- prd.json — JOLT-RS-131 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-132 (priority 132): "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue." The forward task and Lagged handling are ALREADY implemented in `subscribe()` — the task serializes full PubSubMessage as JSON and logs warns on lag. This item may be satisfied by JOLT-RS-131's implementation; verify and mark complete or refine.
+- JOLT-RS-133 (priority 133): "On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state)." The `Subscription` Drop impl (aborts forward task + drops receiver) already provides the unsubscribe primitive. The handler must store the `Subscription` handle(s) and drop them in `on_close`. The ws! macro's generated code will need to collect subscriptions and invoke drop — defer the macro integration to 133 or a subsequent item.
+- JOLT-RS-134 (priority 134): "WS + pubsub integration test: two WS clients on same channel, client A publishes via ws.publish(), client B receives." This requires a running server + real WebSocket upgrade — depends on ws! macro integration. The pubsub core + subscribe path from 131 are the prerequisites; this item is the end-to-end test.
+- The `PbSubMessage` import lives in the test module (not the parent module) since the production code only references it through type inference. Adding a `PubSubMessage::new(channel, payload, sender_id)` constructor would reduce test boilerplate (3 fields to fill every time) — consider for JOLT-RS-132 if it lands as a refinement pass.
