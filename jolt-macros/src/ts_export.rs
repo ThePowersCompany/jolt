@@ -20,7 +20,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, Ident, Type};
+use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type};
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
 ///
@@ -36,21 +36,69 @@ pub(crate) struct TsExportInput {
 /// Internal representation of one field on a `#[derive(TsExport)]` struct.
 ///
 /// JOLT-RS-165: carries the Rust-level representation.
+/// JOLT-RS-166: carries `ts_type` — the resolved TypeScript type string
+///   computed by [`rust_type_to_ts`]. `None` for unsupported/unrecognised
+///   Rust types.
 /// Later items add:
 /// - `ts_name`: overridden TS property name (169: `#[ts(rename = "...")]`)
 /// - `flatten`: whether to inline the field's properties (170: `#[ts(flatten)]`)
 /// - `doc`: JSDoc string extracted from /// doc comments (171)
-///
-/// Both `name` and `rust_type` are read by the test module's assertions on
-/// parsed output; outside of `#[cfg(test)]` they are not yet consumed because
-/// JOLT-RS-165 only emits a field-count marker. Later items (166-168) will
-/// consume both to generate TypeScript interface definitions.
 #[derive(Debug, Clone)]
 pub(crate) struct TsExportField {
     #[allow(dead_code)]
     pub(crate) name: Ident,
     #[allow(dead_code)]
     pub(crate) rust_type: Type,
+    pub(crate) ts_type: Option<String>,
+}
+
+/// Map a Rust type to its TypeScript equivalent.
+///
+/// JOLT-RS-166: maps common Rust types to TypeScript type strings.
+///
+/// - `String` / `str` → `"string"`
+/// - `i32` / `i64` / `u32` / `u64` / `f32` / `f64` / `usize` / `isize` → `"number"`
+/// - `bool` → `"boolean"`
+/// - `Vec<T>` → `"{T_ts}[]"` (recursive mapping of the inner type)
+///
+/// Returns `None` for types that don't have a direct mapping (user-defined
+/// structs, enums, tuples, references, etc.). Those types will either be
+/// resolved by a future cross-crate lookup phase or left as opaque
+/// references.
+///
+/// Matching is by identity alone — no path resolution. The compiler
+/// type-checks that the user's types are what they claim to be; the
+/// derive operates on syntax.
+pub(crate) fn rust_type_to_ts(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(type_path) => {
+            let segments = &type_path.path.segments;
+            let last = segments.last()?;
+            let ident_str = last.ident.to_string();
+
+            match ident_str.as_str() {
+                "String" | "str" => Some("string".into()),
+                "i32" | "i64" | "u32" | "u64" | "f32" | "f64" | "usize" | "isize" => {
+                    Some("number".into())
+                }
+                "bool" => Some("boolean".into()),
+                "Vec" => {
+                    if let PathArguments::AngleBracketed(args) = &last.arguments {
+                        if args.args.len() == 1 {
+                            if let GenericArgument::Type(inner) = &args.args[0] {
+                                if let Some(inner_ts) = rust_type_to_ts(inner) {
+                                    return Some(format!("{inner_ts}[]"));
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Parse a `DeriveInput` into [`TsExportInput`].
@@ -95,9 +143,11 @@ fn parse_struct_fields(
                     .ident
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
+                let ts_type = rust_type_to_ts(&field.ty);
                 out.push(TsExportField {
                     name: field_ident,
                     rust_type: field.ty.clone(),
+                    ts_type,
                 });
             }
             Ok(out)
@@ -113,9 +163,15 @@ fn parse_struct_fields(
 
 /// Top-level driver for `#[derive(TsExport)]`.
 ///
-/// Parses via [`parse_ts_export_input`] and emits a hidden marker
-/// `__JOLT_TS_EXPORT_FIELD_COUNT: usize` so an integration test can observe
-/// the derive ran and parsed the correct field count.
+/// Parses via [`parse_ts_export_input`] and emits:
+/// 1. Hidden marker `__JOLT_TS_EXPORT_FIELD_COUNT: usize` (JOLT-RS-165) so an
+///    integration test can observe the derive ran and parsed the correct field
+///    count.
+/// 2. Hidden marker `__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize` (JOLT-RS-166)
+///    for the number of fields with a recognised TypeScript type mapping.
+/// 3. One hidden marker `__JOLT_TS_EXPORT_type_<N>` per field (JOLT-RS-166)
+///    emitting an `Option<&'static str>` — `Some("ts_type")` for mapped fields,
+///    `None` for unrecognised types.
 ///
 /// On parse failure the emission is a single `compile_error!` token — no
 /// partial codegen. Mirrors [`crate::auto_middleware::expand_auto_middleware`]'s
@@ -127,12 +183,37 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     };
     let ident = &parsed.ident;
     let field_count = parsed.fields.len();
+    let mapped_count = parsed.fields.iter().filter(|f| f.ts_type.is_some()).count();
+
+    let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
+    for (i, f) in parsed.fields.iter().enumerate() {
+        let const_name = quote::format_ident!("__JOLT_TS_EXPORT_type_{i}");
+        match &f.ts_type {
+            Some(ts) => {
+                field_type_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#ts);
+                });
+            }
+            None => {
+                field_type_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #const_name: ::core::option::Option<&'static str> = ::core::option::Option::None;
+                });
+            }
+        }
+    }
 
     quote! {
         #[automatically_derived]
         impl #ident {
             #[doc(hidden)]
             pub const __JOLT_TS_EXPORT_FIELD_COUNT: usize = #field_count;
+
+            #[doc(hidden)]
+            pub const __JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize = #mapped_count;
+
+            #(#field_type_markers)*
         }
     }
 }
@@ -305,6 +386,173 @@ mod tests {
         assert!(
             !out.contains("__JOLT_TS_EXPORT_FIELD_COUNT"),
             "no partial codegen on parse failure, got: {out}"
+        );
+    }
+
+    // ── JOLT-RS-166: type mapping tests ──
+
+    fn parse_type(src: &str) -> Type {
+        syn::parse_str::<Type>(src).expect("test input parses as Type")
+    }
+
+    #[test]
+    fn string_maps_to_string() {
+        let ty = parse_type("String");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn i32_maps_to_number() {
+        let ty = parse_type("i32");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn all_number_types_map_to_number() {
+        for rt in ["i32", "i64", "u32", "u64", "f32", "f64", "usize", "isize"] {
+            let ty = parse_type(rt);
+            assert_eq!(
+                rust_type_to_ts(&ty).as_deref(),
+                Some("number"),
+                "{rt} must map to number"
+            );
+        }
+    }
+
+    #[test]
+    fn bool_maps_to_boolean() {
+        let ty = parse_type("bool");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("boolean"));
+    }
+
+    #[test]
+    fn vec_string_maps_to_string_array() {
+        let ty = parse_type("Vec<String>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("string[]"));
+    }
+
+    #[test]
+    fn vec_i32_maps_to_number_array() {
+        let ty = parse_type("Vec<i32>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number[]"));
+    }
+
+    #[test]
+    fn vec_vec_i32_maps_to_nested_array() {
+        let ty = parse_type("Vec<Vec<i32>>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("number[][]"));
+    }
+
+    #[test]
+    fn unknown_type_returns_none() {
+        for rt in ["MyStruct", "DateTime<Utc>", "u8"] {
+            let ty = parse_type(rt);
+            assert!(
+                rust_type_to_ts(&ty).is_none(),
+                "{rt} must return None (not a mapped type)"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_type_returns_none() {
+        let ty = parse_type("&str");
+        assert!(rust_type_to_ts(&ty).is_none());
+    }
+
+    #[test]
+    fn expand_emits_type_markers_for_mapped_fields() {
+        let input = parse_derive(
+            r#"
+            struct TypeExport {
+                title: String,
+                count: i32,
+                active: bool,
+                unknown: SomeUserType,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(out.contains("__JOLT_TS_EXPORT_FIELD_COUNT"), "must emit field count");
+        assert!(out.contains("__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT"), "must emit mapped count");
+
+        assert!(
+            out.contains(r#"__JOLT_TS_EXPORT_type_0 :"#) && out.contains(r#"Some ("string")"#),
+            "field 0 (title: String) must map to Some(\"string\"), got: {out}"
+        );
+        assert!(
+            out.contains(r#"__JOLT_TS_EXPORT_type_1 :"#) && out.contains(r#"Some ("number")"#),
+            "field 1 (count: i32) must map to Some(\"number\"), got: {out}"
+        );
+        assert!(
+            out.contains(r#"__JOLT_TS_EXPORT_type_2 :"#) && out.contains(r#"Some ("boolean")"#),
+            "field 2 (active: bool) must map to Some(\"boolean\"), got: {out}"
+        );
+        assert!(
+            out.contains(r#"__JOLT_TS_EXPORT_type_3 :"#) && out.contains("None"),
+            "field 3 (unknown: SomeUserType) must be None, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_correct_mapped_count() {
+        let input = parse_derive(
+            r#"
+            struct HalfMapped {
+                name: String,
+                count: i32,
+                blob: UnknownBlob,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        // mapped: 2 (String + i32), unmapped: 1 (UnknownBlob)
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT : usize = 2"),
+            "mapped count must be 2, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_marks_all_fields_unmapped_for_unknown_types() {
+        let input = parse_derive(
+            r#"
+            struct AllUnknown {
+                a: MyA,
+                b: MyB,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT : usize = 0"),
+            "all fields unmapped so mapped count must be 0, got: {out}"
+        );
+        // Both field markers should be None
+    }
+
+    #[test]
+    fn expand_handles_vec_types_in_markers() {
+        let input = parse_derive(
+            r#"
+            struct VecExport {
+                tags: Vec<String>,
+                counts: Vec<i32>,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(r#"Some ("string[]")"#),
+            "Vec<String> must map to Some(\"string[]\"), got: {out}"
+        );
+        assert!(
+            out.contains(r#"Some ("number[]")"#),
+            "Vec<i32> must map to Some(\"number[]\"), got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT : usize = 2"),
+            "both vec fields are mapped, got: {out}"
         );
     }
 }

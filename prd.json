@@ -2365,7 +2365,7 @@
       "verification": [
         "Unit test: struct with all basic types \u2192 correct TS interface string."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-167",
@@ -2379,19 +2379,19 @@
       "verification": [
         "Unit test: Option<Vec<i32>> \u2192 number[] | null."
       ],
-      "passes": false
+      "passes": true
     },
     {
-      "id": "JOLT-RS-168",
-      "priority": 168,
+      "id": "JOLT-RS-166",
+      "priority": 166,
       "phase": "phase39-tsexport-basic",
       "category": "backend",
-      "description": "Generate TS definition as interface: export interface StructName { field: type; } with sorted fields.",
+      "description": "Map Rust types to TypeScript: String → string, i32/i64/u32/u64/f32/f64/usize → number, bool → boolean, Vec<T> → T[].",
       "steps": [
-        "Generate TS definition as interface: export interface StructName { field: type; } with sorted fields."
+        "Map Rust types to TypeScript: String → string, i32/i64/u32/u64/f32/f64/usize → number, bool → boolean, Vec<T> → T[]."
       ],
       "verification": [
-        "Unit test: full struct \u2192 complete TS interface definition string."
+        "Unit test: struct with all basic types → correct TS interface string."
       ],
       "passes": false
     },

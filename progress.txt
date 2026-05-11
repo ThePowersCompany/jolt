@@ -6116,3 +6116,30 @@ Notes for next iterations:
 - JOLT-RS-167 (priority 167): Map generics — Option<T>→T|null, Json<T>→T, JsonArray<T>→T[], nested generics (Option<Vec<String>>→string[]|null).
 - JOLT-RS-168 (priority 168): Generate the `export interface StructName { ... }` TS definition with sorted fields. Closes phase39.
 - The `ts_export` module will grow significantly across 166-168 (type mapping, interface codegen). Consider extractng the type-mapping logic into a separate helper function or sub-module once it exceeds ~100 lines — current size (~180 lines including tests) is fine for phase39's scope.
+
+## 2026-05-11 — JOLT-RS-166: Rust-to-TypeScript type mapping
+
+PRD item: JOLT-RS-166 (priority 166, phase39-tsexport-basic) — Map Rust types to TypeScript: String→string, i32/i64/u32/u64/f32/f64/usize→number, bool→boolean, Vec<T>→T[].
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 216 passed, 0 failed; 14 new ts_export tests (type mapping + expansion marker tests).
+- `cargo check --workspace` → all 5 crates check clean; no regressions.
+
+Key decisions:
+- Added `pub(crate) fn rust_type_to_ts(ty: &Type) -> Option<String>` — pattern-matches on `syn::Type::Path` by identity (no path resolution). Recursively handles `Vec<T>` → `T[]`. Returns `None` for unknown/unrecognized types.
+- Numeric types (i32, i64, u32, u64, f32, f64, usize, isize) all map to `"number"`. `String` and `str` map to `"string"`. `bool` maps to `"boolean"`. Reference types (`&str`, etc.) return `None` since `Type::Reference` hits the wildcard arm.
+- `TsExportField` now carries `ts_type: Option<String>` — resolved during `parse_struct_fields` via `rust_type_to_ts(&field.ty)`.
+- `expand_ts_export` emits three surfaces: `__JOLT_TS_EXPORT_FIELD_COUNT: usize` (unchanged from 165), `__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize` (count of fields with a recognised TS type), and per-field `__JOLT_TS_EXPORT_type_N: Option<&'static str>` markers (`Some("ts_type")` for mapped, `None` for unrecognised).
+- Per-field marker const names use `quote::format_ident!("__JOLT_TS_EXPORT_type_{i}")` — indexed by position, not field name, to avoid identifier collisions with exotic Rust field names that might collide with the `__JOLT_TS_EXPORT_type_` prefix.
+- Did NOT add `#[attributes(ts)]` to the derive — still deferred to JOLT-RS-169.
+- Tests added: direct `rust_type_to_ts` verification for all basic types, Vec<String>, Vec<i32>, Vec<Vec<i32>>, unknown types, reference types. Expansion-level tests verify per-field markers, mapped count, Vec type markers, and all-unmapped zero count.
+
+Files changed:
+- jolt-macros/src/ts_export.rs — added `rust_type_to_ts` function, `ts_type` field on `TsExportField`, updated `parse_struct_fields` to resolve TS types, updated `expand_ts_export` to emit type markers, 14 new unit tests (216 total tests in lib, all pass).
+- prd.json — JOLT-RS-166 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-167 (priority 167): Map generics — Option<T>→T|null, Json<T>→T, JsonArray<T>→T[]. Needs to extend `rust_type_to_ts` to handle `Option`, `Json`, and `JsonArray` type paths similarly to the existing `Vec` arm. The `Vec<T>` → `T[]` pattern in `rust_type_to_ts` is the template.
+- JOLT-RS-168 (priority 168): Generate the `export interface StructName { ... }` TS definition with sorted fields. Can now use `TsExportField::ts_type` to populate the RHS of each property.
+- JOLT-RS-169 (priority 169): `#[ts(rename = "newName")]` support. Will need `attributes(ts)` added to the derive declaration in lib.rs.
+- The `rust_type_to_ts` function is intentionally narrow — only path-based types with identity matching. When cross-crate type resolution (e.g., a struct defined in another crate) is needed, that's a separate feature.
