@@ -4432,3 +4432,34 @@ Files changed:
 Blockers / next notes:
 - Phase20-db-queries is now CLOSED. All 4 items (086/087/088/089) are passes: true.
 - Next unfinished item in priority order is JOLT-RS-093 (priority 93, phase21-db-listen-notify: LISTEN/NOTIFY integration test). The existing infrastructure (JoltDb::listen, JoltDb::notify, JoltDb::listen_connection) is fully in place from 090/091/092.
+
+## 2026-05-11 — JOLT-RS-093: LISTEN/NOTIFY end-to-end integration test — closes phase21
+
+PRD item: JOLT-RS-093 (priority 93, phase21-db-listen-notify) — Write LISTEN/NOTIFY integration test: listen on channel, notify with payload, verify notification arrives on stream with correct payload.
+
+Verification:
+- `cargo test -p jolt-db -- tests::listen_notify` → 8/8 passed (7 prior reorganized + 1 new e2e test); 0 failed.
+- `cargo test -p jolt-db --lib` → 72/72 passed; 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as prior entries — npm/Bun-Hono commands don't apply; cargo is the verification tool.
+
+Key decisions:
+- Wrapped the existing JOLT-RS-090/091/092 tests in `mod listen_notify { ... }` so the filter `cargo test -p jolt-db -- tests::listen_notify` picks up the full phase21 surface. This is the same structural pattern as `mod query_helpers` (JOLT-RS-087/089) and `mod connection` (JOLT-RS-085): co-locate all tests for a phase's API surface under a single submodule to give the PRD-mandated filter a stable target.
+- All 7 prior tests are unchanged in body — same assertions, same env-gated pattern, same compile-time pins. Zero behavioral risk.
+- Added one new test: `listen_receives_notification_with_correct_payload_when_test_db_available`. Env-gated on `JOLT_TEST_DATABASE_URL`. The test flow:
+  1. Opens a `listen` stream on a fresh PID+counter channel name (prevents collisions with concurrent runs, no uuid dependency needed — same `std::process::id() + AtomicU64` counter pattern as the `TestDir` struct elsewhere in the test module).
+  2. NOTIFYs the same channel with a payload via `db.notify`.
+  3. Uses `tokio::time::timeout(Duration::from_secs(2), stream.next())` to await the notification — a 2-second cap prevents test hangs on a silent Postgres that accepts NOTIFY but never delivers.
+  4. Asserts the delivered `PgNotification` has the expected `channel()` and `payload()` — pinning the e2e contract that JOLT-RS-090/091/092 individually don't prove.
+  5. Runs `db.health_check()` afterward to confirm the listener connection didn't pollute the pool (same pattern as the JOLT-RS-090/091/092 env-gated tests).
+- Did NOT add tests for multiple notifications, late subscribers, or channel isolation — those are PubSub-phase concerns (phase30, JOLT-RS-130). The PRD step is scoped to "listen on channel, notify with payload, verify notification arrives."
+- Did NOT add a uuid dependency. The per-run-unique channel name uses the same `std::process::id() + AtomicU64` strategy as `TestDir` (JOLT-RS-094 tests), avoiding a new Cargo.toml entry for a one-liner.
+
+Files changed:
+- jolt-db/src/lib.rs — wrapped JOLT-RS-090/091/092 tests (7 tests) in `mod listen_notify`; added `listen_receives_notification_with_correct_payload_when_test_db_available` e2e test.
+- prd.json — JOLT-RS-093 passes: true.
+
+Blockers / next notes:
+- Phase21-db-listen-notify is now CLOSED. All 4 items (090/091/092/093) are passes: true.
+- Next unfinished item in priority order is JOLT-RS-097 (priority 97, phase22-migration-files: migration file reading tests under `tests::migration_files`). The existing `read_migration_files` tests live at the `mod tests` level and need to be wrapped in `mod migration_files` per the PRD verification filter.

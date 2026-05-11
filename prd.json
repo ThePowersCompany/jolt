@@ -1343,7 +1343,7 @@
       "verification": [
         "cargo test -p jolt-db -- tests::listen_notify passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-094",

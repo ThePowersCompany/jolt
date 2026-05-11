@@ -2350,197 +2350,266 @@ mod tests {
     }
     }
 
-    // ---- JOLT-RS-090: JoltDb::listen_connection ----
+    // JOLT-RS-090/091/092/093: LISTEN/NOTIFY tests co-located under
+    // `mod listen_notify` so the filter `cargo test -p jolt-db --
+    // tests::listen_notify` picks up the full phase21 surface.
+    mod listen_notify {
+        use super::{DbConfig, JoltDb};
 
-    /// Compile-time pin: `db.listen_connection()` resolves to
-    /// `Result<sqlx::postgres::PgListener, sqlx::Error>` (decisions 15–17).
-    /// The explicit return annotation forces the typecheck — a regression
-    /// that wraps the listener in a foreign type (e.g. `tokio_postgres::
-    /// Connection`) or changes the error shape would break this build pin
-    /// without ever needing a live Postgres.
-    #[test]
-    fn listen_connection_signature_returns_pg_listener() {
-        async fn _pin(db: &JoltDb) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
-            db.listen_connection().await
+        use tokio_stream::StreamExt;
+
+        // ---- JOLT-RS-090: JoltDb::listen_connection ----
+
+        /// Compile-time pin: `db.listen_connection()` resolves to
+        /// `Result<sqlx::postgres::PgListener, sqlx::Error>` (decisions 15–17).
+        /// The explicit return annotation forces the typecheck — a regression
+        /// that wraps the listener in a foreign type (e.g. `tokio_postgres::
+        /// Connection`) or changes the error shape would break this build pin
+        /// without ever needing a live Postgres.
+        #[test]
+        fn listen_connection_signature_returns_pg_listener() {
+            async fn _pin(db: &JoltDb) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
+                db.listen_connection().await
+            }
         }
-    }
 
-    /// PRD-mandated success-path verification for JOLT-RS-090: "Dedicated
-    /// connection opens without error." Env-gated on `JOLT_TEST_DATABASE_URL`
-    /// (same convention as 083/084/086/088); without a live Postgres the
-    /// test skips trivially so the default `cargo test -p jolt-db` flow
-    /// stays runnable.
-    ///
-    /// Also pins decision 17 by opening two listeners back-to-back: each
-    /// call yields its own connection, neither blocks the other. The pool's
-    /// regular `health_check` is exercised in between to confirm the pool
-    /// path is unaffected by the listener allocations.
-    #[tokio::test]
-    async fn listen_connection_opens_dedicated_connection_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltDb::connect(&cfg).await.expect("connect");
+        /// PRD-mandated success-path verification for JOLT-RS-090: "Dedicated
+        /// connection opens without error." Env-gated on `JOLT_TEST_DATABASE_URL`
+        /// (same convention as 083/084/086/088); without a live Postgres the
+        /// test skips trivially so the default `cargo test -p jolt-db` flow
+        /// stays runnable.
+        ///
+        /// Also pins decision 17 by opening two listeners back-to-back: each
+        /// call yields its own connection, neither blocks the other. The pool's
+        /// regular `health_check` is exercised in between to confirm the pool
+        /// path is unaffected by the listener allocations.
+        #[tokio::test]
+        async fn listen_connection_opens_dedicated_connection_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltDb::connect(&cfg).await.expect("connect");
 
-        let _listener_a = db
-            .listen_connection()
-            .await
-            .expect("first listen_connection should open without error");
+            let _listener_a = db
+                .listen_connection()
+                .await
+                .expect("first listen_connection should open without error");
 
-        // Pool is unaffected by the listener allocation.
-        db.health_check()
-            .await
-            .expect("pool still healthy after listen_connection");
+            // Pool is unaffected by the listener allocation.
+            db.health_check()
+                .await
+                .expect("pool still healthy after listen_connection");
 
-        let _listener_b = db
-            .listen_connection()
-            .await
-            .expect("second listen_connection should also open without error");
-    }
-
-    // ---- JOLT-RS-091: JoltDb::listen ----
-
-    /// Compile-time pin: `db.listen(channel)` resolves to
-    /// `Result<impl Stream<Item = Result<PgNotification, sqlx::Error>> +
-    /// Unpin, sqlx::Error>` (decision 18). The explicit return annotation
-    /// forces the typecheck — a regression that drops the outer `Result`,
-    /// changes the per-item shape, swaps in a foreign `Stream` trait, or
-    /// removes `Unpin` would break this pin without ever needing a live
-    /// Postgres. The `_assert_stream` helper additionally asserts the
-    /// returned value satisfies the `Stream<Item = ...>` bound at the
-    /// trait level (catches a regression that returns `impl Future`,
-    /// `Vec<_>`, or any other type that happens to typecheck as a return
-    /// value but breaks the streaming contract).
-    #[test]
-    fn listen_signature_yields_stream() {
-        fn _assert_stream<S: tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>> + Unpin>(
-            _: &S,
-        ) {
+            let _listener_b = db
+                .listen_connection()
+                .await
+                .expect("second listen_connection should also open without error");
         }
-        async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
-            let stream = db.listen("test_ch").await?;
-            _assert_stream(&stream);
-            Ok(())
+
+        // ---- JOLT-RS-091: JoltDb::listen ----
+
+        /// Compile-time pin: `db.listen(channel)` resolves to
+        /// `Result<impl Stream<Item = Result<PgNotification, sqlx::Error>> +
+        /// Unpin, sqlx::Error>` (decision 18). The explicit return annotation
+        /// forces the typecheck — a regression that drops the outer `Result`,
+        /// changes the per-item shape, swaps in a foreign `Stream` trait, or
+        /// removes `Unpin` would break this pin without ever needing a live
+        /// Postgres. The `_assert_stream` helper additionally asserts the
+        /// returned value satisfies the `Stream<Item = ...>` bound at the
+        /// trait level (catches a regression that returns `impl Future`,
+        /// `Vec<_>`, or any other type that happens to typecheck as a return
+        /// value but breaks the streaming contract).
+        #[test]
+        fn listen_signature_yields_stream() {
+            fn _assert_stream<S: tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>> + Unpin>(
+                _: &S,
+            ) {
+            }
+            async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
+                let stream = db.listen("test_ch").await?;
+                _assert_stream(&stream);
+                Ok(())
+            }
         }
-    }
 
-    /// PRD-mandated verification for JOLT-RS-091: "listen("test_ch") yields
-    /// a Stream." Env-gated on `JOLT_TEST_DATABASE_URL` (same convention as
-    /// 083/084/086/088/090): without a live Postgres the test skips
-    /// trivially so the default `cargo test -p jolt-db` flow stays runnable.
-    ///
-    /// With the env var set: calls `listen("_jolt_listen_smoke_ch")` and
-    /// asserts the outer `Result` is `Ok` (setup succeeded — the dedicated
-    /// connection opened and the `LISTEN` round trip completed). The
-    /// returned stream itself is dropped without driving it, which (a)
-    /// keeps this slice scoped to the JOLT-RS-091 verification (the
-    /// LISTEN/NOTIFY end-to-end notification round-trip is JOLT-RS-093's
-    /// closing test) and (b) pins decision 20: a `listen` whose backing
-    /// connection is allocated outside the pool drops cleanly without
-    /// affecting subsequent pool queries.
-    #[tokio::test]
-    async fn listen_yields_stream_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltDb::connect(&cfg).await.expect("connect");
+        /// PRD-mandated verification for JOLT-RS-091: "listen("test_ch") yields
+        /// a Stream." Env-gated on `JOLT_TEST_DATABASE_URL` (same convention as
+        /// 083/084/086/088/090): without a live Postgres the test skips
+        /// trivially so the default `cargo test -p jolt-db` flow stays runnable.
+        ///
+        /// With the env var set: calls `listen("_jolt_listen_smoke_ch")` and
+        /// asserts the outer `Result` is `Ok` (setup succeeded — the dedicated
+        /// connection opened and the `LISTEN` round trip completed). The
+        /// returned stream itself is dropped without driving it, which (a)
+        /// keeps this slice scoped to the JOLT-RS-091 verification (the
+        /// LISTEN/NOTIFY end-to-end notification round-trip is JOLT-RS-093's
+        /// closing test) and (b) pins decision 20: a `listen` whose backing
+        /// connection is allocated outside the pool drops cleanly without
+        /// affecting subsequent pool queries.
+        #[tokio::test]
+        async fn listen_yields_stream_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltDb::connect(&cfg).await.expect("connect");
 
-        let stream = db
-            .listen("_jolt_listen_smoke_ch")
-            .await
-            .expect("listen on a fresh channel should succeed");
+            let stream = db
+                .listen("_jolt_listen_smoke_ch")
+                .await
+                .expect("listen on a fresh channel should succeed");
 
-        // Drop the stream explicitly to make the lifecycle test intent
-        // visible — the goal is "listen() returns Ok with a Stream", not
-        // "we consumed any items from it". JOLT-RS-093 will exercise the
-        // notification delivery path.
-        drop(stream);
+            // Drop the stream explicitly to make the lifecycle test intent
+            // visible — the goal is "listen() returns Ok with a Stream", not
+            // "we consumed any items from it". JOLT-RS-093 will exercise the
+            // notification delivery path.
+            drop(stream);
 
-        // Decision 20: the listener uses its own connection, so the pool
-        // remains healthy after the listen+drop cycle. Catches a
-        // regression that accidentally checks out a pool connection (e.g.
-        // by switching `PgListener::connect_with` to a pool-acquire shape).
-        db.health_check()
-            .await
-            .expect("pool still healthy after listen() + drop");
-    }
-
-    // ---- JOLT-RS-092: JoltDb::notify ----
-
-    /// Compile-time pin: `db.notify(&str, &str)` resolves to
-    /// `Result<(), sqlx::Error>` (decisions 21–23). The explicit return
-    /// annotation forces the typecheck — a regression that surfaces the
-    /// `pg_notify` row payload, wraps the error in a custom enum, or
-    /// changes the parameter shape would break this build pin without
-    /// ever needing a live Postgres.
-    #[test]
-    fn notify_signature_returns_unit_result() {
-        async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
-            db.notify("test_ch", "hello").await
+            // Decision 20: the listener uses its own connection, so the pool
+            // remains healthy after the listen+drop cycle. Catches a
+            // regression that accidentally checks out a pool connection (e.g.
+            // by switching `PgListener::connect_with` to a pool-acquire shape).
+            db.health_check()
+                .await
+                .expect("pool still healthy after listen() + drop");
         }
-    }
 
-    /// PRD-mandated verification for JOLT-RS-092: "notify("test_ch",
-    /// "hello") succeeds." Env-gated on `JOLT_TEST_DATABASE_URL` (same
-    /// convention as 083/084/086/088/090/091): without a live Postgres
-    /// the test skips trivially so the default `cargo test -p jolt-db`
-    /// flow stays runnable.
-    ///
-    /// Calls `notify("_jolt_notify_smoke_ch", "hello")` and asserts the
-    /// `Result` is `Ok(())`. Notification delivery (i.e. that a
-    /// concurrent `LISTEN`-er actually receives this payload) is
-    /// JOLT-RS-093's closing-test slice; here we only verify the write
-    /// half round-trips. Pool health is checked afterward to pin
-    /// decision 22 (notify uses the regular pool, not a dedicated
-    /// connection — an accidental switch to a long-lived connection
-    /// would still pass this test individually, but the back-to-back
-    /// invocations below would saturate a pool whose `max_connections`
-    /// shrunk to a single listener slot).
-    #[tokio::test]
-    async fn notify_succeeds_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltDb::connect(&cfg).await.expect("connect");
+        // ---- JOLT-RS-092: JoltDb::notify ----
 
-        db.notify("_jolt_notify_smoke_ch", "hello")
+        /// Compile-time pin: `db.notify(&str, &str)` resolves to
+        /// `Result<(), sqlx::Error>` (decisions 21–23). The explicit return
+        /// annotation forces the typecheck — a regression that surfaces the
+        /// `pg_notify` row payload, wraps the error in a custom enum, or
+        /// changes the parameter shape would break this build pin without
+        /// ever needing a live Postgres.
+        #[test]
+        fn notify_signature_returns_unit_result() {
+            async fn _pin(db: &JoltDb) -> Result<(), sqlx::Error> {
+                db.notify("test_ch", "hello").await
+            }
+        }
+
+        /// PRD-mandated verification for JOLT-RS-092: "notify("test_ch",
+        /// "hello") succeeds." Env-gated on `JOLT_TEST_DATABASE_URL` (same
+        /// convention as 083/084/086/088/090/091): without a live Postgres
+        /// the test skips trivially so the default `cargo test -p jolt-db`
+        /// flow stays runnable.
+        ///
+        /// Calls `notify("_jolt_notify_smoke_ch", "hello")` and asserts the
+        /// `Result` is `Ok(())`. Notification delivery (i.e. that a
+        /// concurrent `LISTEN`-er actually receives this payload) is
+        /// JOLT-RS-093's closing-test slice; here we only verify the write
+        /// half round-trips. Pool health is checked afterward to pin
+        /// decision 22 (notify uses the regular pool, not a dedicated
+        /// connection — an accidental switch to a long-lived connection
+        /// would still pass this test individually, but the back-to-back
+        /// invocations below would saturate a pool whose `max_connections`
+        /// shrunk to a single listener slot).
+        #[tokio::test]
+        async fn notify_succeeds_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltDb::connect(&cfg).await.expect("connect");
+
+            db.notify("_jolt_notify_smoke_ch", "hello")
+                .await
+                .expect("notify(test_ch, hello) should succeed against live Postgres");
+
+            // Run a second notify back-to-back to confirm the pool is not
+            // serialized behind a single notify-owned connection (decision 22).
+            db.notify("_jolt_notify_smoke_ch", "world")
+                .await
+                .expect("second notify should succeed without contention");
+
+            db.health_check()
+                .await
+                .expect("pool still healthy after notify");
+        }
+
+        /// Decision 21 explicitly: the channel name and payload are bound
+        /// parameters, not interpolated SQL text. A payload containing a
+        /// single quote (which would terminate a string literal in raw
+        /// `NOTIFY ch, '...'` SQL) round-trips without error because sqlx
+        /// encodes the bind value through the wire protocol rather than
+        /// substituting it into the SQL string. Env-gated.
+        #[tokio::test]
+        async fn notify_handles_single_quote_payload_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltDb::connect(&cfg).await.expect("connect");
+
+            // A payload that would SQL-inject a raw `NOTIFY ch, '<payload>'`
+            // form. With `pg_notify($1, $2)` it's just a string literal on
+            // the wire and round-trips cleanly.
+            db.notify("_jolt_notify_smoke_ch", "it's safe")
+                .await
+                .expect("single-quote payload should round-trip via parameter binding");
+        }
+
+        // ---- JOLT-RS-093: LISTEN/NOTIFY end-to-end ----
+
+        /// PRD-mandated verification for JOLT-RS-093: "listen on channel,
+        /// notify with payload, verify notification arrives on stream with
+        /// correct payload." Env-gated on `JOLT_TEST_DATABASE_URL` (same
+        /// convention as 083..092); without a live Postgres the test skips
+        /// trivially. This is the closing integration test for phase21
+        /// (db-listen-notify): it proves that the write path (`notify`) and
+        /// the read path (`listen` stream) compose end-to-end through a live
+        /// Postgres instance.
+        ///
+        /// Uses a PID + atomic-counter unique channel name per run to avoid
+        /// collision with concurrent test runs against the same database.
+        #[tokio::test]
+        async fn listen_receives_notification_with_correct_payload_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
+                return;
+            };
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static CHAN_COUNTER: AtomicU64 = AtomicU64::new(0);
+            let channel = format!(
+                "_jolt_e2e_listen_{}_{}",
+                std::process::id(),
+                CHAN_COUNTER.fetch_add(1, Ordering::Relaxed),
+            );
+
+            let cfg = DbConfig::new(url);
+            let db = JoltDb::connect(&cfg).await.expect("connect");
+
+            let mut stream = db
+                .listen(&channel)
+                .await
+                .expect("listen on fresh channel should succeed");
+
+            db.notify(&channel, "hello from e2e")
+                .await
+                .expect("notify should succeed");
+
+            let Ok(item) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.next(),
+            )
             .await
-            .expect("notify(test_ch, hello) should succeed against live Postgres");
+            else {
+                panic!("timed out waiting for notification on channel {channel}");
+            };
 
-        // Run a second notify back-to-back to confirm the pool is not
-        // serialized behind a single notify-owned connection (decision 22).
-        db.notify("_jolt_notify_smoke_ch", "world")
-            .await
-            .expect("second notify should succeed without contention");
+            let notification = item.expect("stream should yield an item, not None");
+            let note = notification.expect("PgNotification should be Ok");
+            assert_eq!(note.channel(), channel);
+            assert_eq!(note.payload(), "hello from e2e");
 
-        db.health_check()
-            .await
-            .expect("pool still healthy after notify");
-    }
-
-    /// Decision 21 explicitly: the channel name and payload are bound
-    /// parameters, not interpolated SQL text. A payload containing a
-    /// single quote (which would terminate a string literal in raw
-    /// `NOTIFY ch, '...'` SQL) round-trips without error because sqlx
-    /// encodes the bind value through the wire protocol rather than
-    /// substituting it into the SQL string. Env-gated.
-    #[tokio::test]
-    async fn notify_handles_single_quote_payload_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLT_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltDb::connect(&cfg).await.expect("connect");
-
-        // A payload that would SQL-inject a raw `NOTIFY ch, '<payload>'`
-        // form. With `pg_notify($1, $2)` it's just a string literal on
-        // the wire and round-trips cleanly.
-        db.notify("_jolt_notify_smoke_ch", "it's safe")
-            .await
-            .expect("single-quote payload should round-trip via parameter binding");
+            // Pool still healthy after the full listen → notify → receive
+            // lifecycle. Catches a regression (e.g. the listener connection
+            // leaking back into the pool via a shared-connection mistake).
+            db.health_check()
+                .await
+                .expect("pool still healthy after e2e notify round-trip");
+        }
     }
 
     // ---- JOLT-RS-094: read_migration_files ----
