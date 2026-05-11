@@ -2612,14 +2612,12 @@ mod tests {
         }
     }
 
-    // ---- JOLT-RS-094: read_migration_files ----
+    // ---- JOLT-RS-094..097: read_migration_files / sha256_hex / MigrationFile ----
 
-    /// Self-cleaning temp directory used by the `read_migration_files`
-    /// tests. Each instance lives in `std::env::temp_dir()` under a
-    /// PID + process-local atomic-counter name so concurrent test threads
-    /// don't collide, and the directory is removed on `Drop`. Tests use
-    /// the `path_str` accessor to feed the directory's UTF-8 path straight
-    /// into [`read_migration_files`] (decision 28).
+    /// Self-cleaning temp directory used by migration tests. Each instance
+    /// lives in `std::env::temp_dir()` under a PID + process-local
+    /// atomic-counter name so concurrent test threads don't collide, and
+    /// the directory is removed on `Drop`.
     struct TestDir {
         path: std::path::PathBuf,
     }
@@ -2630,7 +2628,7 @@ mod tests {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "jolt-db-094-{}-{}-{}",
+                "jolt-db-097-{}-{}-{}",
                 std::process::id(),
                 label,
                 n,
@@ -2660,178 +2658,233 @@ mod tests {
         }
     }
 
-    /// Compile-time pin: `read_migration_files(dir: &str)` resolves to
-    /// `std::io::Result<Vec<MigrationFile>>` (decisions 25, 28). The
-    /// explicit return annotation forces the typecheck — a regression that
-    /// switches the parameter to `&Path` / `impl AsRef<Path>` or wraps the
-    /// return in a foreign error type breaks this build pin without ever
-    /// needing a real directory.
-    #[test]
-    fn read_migration_files_signature_pins() {
-        fn _pin(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
-            read_migration_files(dir)
+    mod migration_files {
+        use super::{MigrationFile, TestDir, read_migration_files, sha256_hex};
+
+        // ---- JOLT-RS-094: read_migration_files signature + sort + capture ----
+
+        /// Compile-time pin: `read_migration_files(dir: &str)` resolves to
+        /// `std::io::Result<Vec<MigrationFile>>` (decisions 25, 28). The
+        /// explicit return annotation forces the typecheck — a regression that
+        /// switches the parameter to `&Path` / `impl AsRef<Path>` or wraps the
+        /// return in a foreign error type breaks this build pin without ever
+        /// needing a real directory.
+        #[test]
+        fn read_migration_files_signature_pins() {
+            fn _pin(dir: &str) -> std::io::Result<Vec<MigrationFile>> {
+                read_migration_files(dir)
+            }
         }
-    }
 
-    /// PRD-mandated verification for JOLT-RS-094: two files
-    /// `001_init.sql` and `002_users.sql` read back as a Vec sorted
-    /// lexicographically by filename → `[001_..., 002_...]`. Writes the
-    /// `002_` file first so a sortless implementation that returned
-    /// `read_dir`'s incidental order would put `002_` ahead of `001_`
-    /// and fail this test on most platforms.
-    #[test]
-    fn read_migration_files_sorts_by_filename() {
-        let dir = TestDir::new("sort");
-        dir.write_file("002_users.sql", "CREATE TABLE users();");
-        dir.write_file("001_init.sql", "CREATE TABLE init();");
+        /// PRD-mandated verification for JOLT-RS-094: two files
+        /// `001_init.sql` and `002_users.sql` read back as a Vec sorted
+        /// lexicographically by filename → `[001_..., 002_...]`. Writes the
+        /// `002_` file first so a sortless implementation that returned
+        /// `read_dir`'s incidental order would put `002_` ahead of `001_`
+        /// and fail this test on most platforms.
+        #[test]
+        fn read_migration_files_sorts_by_filename() {
+            let dir = TestDir::new("sort");
+            dir.write_file("002_users.sql", "CREATE TABLE users();");
+            dir.write_file("001_init.sql", "CREATE TABLE init();");
 
-        let files = read_migration_files(dir.path_str()).expect("read");
-        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["001_init.sql", "002_users.sql"]);
-    }
-
-    /// Each [`MigrationFile`] captures both the basename and the file's
-    /// UTF-8 body (decision 24). Pins the field-shape contract — a
-    /// regression that captures only the name, strips the file content,
-    /// or returns a non-UTF-8 buffer fails this test.
-    #[test]
-    fn read_migration_files_captures_name_and_content() {
-        let dir = TestDir::new("body");
-        dir.write_file("001_init.sql", "SELECT 1;");
-
-        let files = read_migration_files(dir.path_str()).expect("read");
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "001_init.sql");
-        assert_eq!(files[0].content, "SELECT 1;");
-    }
-
-    // ---- JOLT-RS-095: sha256_hex ----
-
-    /// Compile-time pin: `sha256_hex(bytes: &[u8])` resolves to a
-    /// `String` (decisions 29, 30). A regression that narrows the
-    /// parameter to `&str` or returns a `Vec<u8>` / `[u8; 32]` breaks
-    /// this build pin without ever running.
-    #[test]
-    fn sha256_hex_signature_pins() {
-        fn _pin(bytes: &[u8]) -> String {
-            sha256_hex(bytes)
+            let files = read_migration_files(dir.path_str()).expect("read");
+            let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, vec!["001_init.sql", "002_users.sql"]);
         }
-    }
 
-    /// PRD-mandated verification for JOLT-RS-095: a known input hashes
-    /// to the documented SHA-256 hex output. Uses the canonical NIST
-    /// test vector for `"abc"` — anyone can re-derive this via
-    /// `echo -n abc | shasum -a 256`, so a regression in either the
-    /// hash kernel or the hex encoder surfaces against a fixed
-    /// independently-verifiable reference.
-    #[test]
-    fn sha256_hex_matches_nist_abc_test_vector() {
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        );
-    }
+        /// Each [`MigrationFile`] captures both the basename and the file's
+        /// UTF-8 body (decision 24). Pins the field-shape contract — a
+        /// regression that captures only the name, strips the file content,
+        /// or returns a non-UTF-8 buffer fails this test.
+        #[test]
+        fn read_migration_files_captures_name_and_content() {
+            let dir = TestDir::new("body");
+            dir.write_file("001_init.sql", "SELECT 1;");
 
-    /// SHA-256 of the empty input is the canonical
-    /// `e3b0c4...` constant. Pins both that the hex output is exactly
-    /// 64 characters (no truncation, no padding) and that the helper
-    /// handles zero-length input without panicking.
-    #[test]
-    fn sha256_hex_matches_empty_input_constant() {
-        let out = sha256_hex(b"");
-        assert_eq!(
-            out,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        );
-        assert_eq!(out.len(), 64);
-    }
+            let files = read_migration_files(dir.path_str()).expect("read");
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].name, "001_init.sql");
+            assert_eq!(files[0].content, "SELECT 1;");
+        }
 
-    /// Output is lowercase hex, not uppercase (decision 31). Pinned so
-    /// a regression that flips to `{:02X}` formatting fails this test —
-    /// such a flip would silently desync the recorded
-    /// `_migrations.checksum` from a developer's `shasum -a 256`
-    /// reference value when JOLT-RS-099's apply-time comparison runs.
-    #[test]
-    fn sha256_hex_is_lowercase() {
-        let out = sha256_hex(b"abc");
-        assert!(
-            out.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
-            "expected lowercase hex digits, got {out:?}",
-        );
-    }
+        // ---- JOLT-RS-095: sha256_hex ----
 
-    /// Hashing the SQL body of a migration file produces a stable hex
-    /// digest that the JOLT-RS-096 `read_migration_files` extension
-    /// (and the JOLT-RS-099 apply-time tamper check) can record and
-    /// compare against. Reference value computed via
-    /// `echo -n 'SELECT 1;' | shasum -a 256`.
-    #[test]
-    fn sha256_hex_hashes_migration_body() {
-        assert_eq!(
-            sha256_hex(b"SELECT 1;"),
-            "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
-        );
-    }
+        /// Compile-time pin: `sha256_hex(bytes: &[u8])` resolves to a
+        /// `String` (decisions 29, 30). A regression that narrows the
+        /// parameter to `&str` or returns a `Vec<u8>` / `[u8; 32]` breaks
+        /// this build pin without ever running.
+        #[test]
+        fn sha256_hex_signature_pins() {
+            fn _pin(bytes: &[u8]) -> String {
+                sha256_hex(bytes)
+            }
+        }
 
-    // ---- JOLT-RS-096: MigrationFile.checksum ----
+        /// PRD-mandated verification for JOLT-RS-095: a known input hashes
+        /// to the documented SHA-256 hex output. Uses the canonical NIST
+        /// test vector for `"abc"` — anyone can re-derive this via
+        /// `echo -n abc | shasum -a 256`, so a regression in either the
+        /// hash kernel or the hex encoder surfaces against a fixed
+        /// independently-verifiable reference.
+        #[test]
+        fn sha256_hex_matches_nist_abc_test_vector() {
+            assert_eq!(
+                sha256_hex(b"abc"),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            );
+        }
 
-    /// Compile-time pin for the JOLT-RS-096 struct shape: `MigrationFile`
-    /// holds `name`, `content`, and `checksum` as plain `pub String`
-    /// fields constructible by struct literal (decisions 24, 33). A
-    /// regression that drops a field, renames one, or wraps `checksum`
-    /// in a newtype breaks this build pin without ever running.
-    #[test]
-    fn migration_file_struct_shape_pins() {
-        let f = MigrationFile {
-            name: String::from("001_init.sql"),
-            content: String::from("SELECT 1;"),
-            checksum: String::from(
+        /// SHA-256 of the empty input is the canonical
+        /// `e3b0c4...` constant. Pins both that the hex output is exactly
+        /// 64 characters (no truncation, no padding) and that the helper
+        /// handles zero-length input without panicking.
+        #[test]
+        fn sha256_hex_matches_empty_input_constant() {
+            let out = sha256_hex(b"");
+            assert_eq!(
+                out,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            );
+            assert_eq!(out.len(), 64);
+        }
+
+        /// Output is lowercase hex, not uppercase (decision 31). Pinned so
+        /// a regression that flips to `{:02X}` formatting fails this test —
+        /// such a flip would silently desync the recorded
+        /// `_migrations.checksum` from a developer's `shasum -a 256`
+        /// reference value when JOLT-RS-099's apply-time comparison runs.
+        #[test]
+        fn sha256_hex_is_lowercase() {
+            let out = sha256_hex(b"abc");
+            assert!(
+                out.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "expected lowercase hex digits, got {out:?}",
+            );
+        }
+
+        /// Hashing the SQL body of a migration file produces a stable hex
+        /// digest that the JOLT-RS-096 `read_migration_files` extension
+        /// (and the JOLT-RS-099 apply-time tamper check) can record and
+        /// compare against. Reference value computed via
+        /// `echo -n 'SELECT 1;' | shasum -a 256`.
+        #[test]
+        fn sha256_hex_hashes_migration_body() {
+            assert_eq!(
+                sha256_hex(b"SELECT 1;"),
                 "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
-            ),
-        };
-        assert_eq!(f.name, "001_init.sql");
-        assert_eq!(f.content, "SELECT 1;");
-        assert_eq!(f.checksum.len(), 64);
-    }
+            );
+        }
 
-    /// PRD-mandated verification for JOLT-RS-096: a [`MigrationFile`]
-    /// returned by [`read_migration_files`] has a populated `checksum`
-    /// that matches the SHA-256 hex digest of its own `content` field
-    /// (decision 32). Uses the same `001_init.sql` / `SELECT 1;`
-    /// fixture as `read_migration_files_captures_name_and_content` so
-    /// the recorded checksum matches the independently-derivable
-    /// reference value (`echo -n 'SELECT 1;' | shasum -a 256`) that
-    /// `sha256_hex_hashes_migration_body` already pins.
-    #[test]
-    fn read_migration_files_populates_checksum() {
-        let dir = TestDir::new("checksum");
-        dir.write_file("001_init.sql", "SELECT 1;");
+        // ---- JOLT-RS-096: MigrationFile.checksum ----
 
-        let files = read_migration_files(dir.path_str()).expect("read");
-        assert_eq!(files.len(), 1);
-        assert_eq!(
-            files[0].checksum,
-            "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
-        );
-        assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
-    }
+        /// Compile-time pin for the JOLT-RS-096 struct shape: `MigrationFile`
+        /// holds `name`, `content`, and `checksum` as plain `pub String`
+        /// fields constructible by struct literal (decisions 24, 33). A
+        /// regression that drops a field, renames one, or wraps `checksum`
+        /// in a newtype breaks this build pin without ever running.
+        #[test]
+        fn migration_file_struct_shape_pins() {
+            let f = MigrationFile {
+                name: String::from("001_init.sql"),
+                content: String::from("SELECT 1;"),
+                checksum: String::from(
+                    "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+                ),
+            };
+            assert_eq!(f.name, "001_init.sql");
+            assert_eq!(f.content, "SELECT 1;");
+            assert_eq!(f.checksum.len(), 64);
+        }
 
-    /// Distinct file bodies produce distinct checksums — a regression
-    /// that wired every `MigrationFile` to the same constant (or hashed
-    /// the filename instead of the body) fails this test. Also pins
-    /// that the sort step does not scramble the per-file
-    /// `name`/`content`/`checksum` triple alignment.
-    #[test]
-    fn read_migration_files_checksum_differs_per_file() {
-        let dir = TestDir::new("differs");
-        dir.write_file("001_init.sql", "SELECT 1;");
-        dir.write_file("002_users.sql", "SELECT 2;");
+        /// PRD-mandated verification for JOLT-RS-096: a [`MigrationFile`]
+        /// returned by [`read_migration_files`] has a populated `checksum`
+        /// that matches the SHA-256 hex digest of its own `content` field
+        /// (decision 32). Uses the same `001_init.sql` / `SELECT 1;`
+        /// fixture as `read_migration_files_captures_name_and_content` so
+        /// the recorded checksum matches the independently-derivable
+        /// reference value (`echo -n 'SELECT 1;' | shasum -a 256`) that
+        /// `sha256_hex_hashes_migration_body` already pins.
+        #[test]
+        fn read_migration_files_populates_checksum() {
+            let dir = TestDir::new("checksum");
+            dir.write_file("001_init.sql", "SELECT 1;");
 
-        let files = read_migration_files(dir.path_str()).expect("read");
-        assert_eq!(files.len(), 2);
-        assert_ne!(files[0].checksum, files[1].checksum);
-        assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
-        assert_eq!(files[1].checksum, sha256_hex(files[1].content.as_bytes()));
+            let files = read_migration_files(dir.path_str()).expect("read");
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                files[0].checksum,
+                "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a",
+            );
+            assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
+        }
+
+        /// Distinct file bodies produce distinct checksums — a regression
+        /// that wired every `MigrationFile` to the same constant (or hashed
+        /// the filename instead of the body) fails this test. Also pins
+        /// that the sort step does not scramble the per-file
+        /// `name`/`content`/`checksum` triple alignment.
+        #[test]
+        fn read_migration_files_checksum_differs_per_file() {
+            let dir = TestDir::new("differs");
+            dir.write_file("001_init.sql", "SELECT 1;");
+            dir.write_file("002_users.sql", "SELECT 2;");
+
+            let files = read_migration_files(dir.path_str()).expect("read");
+            assert_eq!(files.len(), 2);
+            assert_ne!(files[0].checksum, files[1].checksum);
+            assert_eq!(files[0].checksum, sha256_hex(files[0].content.as_bytes()));
+            assert_eq!(files[1].checksum, sha256_hex(files[1].content.as_bytes()));
+        }
+
+        // ---- JOLT-RS-097: edge-case coverage ----
+
+        /// Empty directory → empty vec. Pins the contract that a
+        /// directory with no `.sql` files returns `Ok(vec![])` rather
+        /// than erroring or panicking. The empty-vec return is the base
+        /// case for every caller that reads migrations from a directory
+        /// before new files are written.
+        #[test]
+        fn read_migration_files_empty_directory_returns_empty_vec() {
+            let dir = TestDir::new("empty");
+            let files = read_migration_files(dir.path_str()).expect("read");
+            assert!(files.is_empty());
+        }
+
+        /// Missing directory → `Err`. `read_migration_files` calls
+        /// `std::fs::read_dir` internally and should surface the
+        /// filesystem error directly rather than treating it as
+        /// "no files found." Pinned so a regression that substitutes
+        /// an empty `Ok(vec![])` for `Err` on missing-directory fails
+        /// this test.
+        #[test]
+        fn read_migration_files_errors_on_missing_directory() {
+            let result = read_migration_files("/tmp/__jolt_nonexistent_dir_097__");
+            assert!(
+                result.is_err(),
+                "expected Err for missing directory, got Ok({:?})",
+                result.ok(),
+            );
+        }
+
+        /// Non-`.sql` entries are silently skipped (decision 27).
+        /// Directory entries like `README.md`, `.gitkeep`,
+        /// `editor_backup.sql~` must not appear in the returned Vec
+        /// and must not cause errors. Pinned so a regression that
+        /// tightens the extension filter to error on non-.sql files
+        /// or that adds non-.sql entries to the return set fails this.
+        #[test]
+        fn read_migration_files_skips_non_sql_files() {
+            let dir = TestDir::new("nonsql");
+            dir.write_file("001_init.sql", "SELECT 1;");
+            dir.write_file("README.md", "# Migration notes");
+            dir.write_file("notes.txt", "not a migration");
+            dir.write_file("002_users.sql", "SELECT 2;");
+
+            let files = read_migration_files(dir.path_str()).expect("read");
+            let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, vec!["001_init.sql", "002_users.sql"]);
+        }
     }
 
     // ---- JOLT-RS-098: connect auto-creates _migrations table ----

@@ -4463,3 +4463,30 @@ Files changed:
 Blockers / next notes:
 - Phase21-db-listen-notify is now CLOSED. All 4 items (090/091/092/093) are passes: true.
 - Next unfinished item in priority order is JOLT-RS-097 (priority 97, phase22-migration-files: migration file reading tests under `tests::migration_files`). The existing `read_migration_files` tests live at the `mod tests` level and need to be wrapped in `mod migration_files` per the PRD verification filter.
+
+## 2026-05-11 — JOLT-RS-097: Migration file reading edge-case tests — closes phase22
+
+PRD item: JOLT-RS-097 (priority 97, phase22-migration-files) — Write migration file reading tests: empty directory → empty vec, missing directory → error, non-sql files skipped.
+
+Verification:
+- `cargo test -p jolt-db -- tests::migration_files` → 14/14 passed (11 prior wrapped + 3 new); 0 failed.
+- `cargo test -p jolt-db --lib` → 75/75 passed; 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Key decisions:
+- Wrapped the existing JOLT-RS-094/095/096 tests (11 tests) into `mod migration_files { ... }` inside `mod tests`. Same structural pattern as `mod connection`, `mod query_helpers`, `mod listen_notify` — co-locate all tests for a phase's API surface under a single submodule to give the PRD-mandated filter a stable target.
+- `TestDir` stayed at the `mod tests` top level (not inside `mod migration_files`) because JOLT-RS-098+ tests (migrate, tamper, removed, partial-apply, multi-statement, create_migration_file) all use it. `mod migration_files` imports it via `use super::TestDir`.
+- Added 3 new tests directly inside `mod migration_files`:
+  1. `read_migration_files_empty_directory_returns_empty_vec` — `TestDir::new("empty")` with zero `.sql` files → `read_migration_files` returns `Ok(vec![])`. Pins the base-case contract so a regression that errors or panics on an empty directory fails this test.
+  2. `read_migration_files_errors_on_missing_directory` — a hardcoded non-existent path `/tmp/__jolt_nonexistent_dir_097__` → asserts `read_migration_files` returns `Err`. Pins that the implementation surfaces filesystem errors directly rather than substituting `Ok(vec![])`.
+  3. `read_migration_files_skips_non_sql_files` — writes `001_init.sql`, `README.md`, `notes.txt`, `002_users.sql` into a directory → asserts only the `.sql` entries appear in the sorted result. Pins decision 27 (non-`.sql` entries silently skipped).
+- No changes to production code — item is test-only. The existing `read_migration_files` function already handles all three edge cases correctly (empty directory → no entries found → empty vec; missing directory → `read_dir` fails → `io::Error` propagated; non-`.sql` files → extension filter `.ends_with(".sql")` skips).
+- Did NOT add a `mod migration_safety` wrap for JOLT-RS-105 — that's a separate PRD item (priority 105).
+
+Files changed:
+- jolt-db/src/lib.rs — moved `TestDir` to stay at `mod tests` top level with updated temp-dir prefix (`jolt-db-097-`); wrapped JOLT-RS-094/095/096 tests (11 tests) in `mod migration_files`; added 3 new JOLT-RS-097 tests (`empty_directory`, `errors_on_missing_directory`, `skips_non_sql_files`).
+- prd.json — JOLT-RS-097 passes: true.
+
+Blockers / next notes:
+- Phase22-migration-files is now CLOSED. All 4 items (094/095/096/097) are passes: true.
+- Next unfinished item in priority order is JOLT-RS-105 (priority 105, phase24-migration-safety: migration safety tests under `tests::migration_safety`). Covers checksum mismatch error, rollback detection error, and CLI creates correct filename. The existing tests for these (migrate_detects_tampered, migrate_detects_removed, create_migration_file_builds_timestamped_filename, etc.) live at the `mod tests` level and need to be wrapped in `mod migration_safety` per the PRD verification filter. Same structural pattern as 089/093/097.
