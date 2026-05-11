@@ -21,6 +21,7 @@ use std::time::Duration;
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
+use crate::body_log::BodyLogLayer;
 use crate::endpoint::Endpoint;
 use crate::endpoint_registry::EndpointRegistry;
 use crate::method::Method;
@@ -169,7 +170,12 @@ impl JoltServer {
                 },
             );
 
-        extra_router.merge(inventory_router).layer(trace_layer)
+        let body_log_layer = BodyLogLayer::default();
+
+        extra_router
+            .merge(inventory_router)
+            .layer(body_log_layer)
+            .layer(trace_layer)
     }
 
     /// Bind the configured router on `0.0.0.0:port` and serve it until a

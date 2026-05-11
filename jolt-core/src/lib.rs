@@ -4,6 +4,7 @@ pub mod auth_bearer;
 pub mod auth_jwt;
 pub mod auth_websocket;
 pub mod auth_ws_jwt;
+pub mod body_log;
 pub mod cookie;
 pub mod cors;
 pub mod endpoint;
@@ -22,6 +23,7 @@ pub mod websocket;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
 pub use auth_jwt::{AuthJwtLayer, AuthJwtService};
+pub use body_log::BodyLogLayer;
 // JOLT-RS-076 surface: the WS-JWT auth precheck layer composing the 075
 // extractor with the 072 decoder. On success the layer stashes a
 // [`WsJwtToken`] AND a [`JwtClaims`] into request extensions for 077's WS

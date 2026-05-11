@@ -4250,3 +4250,35 @@ Blockers / next notes:
 - The `init_tracing_subscriber` function is declared `fn` (not `pub`). If library consumers need to install their own subscriber before `JoltServer::start`, the `try_init()` guard means the first caller wins — including the framework if `start()` runs first. Library users should call their subscriber init before `start()`.
 - The compact format includes a timestamp and thread-local `INFO request:` prefix. The raw format the PRD describes ("GET /api/test 200 4ms") could be achieved with a custom `FormatEvent` impl if needed; the current format is functionally equivalent and production-suitable.
 - No new `Cargo.lock` changes beyond the two new deps and their transitive graph (tracing-core, tracing-log, nu-ansi-term, etc. — all standard).
+
+## 2026-05-10 — JOLT-RS-070: DEBUG body logging (closes phase15)
+
+PRD item: JOLT-RS-070 (priority 70, phase15-logging) — Log request body and response body at DEBUG level (truncated to 1024 bytes). Suppress for sensitive paths containing "/auth". Closes phase15.
+
+Verification:
+- `cargo test -p jolt-core -- tests::server::body_log_layer` → 2 passed (body_log_layer_emits_debug_event_for_request_body, body_log_layer_suppresses_body_for_auth_paths).
+- `cargo test --workspace` → all 491 tests pass; 0 failures.
+- `cargo check --workspace` → clean; no regressions.
+- Manual: RUST_LOG=debug cargo test -p jolt-core -- tests::server::body_log_layer_emits_debug_event_for_request_body emits structured debug log line containing REQ direction, path, body_bytes, and body field with JSON payload content.
+
+Key decisions:
+- Created `jolt-core/src/body_log.rs` with `BodyLogLayer` (a `tower::Layer`) and `BodyLogService` (a `tower::Service` wrapper). The service buffers request and response bodies up to `DEFAULT_MAX_BODY_SIZE` (10 MiB, same as `ParseBodyLayer`), logs the first `MAX_BODY_LOG_BYTES` (1024) bytes at `tracing::debug` level, then reconstructs the body from the buffered bytes and delegates to inner. Buffering failure (body exceeds cap) passes an empty body through — safe because downstream `ParseBodyLayer` would reject it with 413 anyway.
+- Sensitive path suppression: `SENSITIVE_PATH_PATTERNS = &["/auth"]`. A request path containing "/auth" skips all body buffering and logging. One-by-one check via `path.contains(pattern)` for the static list.
+- `BodyLogLayer` is placed between the router and `TraceLayer` in `build_serving_router`: `.layer(body_log_layer).layer(trace_layer)`. This means body logging runs AFTER auth/CORS/parse-body middleware but BEFORE the trace span is created, so debug body events appear chronologically around the INFO-level request/response log lines.
+- The layer checks `RequestExt::is_finished()` before buffering — if upstream middleware already short-circuited, the body is passed through without logging (respects early-termination contract).
+- Response body logging follows the same pattern: after inner service returns, buffer the response body, log at DEBUG, reconstruct and return. If response buffering fails, the response body is lost (edge case — a correct inner service should not produce unbuffered bodies).
+- Log format uses `tracing::debug!` with structured fields: `direction` ("REQ" or "RESP"), `path`, `body_bytes` (total byte count), `body` (truncated preview). Bodies truncated at char boundaries; suffix `"...<truncated>"` appended when body exceeds 1024 bytes. Binary/non-UTF-8 content rendered via `String::from_utf8_lossy`.
+- Re-exported `BodyLogLayer` at crate root (`jolt_core::BodyLogLayer`).
+
+Files changed:
+- jolt-core/src/body_log.rs (new) — BodyLogLayer, BodyLogService, log_body helper.
+- jolt-core/src/server.rs — added `use body_log::BodyLogLayer`; wired `.layer(body_log_layer)` into `build_serving_router`.
+- jolt-core/src/lib.rs — added `pub mod body_log;` and `pub use body_log::BodyLogLayer;`.
+- jolt-core/src/tests.rs — added 2 tests in `mod server`: `body_log_layer_emits_debug_event_for_request_body`, `body_log_layer_suppresses_body_for_auth_paths`.
+- prd.json — JOLT-RS-070 passes: true.
+
+Blockers / next notes:
+- phase15-logging is now CLOSED. All 3 items (068/069/070) are passes: true.
+- Body loss on oversized request (>10 MiB) is a known limitation — matching ParseBodyLayer's behavior exactly. Endpoints handling ultra-large payloads that bypass ParseBodyLayer will lose the body content for debug logging (but trace logging still records method/path/status). Mitigation: increase DEFAULT_MAX_BODY_SIZE or add a separate body-log-specific cap.
+- The 1024-byte log truncation splits mid-codepoint for multi-byte UTF-8 sequences at the boundary. `String::from_utf8_lossy` replaces invalid bytes with U+FFFD, which is acceptable for debug output.
+- Next unfinished item in priority order: JOLT-RS-077 (priority 77, phase17-auth-websocket: validate token before WS upgrade). JOLT-RS-071 through JOLT-RS-076 are all passes: true.

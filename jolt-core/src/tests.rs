@@ -2612,6 +2612,147 @@ mod server {
             "log output must include latency in ms, got: {all}"
         );
     }
+
+    #[test]
+    fn body_log_layer_emits_debug_event_for_request_body() {
+        // JOLT-RS-070: the BodyLogLayer in build_serving_router must emit
+        // DEBUG-level tracing events with the request body content for
+        // non-sensitive paths.
+        use std::io;
+        use std::sync::Mutex;
+
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_cap = Arc::clone(&events);
+
+        let make_writer = move || {
+            let events = Arc::clone(&events_cap);
+            struct CaptureWriter {
+                events: Arc<Mutex<Vec<String>>>,
+            }
+            impl io::Write for CaptureWriter {
+                fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                    if let Ok(s) = std::str::from_utf8(buf) {
+                        self.events.lock().unwrap().push(s.to_string());
+                    }
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            CaptureWriter { events }
+        };
+
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_writer(make_writer)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+
+        let events_ret = Arc::clone(&events);
+
+        std::thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                let rt = tokio::runtime::Runtime::new().expect("create runtime");
+                rt.block_on(async {
+                    let router =
+                        JoltServer::new().build_serving_router(axum::Router::new());
+                    let req = axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"message":"hello jolt"}"#))
+                        .unwrap();
+                    let _resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+                });
+            });
+        })
+        .join()
+        .expect("dedicated thread should not panic");
+
+        let captured: Vec<String> = events_ret.lock().unwrap().clone();
+        let all = captured.concat();
+
+        assert!(
+            all.contains(r#"{"message":"hello jolt"}"#),
+            "DEBUG log must include request body, got: {all}"
+        );
+        assert!(
+            all.contains("REQ"),
+            "DEBUG log must include REQ direction tag, got: {all}"
+        );
+    }
+
+    #[test]
+    fn body_log_layer_suppresses_body_for_auth_paths() {
+        // JOLT-RS-070: the BodyLogLayer must NOT log body content for
+        // sensitive path prefixes (paths containing "/auth").
+        use std::io;
+        use std::sync::Mutex;
+
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_cap = Arc::clone(&events);
+
+        let make_writer = move || {
+            let events = Arc::clone(&events_cap);
+            struct CaptureWriter {
+                events: Arc<Mutex<Vec<String>>>,
+            }
+            impl io::Write for CaptureWriter {
+                fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                    if let Ok(s) = std::str::from_utf8(buf) {
+                        self.events.lock().unwrap().push(s.to_string());
+                    }
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            CaptureWriter { events }
+        };
+
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_writer(make_writer)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+
+        let events_ret = Arc::clone(&events);
+
+        std::thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                let rt = tokio::runtime::Runtime::new().expect("create runtime");
+                rt.block_on(async {
+                    let router =
+                        JoltServer::new().build_serving_router(axum::Router::new());
+                    let req = axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/auth/login")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"password":"secret123"}"#))
+                        .unwrap();
+                    let _resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+                });
+            });
+        })
+        .join()
+        .expect("dedicated thread should not panic");
+
+        let captured: Vec<String> = events_ret.lock().unwrap().clone();
+        let all = captured.concat();
+
+        assert!(
+            !all.contains("secret123"),
+            "sensitive path /auth must NOT log body, got: {all}"
+        );
+    }
 }
 
 mod cors {

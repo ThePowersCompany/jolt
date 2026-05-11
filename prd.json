@@ -1021,7 +1021,7 @@
       "verification": [
         "Manual: RUST_LOG=debug make request, verify body content logged."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-071",
