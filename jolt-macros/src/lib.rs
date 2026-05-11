@@ -7,6 +7,7 @@ use syn::{parse_macro_input, DeriveInput, ItemFn};
 mod auto_middleware;
 mod endpoint;
 mod patch_query;
+mod ts_export;
 mod ws;
 
 /// `#[endpoint("/path")]` attribute macro.
@@ -120,6 +121,31 @@ pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
 pub fn patch_query_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     patch_query::expand_patch_query(input).into()
+}
+
+/// `#[derive(TsExport)]` proc-macro derive — phase39 entry point.
+///
+/// JOLT-RS-165 (current): walks the struct's named fields via
+/// [`ts_export::parse_ts_export_input`], collects each field's Rust name and
+/// type, then emits a hidden `__JOLT_TS_EXPORT_FIELD_COUNT: usize` const so an
+/// integration test can observe that the derive ran.
+///
+/// Subsequent phase39/40 items extend this expansion:
+/// - 166: map Rust types to TypeScript types (String→string, i32→number, etc.)
+/// - 167: map generics (Option<T>→T|null, Json<T>→T, JsonArray<T>→T[])
+/// - 168: generate the `export interface StructName { ... }` string.
+/// - 169: `#[ts(rename = "newName")]` support on fields.
+/// - 170: `#[ts(flatten)]` field inlining.
+/// - 171: JSDoc comment generation from /// doc comments.
+/// - 172: closing attribute test bundle.
+///
+/// On parse failure the emission is a single `compile_error!` token — no
+/// partial codegen. Mirrors the contract from `#[derive(PatchQuery)]`
+/// (JOLT-RS-110).
+#[proc_macro_derive(TsExport)]
+pub fn ts_export_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    ts_export::expand_ts_export(input).into()
 }
 
 /// `ws!(path, HandlerType, subprotocol = "...", auth_fn = fn_name)` —

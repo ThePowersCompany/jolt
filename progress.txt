@@ -6088,3 +6088,31 @@ Files changed:
 Notes for next iterations:
 - JOLT-RS-165 (priority 165, phase39-tsexport-basic): Implement proc_macro_derive for TsExport — walk struct fields, collect field name + Rust type. First item in the TypeScript typegen phase. Requires work in jolt-macros.
 - phase38-json-optional-types still has items 160-163 (all passes: true) and 164 (passes: true). The Optional<T> tri-state surface is now complete — both Serialize and Deserialize are wired, and struct-level serde attributes handle the NotProvided boundary.
+
+## 2026-05-11 — JOLT-RS-165: TsExport derive — field parsing (opens phase39)
+
+PRD item: JOLT-RS-165 (priority 165, phase39-tsexport-basic) — Implement proc_macro_derive for TsExport: walk struct fields, collect field name + Rust type.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 203 passed (194 prior + 9 new in ts_export::tests), 0 failed.
+- `cargo check --workspace` → all 5 crates check clean, no warnings.
+
+Key decisions:
+- Created `jolt-macros/src/ts_export.rs` following the same pattern as `patch_query.rs` and `auto_middleware.rs`: parse via `parse_ts_export_input`, emit via `expand_ts_export` with a hidden marker const (`__JOLT_TS_EXPORT_FIELD_COUNT: usize`).
+- `TsExportInput` holds `ident` and `Vec<TsExportField>`. `TsExportField` holds `name: Ident` and `rust_type: Type`. Both fields have `#[allow(dead_code)]` — only consumed by tests at this stage; later items (166-168) will consume them for TS type mapping and interface generation.
+- Acceptance rules: structs only (enum/union/tuple rejected with span-pointing errors), unit structs accepted with zero fields. Mirrors `PatchQuery`'s parse contract.
+- No `#[attributes(ts)]` declaration yet on the derive — JOLT-RS-169 (`#[ts(rename = "...")]`) will add it when field-level attributes are needed. Adding it now would accept-but-ignore `#[ts(...)]` silently.
+- Entry point `#[proc_macro_derive(TsExport)]` in `lib.rs` delegates to `ts_export::expand_ts_export`. The existing `JoltPlaceholder` derive and attribute remain unchanged (separate concern, removed when a future item deems them obsolete).
+- Tests cover: unit struct, named-field struct, field type preservation (String/i32/bool displayed as strings), generic field types (Vec<String>, Option<serde_json::Value>), enum/union/tuple rejection, marker const emission, and compile_error! on parse failure.
+- `preserves_field_types` test: quotes each field's `Type` individually (not through the `TsExportInput` struct) because `TsExportInput` does not implement `ToTokens`. Same pattern in `handles_generic_field_types`.
+
+Files changed:
+- jolt-macros/src/ts_export.rs (new) — `TsExportInput`, `TsExportField`, `parse_ts_export_input`, `expand_ts_export`, 9 unit tests.
+- jolt-macros/src/lib.rs — added `mod ts_export;`, added `#[proc_macro_derive(TsExport)] pub fn ts_export_derive`.
+- prd.json — JOLT-RS-165 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-166 (priority 166): Map Rust types to TypeScript — String→string, i32/i64/u32/u64/f32/f64/usize→number, bool→boolean, Vec<T>→T[]. This requires a type-mapping function (likely `fn ts_type_name(ty: &Type) -> String`) that pattern-matches on the type path and recurses into generics. The test fixture from 165's `preserves_field_types` provides the seed.
+- JOLT-RS-167 (priority 167): Map generics — Option<T>→T|null, Json<T>→T, JsonArray<T>→T[], nested generics (Option<Vec<String>>→string[]|null).
+- JOLT-RS-168 (priority 168): Generate the `export interface StructName { ... }` TS definition with sorted fields. Closes phase39.
+- The `ts_export` module will grow significantly across 166-168 (type mapping, interface codegen). Consider extractng the type-mapping logic into a separate helper function or sub-module once it exceeds ~100 lines — current size (~180 lines including tests) is fine for phase39's scope.
