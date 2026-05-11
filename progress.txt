@@ -4192,3 +4192,28 @@ Notes for next iterations:
 - The `parse_body_string` test module (3 tests) is redundant with the new `text_plain_body_is_decoded_and_inserted_into_extensions` test in `mod parse_body`. Consider consolidating into `mod parse_body` during a test-organization pass — but not now since it would muddy this focused PRD step and risk breaking the `tests::parse_body_string` filter that downstream CI/test scripts might rely on.
 - `max_body_size` is exposed per-layer, not per-server. Future server-builder work (likely JOLT-RS-023 or a new item) should add a server-level `body_limit` config that flows into all layers.
 - The `size_hint().lower()` pre-check works for Content-Length-present bodies but misses chunked transfer encoding where `lower()` is 0. Bodies without Content-Length that exceed the limit fall through to the `buffer_body → None` path and are still rejected with 413 — just without the early short-circuit advantage. Documented via module docs.
+
+## 2026-05-10 — JOLT-RS-067: Query parsing test bundle (closes phase14)
+
+PRD item: JOLT-RS-067 (priority 67, phase14-query-parsing) — Write query parsing unit tests: missing param → error, wrong type → 400, all supported types round-trip. Closes phase14.
+
+Verification:
+- `cargo test -p jolt-core -- tests::parse_query` → 20 passed, 0 failed (3 layer tests + 4 typed-extraction tests + 7 bool/string/enum tests + 6 Vec<T> tests).
+- `cargo test -p jolt-core --lib` → 212 passed, 0 failed.
+- `cargo check --workspace` → clean in 0.33s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..062 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- This is a closing test-bundle gate, NOT new test implementation. All tests described by the PRD step text already existed as part of JOLT-RS-063/064/065/066's implementation. The four test modules (`mod parse_query` 3 tests, `mod parse_query_typed` 4 tests, `mod parse_query_typed_extras` 7 tests, `mod parse_query_typed_vec` 6 tests) collectively cover: missing param → Missing error (064/065/066), wrong type → 400 + Invalid error (064/065), all supported types round-trip (int/float in 064, bool/string/enum in 065, Vec<T> in 066).
+- The 21st query test (`parse_query_skips_when_finished`) lives in a separate skip-when-finished test module and is not captured by the `tests::parse_query` filter. It exercises the JOLT-RS-078 early-termination contract, not query-parsing behavior per se.
+- The PRD verification filter `cargo test -p jolt-core -- tests::parse_query` successfully captures all four `parse_query*` sibling modules (Rust's test filter matches any module whose path contains the substring).
+
+Files changed:
+- prd.json — JOLT-RS-067 passes: true.
+
+Notes for next iterations:
+- phase14-query-parsing is now CLOSED. All 5 items (063/064/065/066/067) are passes: true.
+- The next unfinished items in priority order are JOLT-RS-069 (priority 69, phase15-logging: customize log format), JOLT-RS-070 (priority 70, phase15-logging: DEBUG body logging), and JOLT-RS-077 (priority 77, phase17-auth-websocket: WS token validation). JOLT-RS-068 (priority 68, TraceLayer integration) is passes: true.
+- query extraction helpers are still duplicated between `endpoint_registry.rs::parse_query` and `parse_query.rs::parse_query`. Deduplication into a shared utility is still deferred.
+- Percent-decoding of query string values remains unimplemented (not in scope for any current PRD item).
