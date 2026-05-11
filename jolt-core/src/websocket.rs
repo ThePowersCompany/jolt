@@ -6,16 +6,20 @@
 //!   `on_shutdown`) and no-op default impls. Define minimal placeholder
 //!   shapes for [`WebSocketSender`] and [`WsMessage`] so the trait
 //!   signatures can reference them.
-//! - JOLT-RS-119 (this iteration): flesh out [`WebSocketSender`] with the
+//! - JOLT-RS-119: flesh out [`WebSocketSender`] with the
 //!   `send` / `send_text` / `send_json` / `close` methods, an mpsc-backed
 //!   transport so the type is cheaply [`Clone`]able (decision 5 from 118),
 //!   a constructor [`WebSocketSender::channel`] that returns the sender +
 //!   the writer-task feeder receiver, and the [`WsSendError`] enum.
-//! - JOLT-RS-120: replace the empty [`WsMessage`] enum with `Text(String)`,
-//!   `Binary(Vec<u8>)`, `Ping(Vec<u8>)`, `Pong(Vec<u8>)`, and
-//!   `Close(Option<CloseFrame>)` variants plus the axum `Message` ↔
-//!   `WsMessage` mapping. The `send(msg: WsMessage)` method's body becomes
-//!   a real `match` over the variants at that slice.
+//! - JOLT-RS-120 (this iteration): replace the empty [`WsMessage`] enum with
+//!   `Text(String)`, `Binary(Vec<u8>)`, `Ping(Vec<u8>)`, `Pong(Vec<u8>)`, and
+//!   `Close(Option<CloseFrame>)` variants; introduce a Jolt-owned
+//!   [`CloseFrame`] (`code: u16`, `reason: String`) so the public surface
+//!   doesn't expose axum's lifetime-parameterized `CloseFrame<'static>`;
+//!   wire up `From<axum::extract::ws::Message> for WsMessage` and the inverse
+//!   so 124's read/write loops can convert between the framework and axum
+//!   layers; replace [`WebSocketSender::send`]'s `match msg {}` body with a
+//!   real conversion that dispatches the corresponding axum frame.
 //! - JOLT-RS-121: write the lifecycle-callback ordering unit test
 //!   (open → ready → message → close fires in order on a mock impl).
 //! - JOLT-RS-122..125: the `ws!` macro that registers a handler against an
@@ -169,14 +173,12 @@ impl WebSocketSender {
 
     /// Sends a typed [`WsMessage`] frame.
     ///
-    /// At JOLT-RS-119 [`WsMessage`] is still uninhabited (118's placeholder
-    /// shape), so the body is `match msg {}` — calling this method is a
-    /// compile-time-rejected operation today (the caller can't construct a
-    /// [`WsMessage`] to pass in). JOLT-RS-120 replaces the match with a
-    /// real conversion from [`WsMessage`] variants to [`AxumMessage`] and
-    /// dispatches via the same channel as the typed helpers.
+    /// Converts to the underlying [`AxumMessage`] via [`From<WsMessage>`]
+    /// (lossless across the five variants) and dispatches through the same
+    /// channel as the typed helpers. Returns [`WsSendError::Closed`] if the
+    /// writer-task receiver has been dropped.
     pub fn send(&self, msg: WsMessage) -> Result<(), WsSendError> {
-        match msg {}
+        self.dispatch(AxumMessage::from(msg))
     }
 
     /// Sends a UTF-8 text frame.
@@ -216,20 +218,104 @@ impl WebSocketSender {
     }
 }
 
-/// Inbound WebSocket frame delivered to [`WebSocketHandler::on_message`].
+/// A close-handshake frame attached to [`WsMessage::Close`].
 ///
-/// At JOLT-RS-118 / 119 this is a `#[non_exhaustive]` empty enum so the
-/// [`WebSocketHandler`] trait's signatures can name it. The type is
-/// uninhabited today — no variants can be constructed and no `match` arm
-/// can fire — which is sound for 118's default-impl-only test and for
-/// 119's `WebSocketSender::send` (the body is `match msg {}`). JOLT-RS-120
-/// adds the `Text(String)`, `Binary(Vec<u8>)`, `Ping(Vec<u8>)`,
-/// `Pong(Vec<u8>)`, and `Close(Option<CloseFrame>)` variants and the
-/// axum `Message` ↔ `WsMessage` mapping; downstream `match` expressions on
-/// `WsMessage` must include a `_ =>` wildcard until then (enforced by
-/// `#[non_exhaustive]`).
+/// This is a Jolt-owned newtype rather than a re-export of
+/// [`axum::extract::ws::CloseFrame`], for two reasons:
+///
+/// 1. axum's `CloseFrame<'t>` is lifetime-parameterized (its `reason` is
+///    `Cow<'t, str>`). Propagating that lifetime through [`WsMessage`] would
+///    force every handler signature to either pin a `'static` argument or
+///    add a lifetime parameter to the trait. Owning a [`String`] here keeps
+///    [`WsMessage`] lifetime-free; the conversion to axum's frame allocates
+///    a `Cow::Owned` on the way out.
+/// 2. Insulating the public surface from axum's frame shape lets us add
+///    fields (a Jolt-side `code` enum, a trailing diagnostic string) in a
+///    future slice without forcing downstream code to track axum upgrades.
+///
+/// The `code` is a raw `u16` matching axum's [`CloseCode`](axum::extract::ws::CloseCode)
+/// (also `pub type CloseCode = u16`) — RFC 6455 §7.4 close codes (`1000`
+/// normal closure, `1011` internal error, etc.). A higher-level Jolt close
+/// code enum is deferred.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CloseFrame {
+    /// RFC 6455 close code (e.g. `1000` for normal closure).
+    pub code: u16,
+    /// Human-readable close reason. May be empty.
+    pub reason: String,
+}
+
+/// Inbound or outbound WebSocket frame.
+///
+/// Delivered to [`WebSocketHandler::on_message`] on the inbound side and
+/// accepted by [`WebSocketSender::send`] on the outbound side. The five
+/// variants match RFC 6455 frame types as exposed by axum's
+/// [`Message`](AxumMessage); the mapping is lossless via the
+/// [`From<AxumMessage>`] / [`From<WsMessage>`] impls below.
+///
+/// `#[non_exhaustive]` documents that future variant additions (e.g. a
+/// fragmented-frame variant) remain non-breaking: downstream `match` arms
+/// must always include a `_ =>` wildcard.
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum WsMessage {}
+pub enum WsMessage {
+    /// UTF-8 text frame.
+    Text(String),
+    /// Opaque binary payload.
+    Binary(Vec<u8>),
+    /// Control-frame ping with an arbitrary payload (≤ 125 bytes per RFC).
+    /// axum auto-replies to pings; handlers usually observe these for
+    /// liveness bookkeeping rather than responding.
+    Ping(Vec<u8>),
+    /// Control-frame pong with an arbitrary payload (≤ 125 bytes per RFC).
+    /// Emitted in response to a ping (handled automatically by axum) or as
+    /// an unsolicited unidirectional heartbeat.
+    Pong(Vec<u8>),
+    /// Close handshake frame. `None` signals "close without payload";
+    /// `Some(_)` carries the peer's code + reason.
+    Close(Option<CloseFrame>),
+}
+
+impl From<AxumMessage> for WsMessage {
+    /// Converts an inbound axum frame into the Jolt-side [`WsMessage`].
+    /// Lossless across all five variants: text / binary / ping / pong pass
+    /// their payloads through verbatim, and the close frame's `Cow` reason
+    /// is materialized into an owned [`String`].
+    fn from(msg: AxumMessage) -> Self {
+        match msg {
+            AxumMessage::Text(s) => Self::Text(s),
+            AxumMessage::Binary(b) => Self::Binary(b),
+            AxumMessage::Ping(p) => Self::Ping(p),
+            AxumMessage::Pong(p) => Self::Pong(p),
+            AxumMessage::Close(Some(frame)) => Self::Close(Some(CloseFrame {
+                code: frame.code,
+                reason: frame.reason.into_owned(),
+            })),
+            AxumMessage::Close(None) => Self::Close(None),
+        }
+    }
+}
+
+impl From<WsMessage> for AxumMessage {
+    /// Converts an outbound [`WsMessage`] back into axum's frame type. The
+    /// close-frame `reason` becomes a `Cow::Owned`, so the resulting
+    /// `CloseFrame<'static>` doesn't borrow from the input.
+    fn from(msg: WsMessage) -> Self {
+        match msg {
+            WsMessage::Text(s) => AxumMessage::Text(s),
+            WsMessage::Binary(b) => AxumMessage::Binary(b),
+            WsMessage::Ping(p) => AxumMessage::Ping(p),
+            WsMessage::Pong(p) => AxumMessage::Pong(p),
+            WsMessage::Close(Some(frame)) => AxumMessage::Close(Some(
+                axum::extract::ws::CloseFrame {
+                    code: frame.code,
+                    reason: std::borrow::Cow::Owned(frame.reason),
+                },
+            )),
+            WsMessage::Close(None) => AxumMessage::Close(None),
+        }
+    }
+}
 
 /// Lifecycle callbacks driven by a WebSocket connection. All five methods
 /// default to no-ops, so implementers override only the stages they care
@@ -297,13 +383,20 @@ mod tests {
     //!   [`WebSocketHandler`] trait — (a) a unit struct can implement it
     //!   with zero overrides, (b) partial overrides satisfy the trait
     //!   bound, (c) the default impls execute to completion.
-    //! - JOLT-RS-119 tests (new): five witnesses for [`WebSocketSender`] —
-    //!   `send_text` dispatches an [`AxumMessage::Text`] frame through the
+    //! - JOLT-RS-119 tests (preserved): five witnesses for [`WebSocketSender`]
+    //!   — `send_text` dispatches an [`AxumMessage::Text`] frame through the
     //!   channel, `send_json` serializes-then-dispatches, `close` dispatches
     //!   [`AxumMessage::Close(None)`](AxumMessage::Close), sending after the
     //!   writer-task receiver is dropped yields [`WsSendError::Closed`], and
     //!   a clone of a sender shares the same channel (cheap-clone witness
     //!   for decision 5).
+    //! - JOLT-RS-120 tests (new): witnesses for the [`WsMessage`] variants
+    //!   and the axum mapping — (a) `axum Text → WsMessage::Text` (the PRD
+    //!   verification), (b) the same for binary / ping / pong / close(None)
+    //!   / close(Some), (c) the inverse `WsMessage → AxumMessage` mapping,
+    //!   (d) [`WebSocketSender::send`] now dispatches typed frames through
+    //!   the channel for each variant, and (e) close-frame round-trip
+    //!   preserves the code and reason.
 
     use super::*;
 
@@ -323,9 +416,12 @@ mod tests {
             self.open_called = true;
         }
         async fn on_message(&mut self, _msg: WsMessage, _sender: WebSocketSender) {
-            // Body never executes today (WsMessage is uninhabited at 118/119);
-            // 121 will reach this branch after 120 adds variants.
-            unreachable!("WsMessage has no variants until JOLT-RS-120");
+            // The 118/119 tests only exercise the open/ready/close/shutdown
+            // path; on_message stays a panic-on-call witness so an
+            // accidentally-routed message would surface loudly. 121's
+            // lifecycle-ordering test will replace this with call-order
+            // recording across all five callbacks.
+            unreachable!("PartialOverrideHandler.on_message is not exercised by 118-120 tests");
         }
     }
 
@@ -460,6 +556,123 @@ mod tests {
                 assert_eq!(b, "from-clone");
             }
             other => panic!("expected two Text frames in order, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn axum_text_message_maps_to_ws_message_text() {
+        // PRD-120 verification: "axum Text message → WsMessage::Text."
+        let axum_msg = AxumMessage::Text("hello".to_string());
+        let mapped: WsMessage = axum_msg.into();
+        assert_eq!(mapped, WsMessage::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn axum_binary_ping_pong_messages_map_to_corresponding_ws_message_variants() {
+        // Pins the lossless variant mapping for the three byte-payload
+        // frame types. A regression that swapped Ping/Pong (an easy off-by-
+        // one in the match arms) would fail two of these assertions.
+        assert_eq!(
+            WsMessage::from(AxumMessage::Binary(vec![1, 2, 3])),
+            WsMessage::Binary(vec![1, 2, 3]),
+        );
+        assert_eq!(
+            WsMessage::from(AxumMessage::Ping(vec![9])),
+            WsMessage::Ping(vec![9]),
+        );
+        assert_eq!(
+            WsMessage::from(AxumMessage::Pong(vec![9])),
+            WsMessage::Pong(vec![9]),
+        );
+    }
+
+    #[test]
+    fn axum_close_none_and_close_some_map_with_owned_reason_string() {
+        // Witness for the close-frame branch: None passes through, and the
+        // axum Cow<'_, str> reason is materialized into an owned String so
+        // WsMessage stays lifetime-free.
+        assert_eq!(
+            WsMessage::from(AxumMessage::Close(None)),
+            WsMessage::Close(None),
+        );
+
+        let axum_frame = axum::extract::ws::CloseFrame {
+            code: 1000,
+            reason: std::borrow::Cow::Borrowed("normal"),
+        };
+        let mapped = WsMessage::from(AxumMessage::Close(Some(axum_frame)));
+        assert_eq!(
+            mapped,
+            WsMessage::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "normal".to_string(),
+            })),
+        );
+    }
+
+    #[test]
+    fn ws_message_to_axum_message_round_trips_across_all_variants() {
+        // The inverse mapping is what 124's writer task will exercise:
+        // it converts outbound WsMessage frames back to AxumMessage. Going
+        // WsMessage → AxumMessage → WsMessage should be the identity.
+        let cases = vec![
+            WsMessage::Text("hi".to_string()),
+            WsMessage::Binary(vec![1, 2, 3]),
+            WsMessage::Ping(vec![9]),
+            WsMessage::Pong(vec![9]),
+            WsMessage::Close(None),
+            WsMessage::Close(Some(CloseFrame {
+                code: 1011,
+                reason: "server error".to_string(),
+            })),
+        ];
+        for original in cases {
+            let axum_form: AxumMessage = original.clone().into();
+            let round_tripped: WsMessage = axum_form.into();
+            assert_eq!(round_tripped, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn send_dispatches_each_ws_message_variant_through_the_channel() {
+        // Pins that WebSocketSender::send now actually dispatches (vs the
+        // 119 `match msg {}` placeholder). One representative of each
+        // variant goes in; the writer-task feeder receiver yields the
+        // corresponding axum frame in order.
+        let (sender, mut rx) = WebSocketSender::channel();
+        sender.send(WsMessage::Text("t".to_string())).unwrap();
+        sender.send(WsMessage::Binary(vec![1, 2])).unwrap();
+        sender.send(WsMessage::Ping(vec![3])).unwrap();
+        sender.send(WsMessage::Pong(vec![4])).unwrap();
+        sender
+            .send(WsMessage::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "bye".to_string(),
+            })))
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            AxumMessage::Text(s) => assert_eq!(s, "t"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match rx.recv().await.unwrap() {
+            AxumMessage::Binary(b) => assert_eq!(b, vec![1, 2]),
+            other => panic!("expected Binary, got {other:?}"),
+        }
+        match rx.recv().await.unwrap() {
+            AxumMessage::Ping(p) => assert_eq!(p, vec![3]),
+            other => panic!("expected Ping, got {other:?}"),
+        }
+        match rx.recv().await.unwrap() {
+            AxumMessage::Pong(p) => assert_eq!(p, vec![4]),
+            other => panic!("expected Pong, got {other:?}"),
+        }
+        match rx.recv().await.unwrap() {
+            AxumMessage::Close(Some(frame)) => {
+                assert_eq!(frame.code, 1000);
+                assert_eq!(frame.reason, "bye");
+            }
+            other => panic!("expected Close(Some), got {other:?}"),
         }
     }
 

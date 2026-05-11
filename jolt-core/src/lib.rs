@@ -61,11 +61,13 @@ pub use status::StatusCode;
 // with no-op defaults).
 // JOLT-RS-119 surface: the real `WebSocketSender` (mpsc-backed cheap-clone
 // handle with send/send_text/send_json/close methods) and its `WsSendError`
-// companion. JOLT-RS-120 will add the `WsMessage` variants and the axum
-// `Message` ↔ `WsMessage` mapping. Re-exported at the crate root so user
-// crates `use jolt_core::WebSocketHandler;` without needing to know the
-// internal module layout.
-pub use websocket::{WebSocketHandler, WebSocketSender, WsMessage, WsSendError};
+// companion.
+// JOLT-RS-120 surface: the `WsMessage` variants (Text/Binary/Ping/Pong/Close),
+// the Jolt-owned `CloseFrame`, and the `From<axum::Message> for WsMessage`
+// mapping (plus the inverse) that 124's read/write loops will exercise.
+// Re-exported at the crate root so user crates `use jolt_core::WebSocketHandler;`
+// without needing to know the internal module layout.
+pub use websocket::{CloseFrame, WebSocketHandler, WebSocketSender, WsMessage, WsSendError};
 
 // Re-export `inventory` so the `#[endpoint]` macro can emit
 // `::jolt_core::inventory::submit!` without forcing every user crate to add
