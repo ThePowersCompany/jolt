@@ -1,0 +1,34 @@
+[package]
+name = "joltr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+joltr-macros = { path = "../joltr-macros" }
+joltr-utils = { path = "../joltr-utils" }
+dashmap = { workspace = true }
+slab = { workspace = true }
+
+[dev-dependencies]
+# Used by the `auth_jwt` test module (JOLTR-RS-072) to mint signed test tokens
+# directly. `joltr-utils` re-exports the decode side via its `jwt` module; the
+# tests here exercise that decode against tokens minted by the same upstream
+# library, which gives end-to-end coverage without forcing `joltr-utils` to
+# expose an `encode` helper on its public surface yet.
+jsonwebtoken = { workspace = true }
+
+# Used by SSE adapter tests (JOLTR-RS-137) to collect axum response bodies
+# into bytes for assertion.
+http-body-util = { workspace = true }

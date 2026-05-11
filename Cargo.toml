@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "jolt-core",
-    "jolt-macros",
-    "jolt-db",
-    "jolt-utils",
-    "jolt-templates",
+    "joltr-core",
+    "joltr-macros",
+    "joltr-db",
+    "joltr-utils",
+    "joltr-templates",
 ]
 
 [workspace.package]

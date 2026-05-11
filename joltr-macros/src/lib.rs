@@ -1,0 +1,205 @@
+#![doc = "joltr-macros: proc-macro support for JoltR (endpoint registration, middleware, patch queries, TS typegen)."]
+
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput, ItemFn};
+
+mod auto_middleware;
+mod endpoint;
+mod patch_query;
+mod ts_export;
+mod ws;
+
+/// `#[endpoint("/path")]` attribute macro.
+///
+/// As of JOLTR-RS-043 the macro:
+/// 1. parses the route-path string literal from the attribute (038),
+/// 2. scans the impl block for `#[get]`/`#[post]`/`#[put]`/`#[patch]`/
+///    `#[delete]` methods (039),
+/// 3. validates each method's signature is `&self -> Response<T>` /
+///    `Result<Response<T>, E>` (040),
+/// 4. strips the magic-marker verb attributes from the re-emitted impl,
+/// 5. emits one `::joltr_core::inventory::submit!` block per discovered method
+///    so `JoltRServer::start` (JOLTR-RS-044) can collect the routes via
+///    `inventory::iter::<RegisteredEndpoint>()` (042), and
+/// 6. emits one `__jolt_handler_<name>` axum-compatible async wrapper per
+///    discovered method on a sibling `impl <SelfTy>` block (043). Each wrapper
+///    takes `::joltr_core::Request` and returns `::joltr_core::EndpointFuture`,
+///    constructing `Self` via `Default::default` and bridging the user's
+///    return value to `axum::response::Response` via axum's `IntoResponse`.
+///
+/// Inventory-based auto-registration (044) and the e2e dispatch test (045)
+/// layer on top in subsequent PRD items.
+///
+/// On any parse / scan / validate failure the original item is preserved AND
+/// a `compile_error!` is appended, so the user gets a single targeted
+/// diagnostic instead of a cascade of "use of undeclared type" errors from
+/// later code that names the item.
+#[proc_macro_attribute]
+pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr2: proc_macro2::TokenStream = attr.into();
+    let item2: proc_macro2::TokenStream = item.into();
+    endpoint::expand_endpoint(attr2, item2).into()
+}
+
+/// `#[derive(AutoMiddleware)]` proc-macro derive — phase10 entry point.
+///
+/// JOLTR-RS-046 (current): parses the struct's named fields and their types via
+/// [`auto_middleware::parse_auto_middleware_input`], then emits a hidden
+/// `__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT` const so an integration test can
+/// observe that the derive ran.
+///
+/// Subsequent phase10/11 items extend this expansion:
+/// - 047 (landed): classifies `body`-named fields as `FieldKind::Body`,
+/// - 048 (landed): classifies `QueryParams<T>` (any name) and `query_params:
+///   HashMap<String, String>` as `FieldKind::QueryParams`,
+/// - 049 (landed): classifies `Request` and `&Request` (any name, with or
+///   without lifetime) as `FieldKind::Request`,
+/// - 050 (landed): detects the struct-level `#[cors]` attribute and emits a
+///   second hidden marker `__JOLTR_AUTO_MIDDLEWARE_CORS: bool`. The
+///   `attributes(cors)` opt-in tells the compiler to treat `#[cors]` as a
+///   helper attribute owned by this derive (without it, the compiler would
+///   reject `#[cors]` as an unknown macro at the user's source site before
+///   the derive runs).
+/// - 051 (landed): emits a real `::joltr_core::tower::Layer` impl on the user
+///   struct plus a `#[doc(hidden)]` wrapper `__JoltRAutoMiddleware<Ident>Service`
+///   that delegates to the inner service. The wrapper is the seam JOLTR-RS-052
+///   (middleware-ordering chain) and JOLTR-RS-053 (per-field extraction code)
+///   slot into.
+/// - 052 (landed): splices canonical-order step markers into the wrapper's
+///   `call()` body via `middleware_chain` + `MiddlewareStep`. Each active
+///   step (cors / parse-query / parse-body) renders as a stable
+///   `let _: &::core::primitive::str = "joltr::middleware::step::<name>";`
+///   statement in canonical order BEFORE the existing inner.call delegation.
+///   Auth/log/user steps are future PRD items.
+/// - 053 (landed): emits a per-derive
+///   `__jolt_extract_from(req: &::joltr_core::Request) -> Self` method on the
+///   user's struct via `expand_extraction`. The method constructs `Self { ... }`
+///   with each field initialised by an expression matched to its `FieldKind`
+///   (Body via `req.json::<T>()`, HashMap-shaped QueryParams via clone of
+///   `req.query_params`, by-value Request via clone, Other via
+///   `<T as Default>::default()`). Typed `QueryParams<T>` and by-ref
+///   `&Request` are emitted as `unimplemented!(...)` placeholders pending
+///   future PRD items. The 052 chain markers in the wrapper's `call()` body
+///   stay as marker statements — replacing them with calls into the helper
+///   would break 051's generic-over-`__Req` design and is deferred.
+///
+/// On parse failure the emission is a single `compile_error!` token (no
+/// partial codegen), so the user gets a single targeted diagnostic instead of
+/// a cascade of "use of undeclared type" errors from later code.
+#[proc_macro_derive(AutoMiddleware, attributes(cors))]
+pub fn auto_middleware_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    auto_middleware::expand_auto_middleware(input).into()
+}
+
+/// `#[derive(PatchQuery)]` proc-macro derive — phase26 entry point.
+///
+/// JOLTR-RS-110 (current): parses the struct's named fields and their types via
+/// [`patch_query::parse_patch_query_input`], then emits a hidden
+/// `__JOLTR_PATCH_QUERY_FIELD_COUNT: usize` const so an integration test can
+/// observe that the derive ran on `Optional<T>`-containing structs.
+///
+/// Subsequent phase26/27 items extend this expansion:
+/// - 111: parse the struct-level `#[patch("table_name")]` attribute. The
+///   `attributes(patch)` opt-in below tells the compiler to treat `#[patch]`
+///   as a helper attribute owned by this derive (without it the compiler
+///   would reject `#[patch("...")]` as an unknown macro at the user's source
+///   site before the derive runs).
+/// - 112: detect `Optional<T>` fields and extract inner `T`.
+/// - 113: build the `Vec<PatchField>` internal representation
+///   (`name`/`column_name`/`is_optional`/`inner_type`).
+/// - 114-116: emit `fn to_patch_query(&self, id_column, id_value) ->
+///   (String, Vec<&dyn ToSql>)` and the `$N`-parameterized SET clause
+///   builder.
+/// - 117: closing-test bundle for phase27.
+///
+/// On parse failure the emission is a single `compile_error!` token — no
+/// partial codegen. Mirrors `#[derive(AutoMiddleware)]`'s contract from
+/// JOLTR-RS-046.
+#[proc_macro_derive(PatchQuery, attributes(patch))]
+pub fn patch_query_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    patch_query::expand_patch_query(input).into()
+}
+
+/// `#[derive(TsExport)]` proc-macro derive — phase39 entry point.
+///
+/// JOLTR-RS-165 (current): walks the struct's named fields via
+/// [`ts_export::parse_ts_export_input`], collects each field's Rust name and
+/// type, then emits a hidden `__JOLTR_TS_EXPORT_FIELD_COUNT: usize` const so an
+/// integration test can observe that the derive ran.
+///
+/// Subsequent phase39/40 items extend this expansion:
+/// - 166: map Rust types to TypeScript types (String→string, i32→number, etc.)
+/// - 167: map generics (Option<T>→T|null, Json<T>→T, JsonArray<T>→T[])
+/// - 168: generate the `export interface StructName { ... }` string.
+/// - 169: `#[ts(rename = "newName")]` support on fields.
+/// - 170: `#[ts(flatten)]` field inlining.
+/// - 171: JSDoc comment generation from /// doc comments.
+/// - 172: closing attribute test bundle.
+///
+/// On parse failure the emission is a single `compile_error!` token — no
+/// partial codegen. Mirrors the contract from `#[derive(PatchQuery)]`
+/// (JOLTR-RS-110).
+#[proc_macro_derive(TsExport, attributes(ts))]
+pub fn ts_export_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    ts_export::expand_ts_export(input).into()
+}
+
+/// `ws!(path, HandlerType, subprotocol = "...", auth_fn = fn_name)` —
+/// function-like proc-macro for declaring an axum WebSocket route with a
+/// JWT-subprotocol auth gate (phase29 entry point).
+///
+/// JOLTR-RS-122 (current): parses the four-argument call form (two positional:
+/// path string-literal + handler `Type`; two named: `subprotocol = "..."` +
+/// `auth_fn = fn_name`) via [`ws::WsMacroInput`]'s `Parse` impl, then emits a
+/// block-expression witness that:
+/// 1. compile-time-checks the handler type implements
+///    [`::joltr_core::WebSocketHandler`] via a `const _: fn() = || { ... };`
+///    closure (no runtime call),
+/// 2. type-checks the `auth_fn` path resolves to a value via `let _ = ...;`,
+/// 3. returns a `::joltr_core::__WsMacroWitness { path, subprotocol }` literal
+///    carrying the two string-literal arguments.
+///
+/// Subsequent phase29 items extend this expansion:
+/// - 123: tighten the `auth_fn` check to `fn(&str) -> Result<JwtClaims, _>`
+///   and emit the 401-on-Err branch.
+/// - 124: replace the witness-struct return with the real axum WS upgrade
+///   handler driving the full handler lifecycle through 120's `WsMessage`
+///   variants.
+/// - 125: phase29 closing integration test (full connect / send / receive
+///   roundtrip).
+///
+/// On parse failure the emission is a single `compile_error!` token (no
+/// partial codegen) — mirrors the contract from JOLTR-RS-046 / JOLTR-RS-110.
+#[proc_macro]
+pub fn ws(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    ws::expand_ws_macro(input2).into()
+}
+
+/// Placeholder attribute macro. Future PRD items will expand this into
+/// auto-middleware and patch-query attributes.
+#[proc_macro_attribute]
+pub fn joltr_placeholder(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    let output = quote! { #input };
+    output.into()
+}
+
+/// Placeholder derive macro. Future PRD items will expand this into TypeScript
+/// typegen and request/response body derivations.
+#[proc_macro_derive(JoltRPlaceholder)]
+pub fn joltr_placeholder_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let output = quote! {
+        impl #name {
+            #[doc(hidden)]
+            pub fn __joltr_placeholder() {}
+        }
+    };
+    output.into()
+}

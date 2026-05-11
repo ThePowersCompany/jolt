@@ -1,0 +1,249 @@
+//! JOLTR-RS-046 PRD-mandated integration test.
+//!
+//! Verifies that `#[derive(AutoMiddleware)]` compiles on a struct with a
+//! variety of field types — the PRD's listed verification: "Derive compiles
+//! on a struct with various field types."
+//!
+//! This is an integration test (not a unit test) because the derive macro can
+//! only be exercised through cargo's compile pipeline. The proc-macro crate's
+//! own unit tests parse-check the emitted token stream but cannot expand and
+//! type-check the derive against a real `DeriveInput` from a downstream crate.
+//!
+//! The hidden `__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT` const emitted by the 046
+//! derive is the observable witness that parsing succeeded. Later phase10/11
+//! items (047-053) replace the marker const with the real `tower::Layer` impl
+//! and per-derive extraction helper; the consts coexist with the new surfaces
+//! until JOLTR-RS-054's runtime-witness test makes them redundant.
+//!
+//! As of JOLTR-RS-053, `CreateUserRequest` carries `#[derive(serde::Deserialize)]`
+//! so the per-derive `__jolt_extract_from` helper that the macro now emits
+//! (which calls `__req.json::<CreateUserRequest>()` for the `body` field of
+//! `MixedMiddleware` and `CorsEnabledMiddleware`) compiles.
+
+use joltr_core::{AutoMiddleware, Method, Request};
+use std::collections::HashMap;
+
+/// Unit-style middleware: zero fields. The derive must accept this and report
+/// a field count of 0.
+#[derive(AutoMiddleware)]
+struct UnitMiddleware;
+
+/// Mixed field types — the PRD-mandated "various field types" surface. The
+/// fields cover the type families that 047-049 will key on:
+/// - `body: CreateUserRequest` — body-candidate (a custom DeserializeOwned type),
+/// - `query_params: HashMap<String, String>` — query-extraction shape,
+/// - `headers: HashMap<String, Vec<u8>>` — generic-arg-rich custom shape,
+/// - `count: usize` — primitive,
+/// - `flag: bool` — primitive,
+/// - `req: Option<Request>` — wrapped framework type.
+///
+/// `CreateUserRequest` is a plain struct in this test file; it does not need
+/// to actually implement `DeserializeOwned` for 046 (parsing is purely
+/// syntactic — no trait bounds are emitted yet).
+#[derive(AutoMiddleware)]
+#[allow(dead_code)]
+struct MixedMiddleware {
+    body: CreateUserRequest,
+    query_params: HashMap<String, String>,
+    headers: HashMap<String, Vec<u8>>,
+    count: usize,
+    flag: bool,
+    req: Option<Request>,
+}
+
+/// JOLTR-RS-050: a struct that opts into the CORS layer via the helper
+/// `#[cors]` attribute. The integration test verifies the
+/// `attributes(cors)` opt-in on the derive (so rustc accepts the attribute at
+/// the source site) AND that the parsed flag flows through to the
+/// `__JOLTR_AUTO_MIDDLEWARE_CORS` marker const.
+#[derive(AutoMiddleware)]
+#[cors]
+#[allow(dead_code)]
+struct CorsEnabledMiddleware {
+    body: CreateUserRequest,
+}
+
+/// JOLTR-RS-053: a middleware struct that exercises the per-derive
+/// `__jolt_extract_from(&Request) -> Self` helper end-to-end. Mixes the three
+/// extraction shapes the PRD-mandates: body (JSON deserialization), query
+/// (HashMap clone), and req (by-value clone). The runtime test below builds a
+/// fake `joltr_core::Request`, calls the helper, and asserts each field was
+/// populated correctly.
+#[derive(AutoMiddleware)]
+#[allow(dead_code)]
+struct ExtractMw {
+    body: CreateUserRequest,
+    query_params: HashMap<String, String>,
+    req: Request,
+}
+
+/// JOLTR-RS-053: derives `serde::Deserialize` so the auto-middleware extraction
+/// helper's body-extraction call (`__req.json::<CreateUserRequest>()`) compiles.
+/// Before 053 this only had to be a syntactic placeholder; the macro now emits
+/// real deserialization codegen for any `body: T` field.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct CreateUserRequest {
+    name: String,
+    age: u32,
+}
+
+#[test]
+fn unit_middleware_derive_emits_zero_field_count() {
+    assert_eq!(UnitMiddleware::__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT, 0);
+}
+
+#[test]
+fn mixed_middleware_derive_emits_correct_field_count() {
+    // Six fields declared above → derive must report exactly six. A regression
+    // that mis-counted (e.g. by skipping a field with a non-trivial generic
+    // path or by dropping the trailing field) would surface here.
+    assert_eq!(MixedMiddleware::__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT, 6);
+}
+
+#[test]
+fn middleware_without_cors_attribute_emits_cors_false() {
+    // JOLTR-RS-050: a struct WITHOUT the `#[cors]` attribute has the cors
+    // marker const set to false. Both `UnitMiddleware` and `MixedMiddleware`
+    // exercise this — neither carries `#[cors]`. Wrapped in `const { ... }`
+    // so the const-value comparison happens at compile time (a regression
+    // that emitted `true` here would fail to build the test binary).
+    const { assert!(!UnitMiddleware::__JOLTR_AUTO_MIDDLEWARE_CORS) }
+    const { assert!(!MixedMiddleware::__JOLTR_AUTO_MIDDLEWARE_CORS) }
+}
+
+#[test]
+fn middleware_with_cors_attribute_emits_cors_true() {
+    // JOLTR-RS-050: a struct WITH the `#[cors]` attribute has the cors marker
+    // const set to true. The `CorsEnabledMiddleware` declaration above is the
+    // source-site witness that `#[cors]` is accepted by rustc (via the
+    // derive's `attributes(cors)` opt-in); the const-block assertion is the
+    // parse-witness that the derive observed the attribute and propagated it
+    // to codegen. Same const-block rationale as the false-case test.
+    const { assert!(CorsEnabledMiddleware::__JOLTR_AUTO_MIDDLEWARE_CORS) }
+    // The field-count const still works alongside the cors const.
+    assert_eq!(CorsEnabledMiddleware::__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT, 1);
+}
+
+// JOLTR-RS-051 PRD verification: "Generated code compiles and implements
+// tower::Layer."
+//
+// The cleanest compile-time witness for "this trait is implemented" is a
+// generic free fn whose `where` bound only resolves if the impl actually
+// exists. Calling it (or just naming the resolved monomorphization) forces
+// the trait-resolution at compile time — a regression that dropped the
+// `impl Layer<S> for <Mw>` emission would surface here as a missing-impl
+// error rather than silently passing.
+//
+// The assertion is type-only — no values constructed — so it works even for
+// middleware structs whose fields don't have `Default` (the
+// per-request-construction concern is JOLTR-RS-053's, not 051's).
+fn _assert_implements_tower_layer<L, S>()
+where
+    L: joltr_core::tower::Layer<S>,
+{
+}
+
+// Force monomorphization at link time so the trait bound MUST resolve. If a
+// future regression breaks the impl, these `const _` blocks fail to compile
+// with a "the trait `tower::Layer<()>` is not implemented for ..." diagnostic
+// pointing at the specific middleware struct.
+const _: fn() = _assert_implements_tower_layer::<UnitMiddleware, ()>;
+const _: fn() = _assert_implements_tower_layer::<MixedMiddleware, ()>;
+const _: fn() = _assert_implements_tower_layer::<CorsEnabledMiddleware, ()>;
+
+// JOLTR-RS-051: the `Layer::Service` associated type points at the generated
+// wrapper, which itself implements `tower::Service<Req>` whenever the inner
+// service does. Pinning this on a concrete inner-service shape proves the
+// wrapper's bound chain resolves end-to-end (not just the Layer impl in
+// isolation), and the `.call(...)`-then-`.await` flow exercises the
+// delegation that JOLTR-RS-052 will wrap and JOLTR-RS-053 will splice
+// extraction into.
+//
+// `tower::service_fn` produces a `Service<Req>` from any closure
+// `Fn(Req) -> Future<Output = Result<Resp, Err>>`. We use the simplest
+// possible inner — `Fn(()) -> Ready<Result<(), Infallible>>` — to avoid
+// needing real HTTP types here.
+#[tokio::test]
+async fn middleware_layer_wraps_inner_service() {
+    use std::convert::Infallible;
+    use std::future::ready;
+    use joltr_core::tower::{Layer, Service};
+
+    let inner = joltr_core::tower::service_fn(|_: ()| ready(Ok::<_, Infallible>(())));
+    // `UnitMiddleware` is a unit struct — instantiate it directly. This is the
+    // outer Layer; calling `.layer(inner)` MUST produce a value whose type is
+    // the wrapper service the derive emitted.
+    let mw = UnitMiddleware;
+    let mut wrapped = mw.layer(inner);
+
+    // The wrapper IS a Service — calling it should delegate to `inner` and
+    // return `Ok(())`. A regression that emitted the Layer impl but no
+    // Service impl on the wrapper would fail to compile here.
+    let result = <_ as Service<()>>::call(&mut wrapped, ()).await;
+    assert!(result.is_ok(), "wrapper service must delegate to inner");
+}
+
+// JOLTR-RS-053 PRD verification: "Generated call() extracts body into struct,
+// query into struct, req ref into struct field."
+//
+// 053 emits a per-derive `__jolt_extract_from(&Request) -> Self` helper rather
+// than splicing the extraction calls directly into the wrapper service's
+// `call()` body. The wrapper is generic over `__Req` (per JOLTR-RS-051), so
+// inlining `__req.json::<T>()` would either force `__Req: ::joltr_core::Request`
+// (breaking the `Service<()>` test above) or require lifetime threading on
+// `Self` construction (deferred). The helper is the standalone observable
+// surface this test exercises end-to-end: build a fake `joltr_core::Request`,
+// call the helper, assert per-field population.
+//
+// The chain markers in the wrapper's `call()` body stay as marker statements
+// at 053; replacing them with calls into `__jolt_extract_from` is whichever
+// PRD lands the JoltR-aware tower layer (likely after JOLTR-RS-055-058's CORS
+// middleware finishes the layer-design loop).
+#[test]
+fn extract_from_populates_body_query_request_fields() {
+    use axum::http::HeaderMap;
+
+    // Synthesize an inbound request the way Router::build_jolt_request would,
+    // but inline so the test doesn't depend on the dispatch path. The body is
+    // a JSON byte string the auto-middleware will deserialize via
+    // serde_json::from_slice — the same path Request::json takes.
+    let req = Request {
+        method: Method::Post,
+        path: "/users".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::from([
+            ("page".to_string(), "2".to_string()),
+            ("filter".to_string(), "active".to_string()),
+        ]),
+        body: br#"{"name":"alice","age":30}"#.to_vec(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let mw = ExtractMw::__jolt_extract_from(&req);
+
+    // Body: deserialized via serde_json into the typed shape declared on the
+    // struct. Pinning both fields confirms the macro's `__req.json::<T>()`
+    // call wired up the right T (a regression that emitted `<()>::json` would
+    // surface as a deserialize error here).
+    assert_eq!(mw.body.name, "alice");
+    assert_eq!(mw.body.age, 30);
+
+    // Query params: HashMap-shape extraction is a clone of the request's
+    // populated `query_params`. A regression that returned the empty default
+    // would fail this assertion.
+    assert_eq!(mw.query_params.len(), 2);
+    assert_eq!(mw.query_params.get("page").map(String::as_str), Some("2"));
+    assert_eq!(
+        mw.query_params.get("filter").map(String::as_str),
+        Some("active")
+    );
+
+    // Request injection (by-value): the helper clones the active request into
+    // the field. Asserting `path` confirms the clone preserved the request
+    // contents end-to-end (path is the most distinctive field on the request
+    // we built above).
+    assert_eq!(mw.req.path, "/users");
+    assert_eq!(mw.req.method, Method::Post);
+}

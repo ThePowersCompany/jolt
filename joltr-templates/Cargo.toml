@@ -1,0 +1,14 @@
+[package]
+name = "joltr-templates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `dir_source` enables `Handlebars::register_templates_directory` and the
+# `DirectorySourceOptions` struct that `TemplateEngine::new` (JOLTR-RS-106)
+# relies on. The feature is OFF by default upstream (handlebars 6 default
+# features = []) and pulls in `walkdir` as a transitive dep.
+handlebars = { workspace = true, features = ["dir_source"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

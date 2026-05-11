@@ -1,0 +1,88 @@
+# JoltR
+
+A high-performance web framework for people who prefer their code to work the first time.
+
+JoltR is a full-stack Rust web framework — endpoint routing, middleware, WebSockets, SSE, pub/sub, JWT auth, database migrations, template rendering, and compile-time TypeScript type generation. It started as a Zig project, then grew up and got a job.
+
+## Why Rust
+
+Zig is brilliant if you enjoy debugging segfaults at 2am, rewriting your entire codebase every six months when the standard library changes, and pretending "comptime" makes up for not having a real macro system. For everyone else, there's Rust.
+
+| Zig experience | Rust equivalent |
+|---|---|
+| `@import("std").debug.print` | `dbg!()` |
+| "undefined behavior is just a suggestion" | the borrow checker politely declines |
+| 45-minute compile times for C dependencies | crates.io exists |
+| Rewriting JSON parsing from scratch | `serde_json::from_str` |
+| `@compileError` | actual readable compiler errors |
+| "it works on my machine" | `cargo test` passes in CI |
+| `@ptrCast(*anyopaque, @alignCast(...))` | `.clone()` |
+| LLVM cross-compilation promises that still need a C toolchain | `cross` or GitHub Actions |
+
+## Crates
+
+| Crate | Purpose |
+|---|---|
+| `joltr-core` | Server builder, router, request/response, WS, SSE, pub/sub, tasks, TLS |
+| `joltr-macros` | `#[endpoint]`, `#[derive(AutoMiddleware)]`, `#[derive(PatchQuery)]`, `#[derive(TsExport)]` |
+| `joltr-db` | sqlx pool, file-based migrations with SHA-256 checksums, LISTEN/NOTIFY |
+| `joltr-utils` | JWT (HS256/384/512), PBKDF2 hashing, UUID v4/v7, `Optional<T>` tri-state |
+| `joltr-templates` | Handlebars rendering — no C FFI, no custom parser, just `handlebars` |
+
+## Quick Start
+
+```rust
+use joltr_core::prelude::*;
+
+struct Hello;
+
+#[joltr_macros::endpoint("/hello")]
+impl Hello {
+    #[get]
+    fn greet(&self, req: Request) -> Response<String> {
+        Response::ok("Hello from JoltR — compiled in under 10 seconds")
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    JoltRServer::new()
+        .start("0.0.0.0:3000")
+        .await
+        .unwrap();
+}
+```
+
+## Features
+
+- **Derive-driven endpoints** — `#[endpoint("/path")]` with `#[get]`/`#[post]`/`#[put]`/`#[patch]`/`#[delete]` on impl blocks
+- **Auto-middleware** — `#[derive(AutoMiddleware)]` inspects struct fields and auto-wires body parsing, query extraction, CORS, and custom middleware steps
+- **WebSocket auth** — JWT extraction from `Sec-WebSocket-Protocol: joltr-jwt, <token>` header
+- **Pub/sub** — `tokio::sync::broadcast` channels keyed in a `DashMap`, no C pubsub daemon required
+- **SSE** — Server-sent events via `axum::response::Sse`
+- **TypeScript typegen** — `#[derive(TsExport)]` walks your Rust types at compile time and emits `types.d.ts`
+- **PATCH/UPSERT** — `#[derive(PatchQuery)]` generates dynamic SQL from `Optional<T>` fields
+- **Migrations** — File-based SQL migrations with SHA-256 checksums, auto-applied at startup
+- **Background tasks** — Scheduled tasks via `tokio::time::interval` with retry logic
+
+## FAQ
+
+**Is this a port of the Zig JoltR?**
+
+Yes. The original Zig codebase still exists in `src/` as a historical artifact and compatibility reference. The Rust workspace is the primary development target.
+
+**Why keep the Zig code?**
+
+Sentimental value. Also, it's useful to occasionally run `zig build` and remember why we switched.
+
+**Does JoltR support Zig?**
+
+The Zig runtime was retired. The `facil.io` C dependency tree is a submodule for posterity. If you need Zig interop, compile your Zig to a shared library and call it from a Rust endpoint — the borrow checker doesn't judge.
+
+**Can I contribute Zig code?**
+
+We prefer Rust contributions. Zig PRs will be reviewed with the same care and attention that Zig gives to its documentation — which is to say, sporadically and without clear guidance. If you really want to, look in `src/` and `build.zig`, but don't expect `@import` paths to survive the next compiler release.
+
+## License
+
+MIT
