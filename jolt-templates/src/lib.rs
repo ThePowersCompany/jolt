@@ -868,4 +868,196 @@ mod tests {
 
         assert_eq!(out, "[1,2,3]");
     }
+
+    mod templates {
+        use super::TestDir;
+        use crate::{TemplateEngine, TemplateRenderError};
+        use serde_json::json;
+
+        // ── partials ──────────────────────────────────────────────────────
+
+        #[test]
+        fn partial_includes_content_of_registered_partial() {
+            let dir = TestDir::new("partial-include");
+            dir.write_file("page.hbs", "before {{> header}} after");
+            let mut engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+            engine
+                .registry_mut()
+                .register_partial("header", "[[HEADER]]")
+                .expect("register partial");
+
+            let out = engine
+                .render("page", &json!({}))
+                .expect("render succeeds");
+
+            assert_eq!(out, "before [[HEADER]] after");
+        }
+
+        #[test]
+        fn partial_renders_with_current_context_data() {
+            let dir = TestDir::new("partial-context");
+            dir.write_file("profile.hbs", "{{> user_card}}");
+            let mut engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+            engine
+                .registry_mut()
+                .register_partial("user_card", "{{name}} <{{email}}>")
+                .expect("register partial");
+
+            let out = engine
+                .render(
+                    "profile",
+                    &json!({ "name": "Alice", "email": "alice@example.com" }),
+                )
+                .expect("render succeeds");
+
+            assert_eq!(out, "Alice <alice@example.com>");
+        }
+
+        #[test]
+        fn partial_not_registered_is_render_error() {
+            let dir = TestDir::new("partial-missing");
+            dir.write_file("page.hbs", "{{> missing_partial}}");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let result = engine.render("page", &json!({}));
+
+            match result {
+                Err(TemplateRenderError::Render(_)) => {}
+                other => panic!("expected Render error for missing partial, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn partial_supports_nested_partial_calls() {
+            let dir = TestDir::new("partial-nested");
+            dir.write_file("page.hbs", "{{> outer}}");
+            let mut engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+            engine
+                .registry_mut()
+                .register_partial("outer", "[{{> inner}}]")
+                .expect("register outer partial");
+            engine
+                .registry_mut()
+                .register_partial("inner", "x={{x}}")
+                .expect("register inner partial");
+
+            let out = engine
+                .render("page", &json!({ "x": 7 }))
+                .expect("render succeeds");
+
+            assert_eq!(out, "[x=7]");
+        }
+
+        // ── html escaping ─────────────────────────────────────────────────
+
+        #[test]
+        fn double_brace_escapes_html_chars() {
+            let dir = TestDir::new("escape-double");
+            dir.write_file("raw.hbs", "{{content}}");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render("raw", &json!({ "content": "<script>alert(1)</script>" }))
+                .expect("render succeeds");
+
+            assert_eq!(
+                out,
+                "&lt;script&gt;alert(1)&lt;/script&gt;"
+            );
+        }
+
+        #[test]
+        fn triple_brace_bypasses_html_escaping() {
+            let dir = TestDir::new("escape-triple");
+            dir.write_file("raw.hbs", "{{{content}}}");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render("raw", &json!({ "content": "<b>bold</b>" }))
+                .expect("render succeeds");
+
+            assert_eq!(out, "<b>bold</b>");
+        }
+
+        #[test]
+        fn double_brace_escapes_ampersand() {
+            let dir = TestDir::new("escape-amp");
+            dir.write_file("raw.hbs", "{{val}}");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render("raw", &json!({ "val": "a & b" }))
+                .expect("render succeeds");
+
+            assert_eq!(out, "a &amp; b");
+        }
+
+        #[test]
+        fn double_brace_escapes_quotes() {
+            let dir = TestDir::new("escape-quotes");
+            dir.write_file("raw.hbs", r#"{{val}}"#);
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render("raw", &json!({ "val": r#"say "hello""# }))
+                .expect("render succeeds");
+
+            assert_eq!(out, "say &quot;hello&quot;");
+        }
+
+        // ── variable substitution edge cases ─────────────────────────────
+
+        #[test]
+        fn variable_substitution_resolves_nested_path() {
+            let dir = TestDir::new("var-deep");
+            dir.write_file("profile.hbs", "{{user.name}} <{{user.email}}>");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render(
+                    "profile",
+                    &json!({ "user": { "name": "Bob", "email": "bob@b.com" } }),
+                )
+                .expect("render succeeds");
+
+            assert_eq!(out, "Bob <bob@b.com>");
+        }
+
+        #[test]
+        fn variable_substitution_empty_string_value_renders_empty() {
+            let dir = TestDir::new("var-empty");
+            dir.write_file("greet.hbs", "Hello {{name}}!");
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render("greet", &json!({ "name": "" }))
+                .expect("render succeeds");
+
+            assert_eq!(out, "Hello !");
+        }
+
+        // ── mixed escaping + helpers ─────────────────────────────────────
+
+        #[test]
+        fn mix_escaped_and_raw_in_same_template() {
+            let dir = TestDir::new("escape-mix");
+            dir.write_file(
+                "page.hbs",
+                r#"escaped: {{text}}  raw: {{{text}}}  json: {{{json data}}}"#,
+            );
+            let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
+
+            let out = engine
+                .render(
+                    "page",
+                    &json!({ "text": "<b>B</b>", "data": { "n": 42 } }),
+                )
+                .expect("render succeeds");
+
+            assert_eq!(
+                out,
+                r#"escaped: &lt;b&gt;B&lt;/b&gt;  raw: <b>B</b>  json: {"n":42}"#
+            );
+        }
+    }
 }

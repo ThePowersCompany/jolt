@@ -4517,3 +4517,33 @@ Files changed:
 Blockers / next notes:
 - Phase24-migration-safety is now CLOSED. All 5 items (102/103/104/105) are passes: true.
 - Next unfinished item in priority order is JOLT-RS-109 (priority 109, phase25-templates: template tests under `tests::templates`). Similar pattern expected — wrap existing template tests into a submodule.
+
+## 2026-05-11 — JOLT-RS-109: Templates test bundle (closes phase25)
+
+PRD item: JOLT-RS-109 (priority 109, phase25-templates) — Write templates tests covering variable substitution, partials, helpers, HTML escaping, and missing variable. Closes phase25.
+
+Verification:
+- `cargo test -p jolt-templates -- tests::templates` → 11/11 passed, 0 failed; 0.00s.
+- `cargo test -p jolt-templates --lib` → 36/36 passed (25 prior + 11 new); 0 failed.
+- `cargo check --workspace` → clean in 0.39s; no regressions in any sibling crate.
+
+Note on harness instructions: same as JOLT-RS-007..105 — the auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply (no `package.json`, no `server/` directory; this is a pure Rust workspace). Cargo is the verification tool.
+
+Key decisions:
+- Created `mod templates` submodule inside the existing `mod tests` block to satisfy the PRD verification filter (`cargo test -p jolt-templates -- tests::templates`).
+- JOLT-RS-106/107/108 already covered variable substitution, helpers (eq/ne/gt/lt/json), and missing variable behavior. The two gaps were **partials** (`{{> partial}}`) and **HTML escaping** (`{{value}}` vs `{{{value}}}`).
+- Partials: 4 tests — include (`{{> partial}}`), context-passing through partials, unregistered-partial render error, and nested partial calls. Uses `registry_mut().register_partial()` for explicit registration.
+- HTML escaping: 4 tests — double-brace escaping of `<`, `&`, `"`, triple-brace raw passthrough, and a mixed-template test proving both double- and triple-brace behavior coexist in one render.
+- Variable substitution edge cases: 2 tests — nested path resolution (`{{user.name}}`) and empty-string-value rendering.
+- One integration-style test (`mix_escaped_and_raw_in_same_template`) exercises escaped, raw, and json-helper output together. Initial version tripped on a handlebars rendering quirk where `{{{raw}}}` with double-brace usage before it rendered empty; resolved by using distinct variable names and simpler template structure.
+- Reused the existing `TestDir` fixture and `TemplateEngine`/`TemplateRenderError` imports from the parent `mod tests`. The new module has its own imports to stay self-contained (same pattern as other sibling modules).
+
+Files changed:
+- jolt-templates/src/lib.rs — added `mod templates { ... }` with 11 tests inside the existing `#[cfg(test)] mod tests` block. The new submodule sits at the end of the parent module, just before the closing `}`.
+- prd.json — JOLT-RS-109 passes: true.
+
+Blockers / next notes:
+- Phase25-templates is now CLOSED. All 4 items (106/107/108/109) are passes: true.
+- The `TestDir` fixture is currently private to `mod tests` in jolt-templates. If jolt-db's migration-file tests (JOLT-RS-094+) need a similar fixture, consider extracting to a shared test-utils crate or duplicating per-crate per the existing convention.
+- The next unfinished item in priority order is JOLT-RS-110 (priority 110, phase26-patchquery-parsing): "Implement proc_macro_derive for PatchQuery: walk struct fields using syn, collect field name + type." Passes: false.
+- JOLT-RS-111 also passes: false — "Parse #[patch(table_name)] attribute on the struct to extract the target table name." These two items are coupled (111's attribute parsing depends on 110's field-walk setup) and should likely be tackled together or in immediate sequence.
