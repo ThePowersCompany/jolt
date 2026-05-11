@@ -2,20 +2,18 @@
 //!
 //! Phase26 ladder:
 //! - JOLT-RS-110: parse the struct's named fields and their types into
-//!   [`PatchQueryInput`] + [`PatchQueryField`]. The derive emits a minimal
-//!   hidden marker (`__JOLT_PATCH_QUERY_FIELD_COUNT: usize`) so an
-//!   integration test can verify the derive compiled and parsed the field
-//!   count without depending on later codegen.
+//!   [`PatchQueryInput`]. The derive emits a hidden marker
+//!   (`__JOLT_PATCH_QUERY_FIELD_COUNT: usize`) so an integration test can
+//!   verify the derive compiled and parsed the field count without depending
+//!   on later codegen.
 //! - JOLT-RS-111: parse the struct-level `#[patch("users")]` attribute to
 //!   extract the target table name.
-//! - JOLT-RS-112 (this iteration): detect `Optional<T>` fields via
-//!   [`optional_inner_type`], extract the inner `T`, and mark each field
-//!   with [`PatchQueryField::is_optional`] + [`PatchQueryField::inner_type`].
-//!   The derive emits an additional `__JOLT_PATCH_QUERY_OPTIONAL_COUNT:
-//!   usize` hidden marker so the integration test can observe the
-//!   classification.
-//! - JOLT-RS-113: build the [`Vec<PatchField>`] internal representation
-//!   carrying `name`, `column_name`, `is_optional`, `inner_type`.
+//! - JOLT-RS-112: detect `Optional<T>` fields via [`optional_inner_type`],
+//!   extract the inner `T`, emit `__JOLT_PATCH_QUERY_OPTIONAL_COUNT`.
+//! - JOLT-RS-113 (this iteration): graduate the per-field representation to
+//!   [`PatchField`] — the canonical internal representation carrying `name`,
+//!   `column_name`, `is_optional`, `inner_type`. Replaces the prior
+//!   `PatchQueryField` placeholder.
 //! - JOLT-RS-114..117: codegen `fn to_patch_query(&self, id_column: &str,
 //!   id_value: &impl ToSql) -> (String, Vec<&dyn ToSql>)` and the
 //!   `Some(_) → SET col = $N` / `Null → SET col = NULL` /
@@ -76,35 +74,37 @@ pub(crate) fn optional_inner_type(ty: &Type) -> Option<&Type> {
 
 /// Parsed shape of a `#[derive(PatchQuery)]` input.
 ///
-/// JOLT-RS-110 captures the struct identifier and per-field metadata (name +
-/// type, verbatim). JOLT-RS-111 adds the struct-level `#[patch("table_name")]`
-/// attribute extraction into [`table_name`]. JOLT-RS-112 adds
-/// [`PatchQueryField::is_optional`] + [`PatchQueryField::inner_type`]
-/// classification to each field via [`optional_inner_type`]. Later phase26
-/// slices extend [`PatchQueryField`] with column-name overrides; this shape
-/// keeps the representation minimal until 113 graduates to the `PatchField`
-/// IR.
+/// JOLT-RS-110 captures the struct identifier and per-field metadata. JOLT-RS-111
+/// adds the struct-level `#[patch("table_name")]` attribute extraction into
+/// [`table_name`]. JOLT-RS-112 added `Optional<T>` field detection.
+/// JOLT-RS-113 graduates the per-field representation from `PatchQueryField` to
+/// [`PatchField`], the canonical internal representation consumed by later
+/// codegen slices (114+).
 #[derive(Debug)]
 pub(crate) struct PatchQueryInput {
     pub(crate) ident: Ident,
-    pub(crate) fields: Vec<PatchQueryField>,
+    pub(crate) fields: Vec<PatchField>,
     pub(crate) table_name: Option<String>,
 }
 
-/// One field on a `#[derive(PatchQuery)]` struct.
+/// Internal representation of one field on a `#[derive(PatchQuery)]` struct.
 ///
-/// JOLT-RS-110 captures the ident and type verbatim from `syn::Field`. JOLT-RS-112
-/// extends with [`is_optional`] and [`inner_type`] classification via
-/// [`optional_inner_type`]: if the field's type is `Optional<T>`,
-/// `is_optional` is `true` and `inner_type` holds `T`; otherwise `false` and
-/// `None`. JOLT-RS-113 will fold this into the `PatchField` internal
-/// representation.
+/// JOLT-RS-113: the canonical IR carrying everything codegen (114+) needs:
+///
+/// - [`name`]: the Rust field ident, preserved for `quote!` interpolation.
+/// - [`column_name`]: the SQL column name. Initially the snake_case rendering
+///   of `name`; a future `#[patch(column = "...")]` field-level attribute will
+///   override this independently.
+/// - [`is_optional`]: `true` when the field's type is `Optional<T>` (tri-state
+///   enum), `false` otherwise. Classified by [`optional_inner_type`].
+/// - [`inner_type`]: when `is_optional` is `true`, the inner `T` of
+///   `Optional<T>`; `None` for plain fields.
 #[derive(Debug, Clone)]
-pub(crate) struct PatchQueryField {
+pub(crate) struct PatchField {
     #[allow(dead_code)]
-    pub(crate) ident: Ident,
+    pub(crate) name: Ident,
     #[allow(dead_code)]
-    pub(crate) ty: Type,
+    pub(crate) column_name: String,
     pub(crate) is_optional: bool,
     #[allow(dead_code)]
     pub(crate) inner_type: Option<Type>,
@@ -192,7 +192,7 @@ fn parse_patch_table_attr(
 fn parse_struct_fields(
     data: &DataStruct,
     owner: &Ident,
-) -> syn::Result<Vec<PatchQueryField>> {
+) -> syn::Result<Vec<PatchField>> {
     match &data.fields {
         Fields::Named(named) => {
             let mut out = Vec::with_capacity(named.named.len());
@@ -203,9 +203,10 @@ fn parse_struct_fields(
                     .expect("Fields::Named guarantees every field has an ident");
                 let is_optional = optional_inner_type(&field.ty).is_some();
                 let inner_type = optional_inner_type(&field.ty).cloned();
-                out.push(PatchQueryField {
-                    ident: field_ident,
-                    ty: field.ty.clone(),
+                let column_name = field_ident.to_string();
+                out.push(PatchField {
+                    name: field_ident,
+                    column_name,
                     is_optional,
                     inner_type,
                 });
@@ -335,7 +336,7 @@ mod tests {
         let parsed = parse_patch_query_input(input).expect("named-field struct parses");
         assert_eq!(parsed.ident, "UserPatch");
         assert_eq!(parsed.fields.len(), 3);
-        let names: Vec<String> = parsed.fields.iter().map(|f| f.ident.to_string()).collect();
+        let names: Vec<String> = parsed.fields.iter().map(|f| f.name.to_string()).collect();
         assert_eq!(names, vec!["name", "email", "age"]);
     }
 
@@ -357,16 +358,15 @@ mod tests {
         );
         let parsed = parse_patch_query_input(input).expect("mixed struct parses");
         assert_eq!(parsed.fields.len(), 4);
-        let names: Vec<String> = parsed.fields.iter().map(|f| f.ident.to_string()).collect();
+        let names: Vec<String> = parsed.fields.iter().map(|f| f.name.to_string()).collect();
         assert_eq!(names, vec!["name", "count", "tags", "bio"]);
     }
 
     #[test]
-    fn preserves_field_types_verbatim() {
-        // 112 will need to inspect the type to detect `Optional<T>` and extract
-        // the inner `T`. Pin that the type is preserved verbatim from syn —
-        // a regression that flattened the type (e.g. dropped generic args)
-        // would surface here as a missing inner segment.
+    fn preserves_field_types_via_inner_type() {
+        // 113 graduates to PatchField which stores `inner_type` instead of the
+        // raw `ty`. Pin that the inner type of an `Optional<String>` field
+        // is preserved as `String`.
         let input = parse_derive(
             r#"
             struct TypePatch {
@@ -376,11 +376,11 @@ mod tests {
         );
         let parsed = parse_patch_query_input(input).expect("parses");
         assert_eq!(parsed.fields.len(), 1);
-        let f0_ty = &parsed.fields[0].ty;
-        let rendered = quote! { #f0_ty }.to_string();
+        let inner = parsed.fields[0].inner_type.as_ref().expect("Optional<T> must have inner_type");
+        let rendered = quote! { #inner }.to_string();
         assert!(
-            rendered.contains("Optional") && rendered.contains("String"),
-            "field type must preserve Optional<String> shape, got: {rendered}"
+            rendered == "String",
+            "inner type must be String, got: {rendered}"
         );
     }
 
@@ -670,12 +670,12 @@ mod tests {
             assert!(
                 !f.is_optional,
                 "field {} must not be detected as optional",
-                f.ident
+                f.name
             );
             assert!(
                 f.inner_type.is_none(),
                 "plain field {} must have inner_type=None",
-                f.ident
+                f.name
             );
         }
     }
@@ -787,5 +787,139 @@ mod tests {
             optional_inner_type(&ty).is_none(),
             "Result<_, _> must not be mistaken for Optional<T>"
         );
+    }
+
+    // ── JOLT-RS-113: PatchField internal representation ──
+
+    #[test]
+    fn patch_field_name_is_rust_field_ident() {
+        let input = parse_derive(
+            r#"
+            struct UserPatch {
+                display_name: Optional<String>,
+                email_address: String,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 2);
+        assert_eq!(parsed.fields[0].name, "display_name");
+        assert_eq!(parsed.fields[1].name, "email_address");
+    }
+
+    #[test]
+    fn patch_field_column_name_defaults_to_rust_field_ident() {
+        let input = parse_derive(
+            r#"
+            struct SnakePatch {
+                first_name: Optional<String>,
+                last_name: Optional<String>,
+                view_count: u64,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 3);
+        assert_eq!(parsed.fields[0].column_name, "first_name");
+        assert_eq!(parsed.fields[1].column_name, "last_name");
+        assert_eq!(parsed.fields[2].column_name, "view_count");
+    }
+
+    #[test]
+    fn patch_field_is_optional_true_for_optional_type() {
+        let input = parse_derive(
+            r#"
+            struct OptPatch {
+                title: Optional<String>,
+                count: u32,
+                bio: Optional<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert!(parsed.fields[0].is_optional);
+        assert!(!parsed.fields[1].is_optional);
+        assert!(parsed.fields[2].is_optional);
+    }
+
+    #[test]
+    fn patch_field_inner_type_is_some_for_optional_some_for_plain_none() {
+        let input = parse_derive(
+            r#"
+            struct InnerPatch {
+                name: Optional<String>,
+                age: Optional<u32>,
+                title: String,
+                tags: Vec<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        // Optional<String> → inner_type = Some(String)
+        assert!(parsed.fields[0].inner_type.is_some());
+        let inner0_ref = parsed.fields[0].inner_type.as_ref().unwrap();
+        let inner0_str = quote! { #inner0_ref }.to_string();
+        assert_eq!(inner0_str, "String");
+        // Optional<u32> → inner_type = Some(u32)
+        assert!(parsed.fields[1].inner_type.is_some());
+        let inner1_ref = parsed.fields[1].inner_type.as_ref().unwrap();
+        let inner1_str = quote! { #inner1_ref }.to_string();
+        assert_eq!(inner1_str, "u32");
+        // String (plain) → inner_type = None
+        assert!(parsed.fields[2].inner_type.is_none());
+        // Vec<String> (plain) → inner_type = None
+        assert!(parsed.fields[3].inner_type.is_none());
+    }
+
+    #[test]
+    fn patch_field_ir_vec_built_from_derived_input() {
+        // The PRD-mandated verification: "Internal representation built correctly
+        // from syn types." Parse a struct with a mix of Optional and plain fields
+        // and verify the entire Vec<PatchField> has correct name, column_name,
+        // is_optional, and inner_type for every field.
+        let input = parse_derive(
+            r#"
+            struct FullPatch {
+                display_name: Optional<String>,
+                bio: String,
+                view_count: u64,
+                tags: Vec<String>,
+                avatar_url: Optional<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 5);
+
+        let f = &parsed.fields;
+        // display_name: Optional<String>
+        assert_eq!(f[0].name, "display_name");
+        assert_eq!(f[0].column_name, "display_name");
+        assert!(f[0].is_optional);
+        assert!(f[0].inner_type.is_some());
+
+        // bio: String
+        assert_eq!(f[1].name, "bio");
+        assert_eq!(f[1].column_name, "bio");
+        assert!(!f[1].is_optional);
+        assert!(f[1].inner_type.is_none());
+
+        // view_count: u64
+        assert_eq!(f[2].name, "view_count");
+        assert_eq!(f[2].column_name, "view_count");
+        assert!(!f[2].is_optional);
+        assert!(f[2].inner_type.is_none());
+
+        // tags: Vec<String>
+        assert_eq!(f[3].name, "tags");
+        assert_eq!(f[3].column_name, "tags");
+        assert!(!f[3].is_optional);
+        assert!(f[3].inner_type.is_none());
+
+        // avatar_url: Optional<String>
+        assert_eq!(f[4].name, "avatar_url");
+        assert_eq!(f[4].column_name, "avatar_url");
+        assert!(f[4].is_optional);
+        assert!(f[4].inner_type.is_some());
     }
 }

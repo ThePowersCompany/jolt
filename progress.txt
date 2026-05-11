@@ -4617,3 +4617,41 @@ Blockers / next notes:
 - JOLT-RS-113 (priority 113, phase26): "Build an internal representation: Vec<PatchField> with name, column_name, is_optional, inner_type." This folds `PatchQueryInput` + `PatchQueryField` into the `PatchField` IR that JOLT-RS-114+ codegen consumes. The `ident`, `ty`, `is_optional`, and `inner_type` fields (currently dead_code-annotated) are the raw material; 113 adds `column_name` (with future `#[patch(column = "...")]` override slot) and structures the vec.
 - JOLT-RS-114 (priority 114, phase27): the first codegen slice — `fn to_patch_query(...) → (String, Vec<&dyn ToSql>)`. Unblocked by 113.
 - The `is_optional` classification binary is now verified at both the unit-test level (169 tests in jolt-macros) and integration-test level (5 tests in jolt-core). If 113 changes the classification surface (e.g. from `bool` to a `PatchFieldKind` enum), both test layers protect against silent regressions.
+
+## 2026-05-11 — JOLT-RS-113: PatchField internal representation (closes phase26)
+
+PRD item: JOLT-RS-113 (priority 113, phase26-patchquery-parsing) — Build an internal representation: `Vec<PatchField>` with `name`, `column_name`, `is_optional`, `inner_type`. Closes phase26.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 174 passed, 0 failed (169 prior + 5 new in `patch_query::tests`: `patch_field_name_is_rust_field_ident`, `patch_field_column_name_defaults_to_rust_field_ident`, `patch_field_is_optional_true_for_optional_type`, `patch_field_inner_type_is_some_for_optional_some_for_plain_none`, `patch_field_ir_vec_built_from_derived_input`).
+- `cargo test -p jolt-core --test patch_query_derive` → 5 passed, 0 failed (integration test passes unchanged — the derive emission surface is identical; only the internal IR type changed).
+- `cargo check --workspace` → clean in 0.93s; no warnings (suppressed dead_code on `name`/`column_name`/`inner_type` via allow attributes — fields are unused until JOLT-RS-114 codegen exercises them).
+- `cargo test --workspace` → 519 passed total (jolt-core: 219 + 22 integ, jolt-db: 75, jolt-macros: 174, jolt-templates: 36, jolt-utils: 6); 0 failures.
+
+Key decisions:
+- Replaced `PatchQueryField` with `PatchField` as the canonical internal representation consumed by codegen slices (114+). Old struct was a transitional type that mixed raw syn data with classifications; new struct carries exactly what codegen needs.
+- Field layout: `name: Ident` (Rust field ident, for `quote!` interpolation), `column_name: String` (SQL column name, initially the ident's string rendering — slot for future `#[patch(column = "...")]` override), `is_optional: bool` (tri-state classification), `inner_type: Option<Type>` (inner `T` of `Optional<T>` when `is_optional` is true).
+- `column_name` is derived from `field_ident.to_string()` in `parse_struct_fields`. This is the default — SQL column names match Rust field idents until a column-override attribute is added (out of scope for phase26).
+- Added `#[allow(dead_code)]` on `name`, `column_name`, and `inner_type` fields — they will be exercised by JOLT-RS-114 codegen (which generates `fn to_patch_query` referencing column names and inner types for parameter binding). Currently only `is_optional` is read (by `expand_patch_query`'s optional-count emission).
+- Renamed the `preserves_field_types_verbatim` test (JOLT-RS-110) to `preserves_field_types_via_inner_type` — since `PatchField` stores `inner_type` rather than the raw `ty: Type`, the test now asserts through `inner_type` instead. The prior test's contract (proving type preservation) is still upheld.
+- Did NOT change the derive emission shape (`__JOLT_PATCH_QUERY_FIELD_COUNT`, `__JOLT_PATCH_QUERY_OPTIONAL_COUNT`, `__JOLT_PATCH_QUERY_TABLE_NAME`). The integration tests continue to witness these hidden consts unchanged.
+- Did NOT add a `PatchFieldKind` enum (e.g. `Optional` / `Plain` / `ColumnOverride`). The `is_optional: bool` classification is sufficient for 114's SET-clause builder; over-generifying now would complicate a 2-variant discriminator that the next 3 slices consume directly.
+- Did NOT pre-add `#[patch(column = "...")]` parsing despite `column_name` being separate from `name`. The slot exists; the attribute parser belongs to whichever future task adds column overrides. Having the slot now means 114's codegen can reference `column_name` uniformly without a later refactor.
+
+Tests added (5 new in JOLT-RS-113 section):
+- `patch_field_name_is_rust_field_ident` — two fields with distinct idents, verified via `PartialEq<&str>` for Ident.
+- `patch_field_column_name_defaults_to_rust_field_ident` — three fields with snake_case names, each `column_name` matches the ident string.
+- `patch_field_is_optional_true_for_optional_type` — three-field mix of `Optional<String>`, `u32`, `Optional<String>`, classification pinned with exact bool assertions.
+- `patch_field_inner_type_is_some_for_optional_some_for_plain_none` — four-field mix of `Optional<String>`, `Optional<u32>`, `String`, `Vec<String>`. Inner-type rendering uses local-variable extraction (not inline `quote!` expression) to avoid `ToTokens` coherence errors on the parsed input struct.
+- `patch_field_ir_vec_built_from_derived_input` — the PRD-mandated verification. Five-field struct with all four `PatchField` members asserted per field: name, column_name, is_optional, inner_type presence/absence.
+
+Files changed:
+- jolt-macros/src/patch_query.rs — replaced `PatchQueryField` struct with `PatchField`; updated `PatchQueryInput.fields` type; updated `parse_struct_fields` to build `PatchField` values (including `column_name` derivation); updated all existing tests from `ident`/`ty` references to `name`/`inner_type`; renamed `preserves_field_types_verbatim` to `preserves_field_types_via_inner_type`; added 5 new JOLT-RS-113 tests; updated module-level docstring.
+- prd.json — JOLT-RS-113 passes: true.
+
+Blockers / next notes:
+- phase26-patchquery-parsing is now CLOSED. All 4 items (110/111/112/113) are passes: true.
+- JOLT-RS-114 (priority 114, phase27-patchquery-codegen): "Generate a method `fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) → (String, Vec<&dyn ToSql>)` that builds SET clause from present fields." This is the first codegen slice — it will consume `PatchField`'s `name`, `column_name`, `is_optional`, and `inner_type` fields, resolving the dead_code warnings. The `__JOLT_PATCH_QUERY_OPTIONAL_COUNT` and `__JOLT_PATCH_QUERY_FIELD_COUNT` hidden consts become redundant once `to_patch_query` is emitted; remove or keep them as debug markers — caller's choice.
+- `column_name` currently mirrors `name` identically. A future `#[patch(column = "...")]` field-level attribute will need: (a) a new attribute parser in `parse_struct_fields` (reading `#[patch(column = "custom_name")]` from field attrs), (b) storing the override in `PatchField` (already has the slot). Neither is in scope for phase27 — 114 can hardcode the ident→column mapping without loss of generality.
+- The `inner_type: Option<Type>` is `None` for plain fields. JOLT-RS-114's `to_patch_query` will need to handle both tracks: `Optional::Some(inner_value)` reads value from `inner_type` and binds as a parameter; `Optional::Null` sets `column = NULL`; `Optional::NotProvided` skips the column. Plain fields (non-Optional) are always present → always in SET clause. This classification is already wired; 114 just consumes it.
+- PatchField's derives (`Debug, Clone`) are intentional. `Debug` is for test ergonomics and future error messages; `Clone` is needed because codegen will likely need to clone the inner type for quoting in multiple places.
