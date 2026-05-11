@@ -8,6 +8,7 @@
 
 pub mod jwt;
 pub mod password;
+pub mod uuid;
 
 #[cfg(test)]
 mod tests;

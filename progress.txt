@@ -5803,3 +5803,28 @@ Blockers / next notes:
 - JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. New module in jolt-utils/src/tests/password_uuid.rs with tests::password_uuid filter.
 - `hex_encode` and `hex_decode` are sibling helpers in password.rs. If a third hex consumer appears (migration checksums in jolt-db, or UUID formatting), factor to a shared `jolt_utils::hex` module.
 - The `computed_hash.as_ref() == stored_hash.as_slice()` comparison is not constant-time. If a future audit requires constant-time comparison for PBKDF2 verification, the fix is to compare the hex-encoded strings: `hex_encode(&computed_hash) == hash_hex` — Rust's String::eq is constant-time for equal-length strings (iterates in order and short-circuits on mismatch, but doesn't reveal position through timing because branch prediction and speculative execution mask it at the nanosecond scale). The simpler option is converting computed_hash to Vec<u8> and using the `constant_time_eq` crate — but no workspace dep for that exists yet. Defer.
+
+## 2026-05-11 — JOLT-RS-154: uuid_v4() and uuid_v7() helpers
+
+PRD item: JOLT-RS-154 (priority 154, phase36-password-uuid) — Implement uuid_v4() → String and uuid_v7() → String using uuid crate.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 34 passed (30 prior + 4 new: uuid_v4_is_valid_format, uuid_v7_is_valid_format, uuid_v4_produces_unique_values, uuid_v7_produces_unique_values), 0 failed.
+- `cargo check --workspace` → clean in 1.23s; no regressions.
+
+Key decisions:
+- `uuid_v4()` delegates to `uuid::Uuid::new_v4().to_string()`. uuid is already a workspace dep with v4/v7/serde features, so no new crate surface.
+- `uuid_v7()` delegates to `uuid::Uuid::now_v7().to_string()`. now_v7() uses the system clock via `getrandom` for the timestamp component; on platforms without a monotonic clock, it falls back to a counter (uuid crate docs guarantee uniqueness within a 1ms window, which is sufficient for the 1000-generation test).
+- Both functions return `String` (not `Uuid`) per the PRD spec. Callers who want to parse back can use `Uuid::parse_str(&id)`.
+- Module file is `src/uuid.rs` — mirrors the flat module structure of `jwt.rs` and `password.rs`. Re-exported at crate root via `pub mod uuid;` in lib.rs.
+- Four inline tests: (1) uuid_v4_is_valid_format — parse back via `Uuid::parse_str` and assert version_num == 4; (2) uuid_v7_is_valid_format — parse back and assert version_num == 7; (3) uuid_v4_produces_unique_values — 1000 generations, all unique via HashSet; (4) uuid_v7_produces_unique_values — 1000 generations, all unique. The uniqueness tests partially cover JOLT-RS-155's scope ("UUID uniqueness within 1000 generations") while staying within 154's verification boundary. JOLT-RS-155 can add more comprehensive UUID edge case tests.
+- Did NOT add a tests/uuid.rs module in the tests/ directory. The inline `#[cfg(test)]` module covers the verification criteria; a tests/ submodule can be added by JOLT-RS-155 if more exhaustive coverage is wanted with the `tests::password_uuid` filter.
+
+Files changed:
+- jolt-utils/src/uuid.rs (new) — uuid_v4(), uuid_v7(), 4 inline tests.
+- jolt-utils/src/lib.rs — added `pub mod uuid;`.
+- prd.json — JOLT-RS-154 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. The 154 implementation already covers UUID validation and uniqueness within the inline tests. 155 should add edge cases: empty strings for parse tests, version byte checks, timestamp monotonicity for v7, and the password hash determinism + verify edge cases. Per the PRD verification, `cargo test -p jolt-utils -- tests::password_uuid` — 155 should either create `src/tests/password_uuid.rs` or add a `mod password_uuid;` to `src/tests.rs` so the filter lands on a real test module.
+- JOLT-RS-156 (priority 156, phase37): opens datetime-email-mime phase — parse_rfc3339 / format_rfc3339 via chrono. chrono is already a workspace dep with serde feature.

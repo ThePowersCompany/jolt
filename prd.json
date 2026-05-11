@@ -2197,7 +2197,7 @@
       "verification": [
         "Unit test: uuid_v4() is valid UUID v4 format, uuid_v7() is valid UUID v7."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-155",
