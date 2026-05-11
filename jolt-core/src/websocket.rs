@@ -1027,4 +1027,45 @@ mod tests {
             other => panic!("expected Text frame after lag, got {other:?}"),
         }
     }
+
+    /// JOLT-RS-133: on_close drops the Subscription handle, which aborts the
+    /// forward task and drops the broadcast receiver. The pub/sub channel's
+    /// receiver count decrements by one.
+    #[tokio::test]
+    async fn ws_close_receiver_dropped_publish_has_one_fewer_receiver() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender, _rx) =
+            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let sub = sender.subscribe("chat").expect("subscribe must return Some");
+
+        // Let the forward task register its broadcast receiver.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let before = pubsub.publish(
+            "chat",
+            PubSubMessage {
+                channel: "chat".to_string(),
+                payload: "before-close".to_string(),
+                sender_id: None,
+            },
+        );
+        assert_eq!(before, 1, "must have 1 receiver before close");
+
+        // Simulate on_close: drop all subscription handles.
+        drop(sub);
+
+        // Let the abort propagate — the forward task exits, dropping the
+        // broadcast receiver.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let after = pubsub.publish(
+            "chat",
+            PubSubMessage {
+                channel: "chat".to_string(),
+                payload: "after-close".to_string(),
+                sender_id: None,
+            },
+        );
+        assert_eq!(after, 0, "must have 0 receivers after close");
+    }
 }

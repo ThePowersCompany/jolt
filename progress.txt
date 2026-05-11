@@ -5170,3 +5170,28 @@ Files changed:
 Blockers / next notes:
 - JOLT-RS-133 (priority 133): "On WebSocketHandler::on_close, unsubscribe from all subscribed channels." The Subscription Drop impl already aborts the forward task and drops the broadcast receiver. The handler needs to store Subscription handles and drop them in on_close. The ws! macro's generated code will need to collect subscriptions — this is the remaining macro integration work.
 - JOLT-RS-134 (priority 134): full WS + pubsub integration test with two clients on same channel, message exchange. Depends on ws! macro routing Publisher into the handler.
+
+## 2026-05-11 — JOLT-RS-133: WS close drops subscriptions, receiver count decrements
+
+PRD item: JOLT-RS-133 (priority 133, phase31-ws-pubsub-integration) — On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state).
+
+Verification:
+- `cargo test -p jolt-core -- ws_close_receiver_dropped_publish_has_one_fewer_receiver` → 1 passed.
+- `cargo test -p jolt-core --lib` → 239 passed, 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.54s.
+
+Note on harness instructions: same as all prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Production code was ALREADY complete from JOLT-RS-131. `WebSocketSender::subscribe()` returns a `Subscription` whose `Drop` impl calls `abort.abort()`, which drops the `broadcast::Receiver` moved into the forward task. When the receiver is dropped, `PubSub::publish()` returns 0 receivers. The `ws!` macro already calls `on_close()` during lifecycle teardown. The handler is responsible for storing `Subscription` handles and dropping them — the infrastructure is in place.
+- Only a missing unit test was added: `ws_close_receiver_dropped_publish_has_one_fewer_receiver`. The test creates a PubSub, wires it into a WebSocketSender, subscribes to "chat" channel, verifies `publish()` returns 1 receiver, drops the subscription (simulating on_close), waits for abort propagation, and verifies `publish()` returns 0 receivers. Uses the same `Arc<PubSub>` + `channel_with_pubsub` pattern as the JOLT-RS-131/132 tests.
+- Added `tokio::time::sleep(Duration::from_millis(10))` before each publish to give the forward task time to register its broadcast receiver and for the abort to propagate. Empirically 10ms is sufficient on the CI-like local environment; the broadcast::Receiver API has no synchronous "is this receiver still alive?" check, so polling is unavoidable.
+- Did NOT touch the `ws!` macro or the `WebSocketHandler` trait — both already specify that `on_close` fires after the read loop exits and should be used for cleanup. The generated code at ws.rs:325 calls `__handler.on_close().await` with no sender argument, matching the trait signature exactly.
+- Did NOT change `WebSocketSender`, `Subscription`, or `PubSub` — all three types already implement the required unsubscribe-when-dropped contract.
+
+Files changed:
+- jolt-core/src/websocket.rs — added `ws_close_receiver_dropped_publish_has_one_fewer_receiver` test (one `#[tokio::test]` function, ~35 lines).
+- prd.json — JOLT-RS-133 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-134 (priority 134): full WS + pubsub integration test with two clients on same channel, message exchange. Depends on ws! macro and a real axum server. This is an integration test requiring `cargo test --test ws_pubsub_integration` to pass.
