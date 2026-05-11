@@ -2239,7 +2239,7 @@
       "verification": [
         "Unit test: valid emails \u2192 true, invalid (no @, empty local, no dot) \u2192 false."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-158",

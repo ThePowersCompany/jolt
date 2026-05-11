@@ -5884,3 +5884,28 @@ Notes for next iterations:
 - JOLT-RS-157 (priority 157): `is_valid_email(s: &str) -> bool`. Likely lives in `jolt-utils/src/email.rs`. Simple validation (contains @, non-empty local/domain, domain contains dot). No extra deps needed.
 - JOLT-RS-158 (priority 158): Define static MIME_TABLE as `phf::Map<&str, &str>`. This requires adding `phf` to workspace dependencies (version 0.11 with `macros` feature). Consider whether to add phf at workspace level (shared across crates) or only in jolt-utils.
 - JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>` — depends on 158's MIME_TABLE. Extract extension, lowercase, lookup.
+
+## 2026-05-11 — JOLT-RS-157: is_valid_email structural validator
+
+PRD item: JOLT-RS-157 (priority 157, phase37-datetime-email-mime) — Implement `is_valid_email(s: &str) -> bool`: contains @, non-empty local part, non-empty domain, domain contains dot.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 77 passed (6 new email tests + 71 existing); 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Key decisions:
+- Single `@` enforced via `rfind('@')` + `matches('@').count() != 1` guard. `rfind` picks the last `@` so the local/domain split works correctly even for malformed multi-@ inputs before the guard rejects them. Domain cannot be empty after the split because a trailing `s.ends_with('@')` would make `rfind` return the last character position with an empty remainder.
+- `domain.contains('.')` is the structural validity check (not full RFC 5321/5322). IP-literal domains (`user@[192.168.1.1]`), quoted local-parts, and internationalized email addresses are all rejected — those require a dedicated parser library. This matches the PRD's explicit scope ("contains @, non-empty local part, non-empty domain, domain contains dot").
+- No Unicode normalization or case-folding. The function treats email addresses as opaque ASCII-adjacent strings; `is_valid_email("UsEr@ExAmPlE.CoM")` returns true because the structural check passes. If case normalization matters, callers should apply it themselves before or after validation.
+- Module file is `jolt-utils/src/email.rs`. Did NOT re-export at crate root — `jolt_utils::email::is_valid_email` is unambiguous, and re-exporting would bloat the root namespace alongside `datetime`, `jwt`, `password`, and `uuid`.
+- Six inline tests: (1) valid_emails_return_true — three standard shapes (`user@example.com`, `a@b.co`, `name@sub.domain.org`); (2) missing_at_returns_false; (3) empty_local_returns_false (`@example.com`); (4) empty_domain_returns_false (`user@`); (5) domain_without_dot_returns_false (`user@localhost`); (6) multiple_at_returns_false (`a@b@c.com`). All six are pure sync, no mocking needed.
+- Did NOT add tests for whitespace, special characters in local part, or dots in local part — those are out of scope per the PRD's explicit structural checklist. If a future PRD adds RFC 5321-derived validation, expand the test surface then.
+
+Files changed:
+- jolt-utils/src/email.rs (new) — `is_valid_email` function + 6 inline unit tests.
+- jolt-utils/src/lib.rs — added `pub mod email;`.
+- prd.json — JOLT-RS-157 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-158 (priority 158): Define static MIME_TABLE as `phf::Map<&str, &str>`. Requires adding `phf` (v0.11, feature = "macros") to workspace deps. The `phf_macros` crate provides the `phf_map!` macro for compile-time perfect-hash map construction. jolt-utils is the natural home.
+- JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>` — depends on 158's MIME_TABLE.

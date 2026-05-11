@@ -7,6 +7,7 @@
 //! subsequent PRD items.
 
 pub mod datetime;
+pub mod email;
 pub mod jwt;
 pub mod password;
 pub mod uuid;
