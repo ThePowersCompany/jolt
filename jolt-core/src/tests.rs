@@ -6696,4 +6696,41 @@ mod pubsub {
         let n = ps.publish("test", msg);
         assert_eq!(n, 1);
     }
+
+    #[test]
+    fn subscribe_returns_receiver() {
+        let ps = PubSub::new();
+        let rx = ps.subscribe("test");
+        drop(rx);
+    }
+
+    #[test]
+    fn subscriber_receives_published_message() {
+        let ps = PubSub::new();
+        let mut rx = ps.subscribe("test");
+        let msg = PubSubMessage {
+            channel: "test".into(),
+            payload: "hello".into(),
+            sender_id: None,
+        };
+        ps.publish("test", msg);
+        let received = rx.try_recv().expect("subscriber should receive the published message");
+        assert_eq!(received.channel, "test");
+        assert_eq!(received.payload, "hello");
+        assert_eq!(received.sender_id, None);
+    }
+
+    #[test]
+    fn dropped_receiver_reduces_subscriber_count_to_zero() {
+        let ps = PubSub::new();
+        let rx = ps.subscribe("test");
+        let msg = PubSubMessage {
+            channel: "test".into(),
+            payload: "x".into(),
+            sender_id: None,
+        };
+        assert_eq!(ps.publish("test", msg.clone()), 1);
+        drop(rx);
+        assert_eq!(ps.publish("test", msg), 0);
+    }
 }

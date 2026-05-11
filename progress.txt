@@ -5041,3 +5041,36 @@ Blockers / next notes:
 - JOLT-RS-129 (priority 129, phase30): `PubSub::subscribe()` is already implemented (co-implemented here to enable 128's verification). The 129 work is: add subscribe-specific tests (subscribe returns receiver, publish delivers to receiver, drop receiver → publish to 0). The subscribe implementation here is minimal; 129 should not rewrite it, only test it.
 - JOLT-RS-130 (priority 130, phase30): comprehensive pubsub tests — multi-channel isolation, late subscriber, concurrent publishes. These tests now have both `publish` and `subscribe` available. Concurrent testing will need `std::thread::spawn` + blocking tokio runtimes or `tokio::task::spawn`.
 - `PubSubMessage` now requires Clone (derived in JOLT-RS-127) — since publish stores via `sender.send(msg)` which internally clones for each receiver. Each receiver gets its own clone. This matches the expected broadcast channel contract.
+
+## 2026-05-11 — JOLT-RS-129: PubSub::subscribe tests (subscribe lifecycle, message delivery, drop-unsubscribe)
+
+PRD item: JOLT-RS-129 (priority 129, phase30-pubsub-core) — Add subscribe-specific unit tests: subscribe returns receiver, publish delivers to subscriber, drop receiver reduces subscriber count to zero.
+
+Note: The `subscribe()` method was already co-implemented in JOLT-RS-128 (required for that item's 1-subscriber verification). This item adds the three subscribe-specific tests the PRD verification mandates, completing the subscribe lifecycle coverage.
+
+Verification:
+- `cargo test -p jolt-core -- tests::pubsub` → 5/5 passed (2 prior + 3 new), 0 failed, 223 filtered out.
+- `cargo test -p jolt-core --lib` → 228 passed total (up from 225); 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..128 — cargo is the verification tool.
+
+Key decisions:
+- Three new tests added to `mod pubsub` in `tests.rs`:
+  1. `subscribe_returns_receiver` — `ps.subscribe("test")` compiles and returns a usable receiver. The PRD-mandated "subscribe → get receiver" check. No assertion beyond compilation + `drop(rx)` — the type is `broadcast::Receiver<PubSubMessage>` which the compiler enforces.
+  2. `subscriber_receives_published_message` — subscribes, publishes a message, then calls `rx.try_recv()` on the receiver and asserts the received message matches fields (channel, payload, sender_id). Locks in end-to-end publish→deliver semantics: if a future refactor breaks broadcast channel delivery, this test catches it. Uses `try_recv()` (synchronous) rather than `recv()` (async) — broadcast::Receiver::try_recv is available without a tokio runtime context, keeping the test as plain `#[test]`.
+  3. `dropped_receiver_reduces_subscriber_count_to_zero` — subscribes, publishes → asserts `n == 1`, drops the receiver, publishes again → asserts `n == 0`. Locks in the "unsubscribe = drop receiver" contract. If a future change wraps the receiver in a handle that doesn't forward the drop to the broadcast channel's sender, this test fails.
+- All three tests are plain `#[test]` (not `#[tokio::test]`). `broadcast::Receiver::try_recv()` and `broadcast::Sender::send()` are both synchronous — no async runtime needed. This is deliberate because `PubSub` is designed to be usable in both sync and async contexts.
+- Did NOT add a test for `recv().await` — the async path is structurally identical to `try_recv()` (same receiver type, same channel), and adding an async test would pull in `#[tokio::test]` for no new behavioral coverage. The `try_recv()` sync test already locks in the delivery contract.
+- Did NOT add tests for `broadcast::error::TryRecvError::Lagged` or `TryRecvError::Closed` — those are JOLT-RS-130's territory (comprehensive tests including late subscriber, multi-channel isolation, concurrent publishes). The subscribe contract is narrowly "drop receiver = unsubscribe" which these three tests cover.
+- `clone()` on the `PubSubMessage` in `dropped_receiver_reduces_subscriber_count_to_zero` is the `#[derive(Clone)]` from JOLT-RS-127 — required by `broadcast::Sender::send()` which clones for each receiver. The clone is a cheap 3-field String clone (no Arc/Rc overhead); if PubSubMessage grows in JOLT-RS-131+, the clone cost scales linearly with field count. Nothing to fix now.
+
+Files changed:
+- `jolt-core/src/tests.rs` — added 3 tests in `mod pubsub` (subscribe_returns_receiver, subscriber_receives_published_message, dropped_receiver_reduces_subscriber_count_to_zero).
+- `prd.json` — JOLT-RS-129 passes: true.
+
+Blockers / next notes:
+- **phase30-pubsub-core has two remaining items:** JOLT-RS-130 (priority 130, comprehensive pubsub tests: multi-channel isolation, late subscriber, concurrent publishes) and then the phase closes. Both `publish` and `subscribe` are fully implemented and tested for basic single-channel use.
+- JOLT-RS-130 tests will need `tokio::task::spawn` for concurrent publishes and possibly `std::thread::spawn` + blocking runtimes for parallel test scenarios. The `try_recv()` sync pattern used here won't work for `Lagged` detection — that requires the channel to overflow capacity (256 default), which means the test needs to publish 257+ messages without consuming them. That's a load-bearing edge case: the current capacity is 256, so the 257th message should produce a `Lagged` on the first subscriber. JOLT-RS-130's agent should check whether the next subscriber gets the full history or just the uncorrupted tail.
+- Multi-channel isolation: `subscribe("a")` + `subscribe("b")` + publish to "a" → only the "a" subscriber receives. Straightforward with the existing API.
+- The `subscribe()` method creates a channel via `or_insert_with` if it doesn't exist, same as `publish()`. This means calling `subscribe("ch")` with no publisher creates an empty channel — the receiver will block on `recv()` or return `TryRecvError::Empty` on `try_recv()`. This is intentional — subscribers should be able to pre-subscribe before any publisher exists. The DashMap entry persists until the channel has zero senders AND zero receivers (broadcast drops when all handles are gone).
