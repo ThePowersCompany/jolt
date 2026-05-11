@@ -7040,4 +7040,44 @@ mod sse {
             "on_shutdown must be called on drop (client disconnect)"
         );
     }
+
+    #[tokio::test]
+    async fn into_sse_response_with_keep_alive_sends_keep_alive_comments() {
+        use crate::into_sse_response_with_keep_alive;
+        use futures_util::stream;
+
+        struct IdleHandler;
+        impl SseHandler for IdleHandler {
+            fn on_ready(&mut self) -> SseStream {
+                Box::pin(stream::pending())
+            }
+        }
+
+        let sse_response =
+            into_sse_response_with_keep_alive(IdleHandler, Duration::from_millis(100)).await;
+        let response = sse_response.into_response();
+        let mut body = response.into_body();
+
+        // Block 500ms — keep_alive fires every 100ms, so several should arrive
+        let frame = tokio::time::timeout(Duration::from_millis(500), body.frame()).await;
+        assert!(
+            frame.is_ok(),
+            "first keep-alive comment must arrive within 500ms (100ms interval)"
+        );
+        assert!(
+            frame.unwrap().is_some(),
+            "keep-alive interval must produce a body frame"
+        );
+
+        // Second frame should arrive quickly after the first
+        let frame2 = tokio::time::timeout(Duration::from_millis(500), body.frame()).await;
+        assert!(
+            frame2.is_ok(),
+            "second keep-alive comment must arrive"
+        );
+        assert!(
+            frame2.unwrap().is_some(),
+            "second interval must produce a body frame"
+        );
+    }
 }

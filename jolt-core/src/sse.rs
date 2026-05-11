@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use axum::response::sse::Event as AxumSseEvent;
 use futures_util::stream::{empty, Stream};
+use tokio::time::{self, Instant, Sleep};
 
 /// A single SSE event.
 ///
@@ -133,15 +134,19 @@ pub trait SseHandler {
     }
 }
 
-/// Stream adapter that owns an [`SseHandler`] and calls `on_close` /
+/// Stream adapter that owns an [`SseHandler`], calls `on_close` /
 /// `on_shutdown` when the inner event stream terminates or is dropped
-/// (client disconnect).
+/// (client disconnect), and interleaves keep-alive comment events when
+/// the inner stream is idle.
 ///
 /// Not part of the public API — callers go through
 /// [`into_sse_response`].
 struct SseCleanupStream<H: SseHandler + Send + 'static> {
     inner: SseStream,
     handler: Option<H>,
+    last_event_time: Instant,
+    keep_alive_interval: Duration,
+    keep_alive_sleep: Pin<Box<Sleep>>,
 }
 
 impl<H: SseHandler + Send + 'static> Drop for SseCleanupStream<H> {
@@ -161,11 +166,18 @@ impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
     type Item = Result<AxumSseEvent, Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // SAFETY: we only access `inner` and `handler` through &mut, never
-        // move them out. `handler.take()` is a zero-sized pointer swap.
+        // SAFETY: we only access `inner` / `handler` / `last_event_time` /
+        // `keep_alive_interval` through &mut writes, and reset the sleep
+        // via `Pin::set`. `handler.take()` is a zero-sized pointer swap.
         let this = unsafe { self.as_mut().get_unchecked_mut() };
         match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(event)) => Poll::Ready(Some(Ok(AxumSseEvent::from(event)))),
+            Poll::Ready(Some(event)) => {
+                this.last_event_time = Instant::now();
+                this.keep_alive_sleep
+                    .as_mut()
+                    .reset(Instant::now() + this.keep_alive_interval);
+                Poll::Ready(Some(Ok(AxumSseEvent::from(event))))
+            }
             Poll::Ready(None) => {
                 if let Some(mut handler) = this.handler.take() {
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -177,16 +189,26 @@ impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
                 }
                 Poll::Ready(None)
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match this.keep_alive_sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    this.keep_alive_sleep
+                        .as_mut()
+                        .reset(Instant::now() + this.keep_alive_interval);
+                    Poll::Ready(Some(Ok(
+                        AxumSseEvent::default().comment("keepalive"),
+                    )))
+                }
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
 
-/// Converts an [`SseHandler`] implementation into an axum SSE response.
+/// Converts an [`SseHandler`] implementation into an axum SSE response
+/// with a 15‑second keep‑alive comment interval.
 ///
-/// This is the wiring function that bridges the Jolt SSE trait to axum's
-/// wire-level SSE support.  Call it from an axum handler (or inside the
-/// `ws!` / `#[endpoint]` generation path) to serve SSE:
+/// Delegates to [`into_sse_response_with_keep_alive`] with
+/// `Duration::from_secs(15)`.
 ///
 /// ```ignore
 /// async fn events_handler() -> impl IntoResponse {
@@ -200,14 +222,34 @@ impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
 /// 1. `handler.on_open().await`
 /// 2. `handler.on_ready()` stream is mapped to axum SSE events and written
 ///    to the response body.
-/// 3. When the stream ends (naturally) or the client disconnects,
+/// 3. When the inner stream is idle (no events produced), a keep-alive
+///    comment event (`: keepalive\\n\\n`) is emitted every 15 seconds to
+///    prevent proxy timeouts.
+/// 4. When the stream ends (naturally) or the client disconnects,
 ///    `handler.on_close()` and `handler.on_shutdown()` fire in a
 ///    background task.
-pub async fn into_sse_response<H: SseHandler + Send + 'static>(mut handler: H) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
+pub async fn into_sse_response<H: SseHandler + Send + 'static>(handler: H) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
+    into_sse_response_with_keep_alive(handler, Duration::from_secs(15)).await
+}
+
+/// Converts an [`SseHandler`] implementation into an axum SSE response
+/// with a configurable keep‑alive comment interval.
+///
+/// Same lifecycle as [`into_sse_response`], but `keep_alive` controls how
+/// often a `: keepalive\\n\\n` comment is sent when the inner stream is
+/// idle.
+pub async fn into_sse_response_with_keep_alive<H: SseHandler + Send + 'static>(
+    mut handler: H,
+    keep_alive: Duration,
+) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
     handler.on_open().await;
     let inner = handler.on_ready();
+    let now = Instant::now();
     axum::response::Sse::new(SseCleanupStream {
         inner,
         handler: Some(handler),
+        last_event_time: now,
+        keep_alive_interval: keep_alive,
+        keep_alive_sleep: Box::pin(time::sleep(keep_alive)),
     })
 }

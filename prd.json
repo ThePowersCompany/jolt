@@ -1973,7 +1973,7 @@
       "verification": [
         "Integration test: stream stays alive >30s with keep-alive comments."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-139",

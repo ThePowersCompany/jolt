@@ -5320,3 +5320,38 @@ Files changed:
 Blockers / next notes:
 - JOLT-RS-138 (priority 138): keep-alive comment events every 15s to prevent proxy timeouts. The `into_sse_response` function is now the entry point; 138 can add a keep-alive interleaver inside the `SseCleanupStream` or as an additional wrapper around the inner stream.
 - The `unsafe` in `poll_next` is intentional to avoid `Unpin` bound on `H`. If the codebase later adopts `pin-project` or similar, this can be migrated to `#[pin]`-annotated fields.
+
+## 2026-05-11 — JOLT-RS-138: SSE keep-alive comments every 15s
+
+PRD item: JOLT-RS-138 (priority 138, phase32-sse) — Implement keep-alive: every 15 seconds, send a comment event (": keepalive\n\n") to prevent proxy timeouts.
+
+Verification:
+- `cargo test -p jolt-core -- tests::sse` → 15/15 passed (14 prior + 1 new `into_sse_response_with_keep_alive_sends_keep_alive_comments`); 0 failed. The keep-alive test uses a 100ms interval to verify the mechanism in under 1s of wall-clock time.
+- `cargo test -p jolt-core --lib` → 254 passed, 0 failed.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Implemented keep-alive inside `SseCleanupStream` (the private stream adapter wrapping the inner `SseHandler` stream) rather than relying on axum's built-in `KeepAlive`. Three new fields on `SseCleanupStream`: `last_event_time: Instant`, `keep_alive_interval: Duration`, and `keep_alive_sleep: Pin<Box<Sleep>>`.
+- On each `poll_next`, after polling the inner stream:
+  * If inner yields `Ready(Some(event))`: update `last_event_time`, reset `keep_alive_sleep` to fire after `keep_alive_interval`, return the event as normal.
+  * If inner yields `Ready(None)`: cleanup handler (same as before).
+  * If inner yields `Pending`: poll `keep_alive_sleep`. If the sleep fired (idle for `keep_alive_interval`), emit `AxumSseEvent::default().comment("keepalive")` as a new item and reset the sleep.
+- Added public `into_sse_response_with_keep_alive(handler, Duration)` function so callers (and tests) can configure the interval. `into_sse_response` delegates to it with `Duration::from_secs(15)`. Both re-exported from `jolt_core`.
+- The keep-alive comment event uses axum's `Event::comment()` method (built-in SSE comment support), which serializes to `: keepalive\n\n` on the wire — matches the PRD spec verbatim.
+
+Test design:
+- Handler with `on_ready` returning `stream::pending()` (idle forever).
+- `into_sse_response_with_keep_alive` with 100ms interval.
+- First `body.frame()` call with 500ms timeout → should return a frame (keep-alive fires before timeout).
+- Second `body.frame()` call with 500ms timeout → should return a second frame.
+- No `tokio::time::advance` needed (avoided the `test-util` feature gate). Real-time testing with a short interval is fast (~200ms wall-clock) and simpler to maintain.
+
+Files changed:
+- jolt-core/src/sse.rs — added `use tokio::time::{self, Instant, Sleep};`; added 3 keep-alive fields to `SseCleanupStream`; updated `Stream` impl to interleave keep-alive on idle; split `into_sse_response` into `into_sse_response` (15s hardcoded) + `into_sse_response_with_keep_alive` (configurable); updated doc comments.
+- jolt-core/src/lib.rs — added `into_sse_response_with_keep_alive` to re-exports.
+- jolt-core/src/tests.rs — added `into_sse_response_with_keep_alive_sends_keep_alive_comments` test in `mod sse` (IdleHandler with `stream::pending()`, 100ms interval, two sequential frame reads with timeouts).
+- prd.json — JOLT-RS-138 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-139 (priority 139, phase33-background-tasks): define `Task` trait with `name()`, `interval()`, and `async fn run()`. First architectural item in phase33; opens background-task scheduling.
+- The keep-alive mechanism fires even when the inner stream is empty/idle. If a handler deliberately wants no keep-alive (e.g., the stream should go silent and let the client time out), use `into_sse_response_with_keep_alive(handler, Duration::MAX)` or add a `keep_alive: Option<Duration>` API later — out of scope for this item.
