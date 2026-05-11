@@ -7739,3 +7739,30 @@ mod task_retry {
         );
     }
 }
+
+mod optional {
+    use crate::Optional;
+
+    #[test]
+    fn construct_all_three_variants() {
+        let some: Optional<i32> = Optional::Some(42);
+        assert!(some.is_some());
+        assert!(!some.is_null());
+        assert!(!some.is_not_provided());
+
+        let null: Optional<i32> = Optional::Null;
+        assert!(!null.is_some());
+        assert!(null.is_null());
+        assert!(!null.is_not_provided());
+
+        let not_provided: Optional<i32> = Optional::NotProvided;
+        assert!(!not_provided.is_some());
+        assert!(!not_provided.is_null());
+        assert!(not_provided.is_not_provided());
+    }
+
+    #[test]
+    fn default_is_not_provided() {
+        assert_eq!(Optional::<String>::default(), Optional::NotProvided);
+    }
+}

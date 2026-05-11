@@ -6015,3 +6015,29 @@ Notes for next iterations:
 - JOLT-RS-162 (priority 162): `Optional<T>` enum {Some(T), Null, NotProvided}. Already stubbed in `jolt-core/src/optional.rs` with is_some/is_null/is_not_provided/as_ref helpers but no Serialize/Deserialize impls (those are JOLT-RS-163/164). The PRD step is "Unit test: construct all three variants" — the stub already supports this.
 - JOLT-RS-163/164 add Serialize/Deserialize for Optional<T> — the tri-state serde behavior (Some = serialize inner; Null = serialize null; NotProvided = skip field) requires custom Serialize/Deserialize impls using the serde attributes or manual implementations.
 - JsonArray is a straightforward container — no edge cases beyond empty and non-empty JSON arrays. The serde transparent handling handles all serde_json::Value-compatible types.
+
+## 2026-05-11 — JOLT-RS-162: Optional<T> unit tests (closes phase38)
+
+PRD item: JOLT-RS-162 (priority 162, phase38-json-optional-types) — Define Optional<T> as enum: Some(T), Null, NotProvided. Unit test: construct all three variants.
+
+Verification:
+- `cargo test -p jolt-core -- tests::optional` → 2/2 passed, 0 failed.
+- `cargo test -p jolt-core --lib` → 275 passed, 0 failed (up from 273).
+- `cargo check --workspace` → all 5 crates check clean in 0.34s; no regressions.
+
+Note on harness instructions: same as prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- The Optional<T> enum {Some(T), Null, NotProvided} was already defined in `jolt-core/src/optional.rs` with Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash derives plus is_some()/is_null()/is_not_provided()/as_ref() helpers and a `Default for Optional<T>` returning NotProvided.
+- This PRD item only required a unit test proving all three variants can be constructed. Added `tests::optional::construct_all_three_variants` (constructs + asserts is_some/is_null/is_not_provided for each variant) and `tests::optional::default_is_not_provided` (asserts Default gives NotProvided).
+- Did NOT touch the existing optional.rs production code — it already satisfied the enum definition. The tests are the only addition.
+- Serialize/Deserialize are explicitly NOT in scope for this item — they are JOLT-RS-163 and JOLT-RS-164.
+
+Files changed:
+- jolt-core/src/tests.rs — added `mod optional` with 2 unit tests.
+- prd.json — JOLT-RS-162 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-163 (priority 163): Implement Serialize for Optional<T> — Some(v) serializes v, Null serializes null, NotProvided skips the field entirely. Requires a custom `impl Serialize for Optional<T>` using `serialize_struct` + `serialize_field` / `skip_serializing_field`. Tricky: NotProvided must NOT appear in the serialized output at all, which means the containing struct's Serialize impl must also cooperate (or the custom serialize impl must not emit anything for the field).
+- JOLT-RS-164 (priority 164): Implement Deserialize for Optional<T> — present non-null → Some(v), present null → Null, absent → NotProvided. Requires a custom `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Optional<T>` visitor pattern.
+- Optional<T> already compiles and is used by the patch query codegen path (phase26-27). Serialize/Deserialize concerns are independent of the enum definition.
