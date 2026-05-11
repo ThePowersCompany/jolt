@@ -18,6 +18,7 @@ pub mod response;
 pub mod router;
 pub mod server;
 pub mod status;
+pub mod websocket;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
 pub use auth_jwt::{AuthJwtLayer, AuthJwtService};
@@ -56,6 +57,14 @@ pub use response::{JsonBody, Response};
 pub use router::Router;
 pub use server::{CorsConfig, JoltServer, TlsConfig};
 pub use status::StatusCode;
+// JOLT-RS-118 surface: the WebSocket lifecycle trait (five async callbacks
+// with no-op defaults) plus its placeholder sender/message companions.
+// JOLT-RS-119 will flesh out `WebSocketSender` with send/send_text/send_json/
+// close methods; JOLT-RS-120 will add the `WsMessage` variants and the axum
+// `Message` ↔ `WsMessage` mapping. Re-exported at the crate root so user
+// crates `use jolt_core::WebSocketHandler;` without needing to know the
+// internal module layout.
+pub use websocket::{WebSocketHandler, WebSocketSender, WsMessage};
 
 // Re-export `inventory` so the `#[endpoint]` macro can emit
 // `::jolt_core::inventory::submit!` without forcing every user crate to add
