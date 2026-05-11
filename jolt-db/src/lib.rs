@@ -1976,7 +1976,10 @@ mod tests {
     }
     }
 
-    // ---- JOLT-RS-086: JoltDb::query_as + TypedQuery<T> ----
+    // ---- JOLT-RS-086/087: JoltDb::query_as + TypedQuery<T> query helpers ----
+
+    mod query_helpers {
+        use super::{DbConfig, JoltDb, TypedQuery};
 
     /// Compile-time pin: `JoltDb::query_as::<T>(sql)` returns
     /// `TypedQuery<T>` (decision 10). A regression that wraps the return
@@ -2156,6 +2159,7 @@ mod tests {
             .await
             .expect("fetch_one of SELECT $1::int4 AS v with bind(42)");
         assert_eq!(row.v, 42);
+    }
     }
 
     // ---- JOLT-RS-088: JoltDb::transaction ----

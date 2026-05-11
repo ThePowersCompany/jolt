@@ -1259,7 +1259,7 @@
       "verification": [
         "Unit test: each fetch variant works for 0/1/N rows."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-088",
