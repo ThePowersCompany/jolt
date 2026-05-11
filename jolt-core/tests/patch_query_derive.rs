@@ -161,3 +161,40 @@ fn to_patch_query_where_clause_uses_id_column() {
     let (sql, _params) = patch.to_patch_query("user_id", &42u64);
     assert!(sql.contains("WHERE user_id"), "WHERE clause must use id_column, got: {sql}");
 }
+
+// ── JOLT-RS-116: $N parameter notation + no value interpolation ──
+
+#[test]
+fn to_patch_query_uses_dollar_n_placeholders() {
+    let patch = AccountPatch {
+        display_name: Optional::Some("Alice".to_string()),
+        bio: "Engineer".to_string(),
+        follower_count: 0,
+    };
+    let (sql, params) = patch.to_patch_query("id", &99u64);
+
+    assert!(sql.contains("$1"), "SET clause must use $1 placeholder, got: {sql}");
+    assert!(sql.contains("$2"), "SET clause must use $2 placeholder, got: {sql}");
+    assert!(sql.contains("$3"), "SET clause must use $3 placeholder, got: {sql}");
+    assert!(sql.contains("$4"), "WHERE clause must use $4 placeholder, got: {sql}");
+    assert_eq!(params.len(), 4, "params must match $N placeholder count");
+}
+
+#[test]
+fn to_patch_query_never_interpolates_values_into_sql() {
+    let patch = AccountPatch {
+        display_name: Optional::Some("Alice".to_string()),
+        bio: "secret-bio-value".to_string(),
+        follower_count: 0,
+    };
+    let (sql, _params) = patch.to_patch_query("id", &99u64);
+
+    assert!(
+        !sql.contains("secret-bio-value"),
+        "SQL must not contain direct string value, got: {sql}"
+    );
+    assert!(
+        !sql.contains("Alice"),
+        "SQL must not contain direct string value, got: {sql}"
+    );
+}

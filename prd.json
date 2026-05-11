@@ -797,7 +797,7 @@
       "verification": [
         "cargo test -p jolt-macros -- tests::auto_middleware passes."
       ],
-        "passes": true
+      "passes": true
     },
     {
       "id": "JOLT-RS-055",
@@ -1280,9 +1280,9 @@
       "priority": 89,
       "phase": "phase20-db-queries",
       "category": "backend",
-      "description": "Write query helper tests: type mismatch → compile error (sqlx check), missing column → runtime error, transaction commit/rollback.",
+      "description": "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback.",
       "steps": [
-        "Write query helper tests: type mismatch → compile error (sqlx check), missing column → runtime error, transaction commit/rollback."
+        "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback."
       ],
       "verification": [
         "cargo test -p jolt-db -- tests::query_helpers passes."
@@ -1607,7 +1607,7 @@
         "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state."
       ],
       "verification": [
-        "Unit test: field typed Optional<String> → detected as Optional with inner String."
+        "Unit test: field typed Optional<String> \u2192 detected as Optional with inner String."
       ],
       "passes": true
     },
@@ -1665,7 +1665,7 @@
       "verification": [
         "Unit test: generated SQL uses $N placeholders, never string interpolation for values."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-117",

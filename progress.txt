@@ -4753,3 +4753,29 @@ Notes for next iterations:
 - JOLT-RS-116 (priority 116): "Generate parameterized query with $1, $2, ... bindings to prevent SQL injection." The `$N` placeholders are now the only value-referencing mechanism in generated SQL — column names come from field idents (compile-time), values come from `$N` + params. 116's verification ("generated SQL uses $N placeholders, never string interpolation for values") is essentially already satisfied. A dedicated test that regex-checks the generated TokenStream for bare value interpolation would lock it in.
 - JOLT-RS-117 (priority 117, closes phase27): closing test bundle — all-fields-Some, all-Null, mix, empty struct, table_name attribute.
 - The `Optional::Some` and plain-field arms are now identical in shape (both push `column = $N` + param). If future work wants to differentiate (e.g. Optional values get COALESCE), the arms are ready to diverge again.
+
+## 2026-05-11 — JOLT-RS-116: $N parameter notation verification
+
+PRD item: JOLT-RS-116 (priority 116, phase27-patchquery-codegen) — Generate parameterized query with $1, $2, ... bindings to prevent SQL injection. Column names are compile-time identifiers (no injection risk).
+
+Verification:
+- `cargo test -p jolt-macros` → 185 passed, 0 failed.
+- `cargo test -p jolt-core --test patch_query_derive` → 12 passed, 0 failed.
+- `cargo check --workspace` → clean in 0.94s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..115 — npm/Bun commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added a unit test in jolt-macros `expand_to_patch_query_uses_dollar_n_placeholders_not_value_interpolation` that asserts three properties of the generated TokenStream: (1) `= ${` appears (the `$N` parameter placeholder notation in SET clause format strings), (2) `params . push` exists (values go through parameter binding, not interpolation), (3) the UPDATE ... table_name pattern is present.
+- Added two integration tests in jolt-core/tests/patch_query_derive.rs: `to_patch_query_uses_dollar_n_placeholders` verifies $1 through $4 appear in the runtime-generated SQL string with correct param count; `to_patch_query_never_interpolates_values_into_sql` asserts that real string values ("Alice", "secret-bio-value") are never present in the SQL string (they travel through the params Vec instead).
+- $N notation was already implemented in JOLT-RS-115 (format strings changed from bare `{}` to `${}`). JOLT-RS-116 was purely a verification task — confirming the safety invariant that column names come from compile-time field identifiers (no injection risk) and values are always parameterized through `$N` + params Vec.
+- Did NOT change any production code — only added tests. The generated `to_patch_query` method already satisfied the safety contract; these tests pin it so a future refactor can't silently introduce string interpolation of values.
+
+Files changed:
+- jolt-macros/src/patch_query.rs — added 1 test `expand_to_patch_query_uses_dollar_n_placeholders_not_value_interpolation`.
+- jolt-core/tests/patch_query_derive.rs — added 2 tests `to_patch_query_uses_dollar_n_placeholders` and `to_patch_query_never_interpolates_values_into_sql`.
+- prd.json — JOLT-RS-116 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-117 (priority 117, closes phase27): closing test bundle — all-fields-Some, all-Null, mix, empty struct, table_name attribute. The integration tests already cover many of these cases (optional_some, optional_null, optional_not_provided, where_clause_uses_id_column). 117 can add an all‑Null test (SET col = NULL for every field) and an all‑NotProvided test (SET clause is empty → early return path).
+- The `#[allow(dead_code)]` on `PatchField::inner_type` remains. It will be consumed when type‑specific SQL encodings are needed (e.g., expressing Vec<T> as a postgres array literal vs. a JSON column).

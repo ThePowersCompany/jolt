@@ -1229,4 +1229,35 @@ mod tests {
             "param_idx must increment after each param push, got: {out}"
         );
     }
+
+    // ── JOLT-RS-116: $N parameter notation + no value interpolation ──
+
+    #[test]
+    fn expand_to_patch_query_uses_dollar_n_placeholders_not_value_interpolation() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                    email: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+
+        assert!(
+            out.contains("= ${"),
+            "$N placeholder notation (= ${{param_idx}}) must be used for SET clauses, got: {out}"
+        );
+        assert!(
+            out.contains("params . push"),
+            "values must be pushed via params.push, not interpolated into SQL, got: {out}"
+        );
+        assert!(
+            out.contains("UPDATE") && out.contains("users"),
+            "generated SQL must reference table name, got: {out}"
+        );
+    }
 }
