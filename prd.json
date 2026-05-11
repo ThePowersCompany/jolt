@@ -2281,7 +2281,7 @@
       "verification": [
         "Unit test: serde_json::from_str::<Json<User>> works same as User."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-161",

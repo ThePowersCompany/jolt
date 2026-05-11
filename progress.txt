@@ -5959,3 +5959,34 @@ Notes for next iterations:
 - Phase37-datetime-email-mime is now CLOSED. All 4 items (156/157/158/159) are passes: true.
 - The next unfinished PRD items are JOLT-RS-160 through JOLT-RS-176 (phase38 json-optional-types, phase39 tsexport-basic, phase40 tsexport-attributes, phase41 tsexport-enums). These are the types layer (Json, JsonArray, Optional<T>) and TypeScript typegen derive macros — belonging to jolt-macros and jolt-utils.
 - `content_type_for_path` allocates a String (via `format!`) even though the extension is short-lived. If this is called in a hot path (file-serving loop at request rate), the allocation can be avoided by using a fixed-size stack buffer: since dot extensions are ≤ 15 chars in practice, a `tinyvec::ArrayVec` or manual `[u8; 16]` would elide the heap. Not a concern for current PRD scope; flag for a future file-serving optimization pass.
+
+## 2026-05-11 — JOLT-RS-160: Json<T> serde-transparent newtype (opens phase38)
+
+PRD item: JOLT-RS-160 (priority 160, phase38-json-optional-types) — Define `Json<T>` newtype with `Deref<Target=T>`, `#[serde(transparent)]`. Opens phase38.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 93 passed (4 new json_types tests + 89 existing); 0 failed.
+- `cargo check --workspace` → clean in 1.74s; no regressions in any sibling crate.
+
+Key decisions:
+- No bounds on the struct definition (`pub struct Json<T>(pub T)`, not `Json<T: Serialize + Deserialize>`). Follows idiomatic Rust serde convention — bounds belong on impl blocks that need them, not on the struct. serde's derive macros generate the correct bounds automatically on the `Serialize`/`Deserialize` impls.
+- `#[serde(transparent)]` ensures `Json<T>` serializes/deserializes identically to `T` — no wrapping layer visible in JSON. The PRD's parenthetical "(deserialize_as/serialize_as)" describes what transparent achieves, not separate serde attributes to use.
+- `Deref` and `DerefMut` both implemented — `DerefMut` not in the PRD steps but required by the framework's convention (callers need mutable access to the inner value when building responses). `PartialEq` and `Eq` derived alongside `Debug` and `Clone` for testability.
+- Module file is `json_types.rs` (not `json.rs`) — reserves the short name `json` for potential future deserialization helpers, and groups the phase38 types (Json, future JsonArray, future Optional) under one semantic namespace.
+- Re-exported at crate root via `pub use json_types::Json` (same ergonomic pattern as sibling re-exports).
+- Four inline tests in `#[cfg(test)] mod tests` block within `json_types.rs`:
+  1. `json_newtype_serializes_identically_to_inner` — `User` and `Json<User>` produce identical JSON strings.
+  2. `json_newtype_deserializes_identically_to_inner` — PRD-mandated verification: `serde_json::from_str::<Json<User>>` works same as `serde_json::from_str::<User>`.
+  3. `deref_accesses_inner` — `*json` matches the inner value.
+  4. `deref_mut_allows_mutation` — `Vec::push` through `&mut Json<Vec<i32>>` works via `DerefMut`.
+
+Files changed:
+- jolt-utils/src/json_types.rs (new) — `Json<T>` struct, `Deref` + `DerefMut` impls, 4 inline unit tests.
+- jolt-utils/src/lib.rs — added `pub mod json_types;` and `pub use json_types::Json;`.
+- prd.json — JOLT-RS-160 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-161 (priority 161): `JsonArray<T>` — same shape as `Json<T>` but wrapping `Vec<T>` with `Deref<Target=Vec<T>>`. Can share the same `json_types.rs` module file. Dedicated test: deserialize JSON array into `JsonArray<i32>`.
+- JOLT-RS-162 (priority 162): `Optional<T>` enum {Some(T), Null, NotProvided} — this is a jolt-core type per the PRD (used in patch queries and auto-middleware body extraction). Should live in jolt-core, not jolt-utils, since it's a request/response lifecycle primitive.
+- JOLT-RS-163/164 add Serialize/Deserialize for `Optional<T>` — same jolt-core home. The tri-state serialization (Some = serialize inner; Null = serialize null; NotProvided = skip field entirely) is the load-bearing UX for PATCH endpoint semantics.
+- Phase38 spans both jolt-utils (Json/JsonArray) and jolt-core (Optional<T> + serde impls). Keep the crate boundary clean: utility newtypes in jolt-utils, framework lifecycle types in jolt-core.

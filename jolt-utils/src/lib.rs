@@ -8,10 +8,13 @@
 
 pub mod datetime;
 pub mod email;
+pub mod json_types;
 pub mod jwt;
 pub mod mime;
 pub mod password;
 pub mod uuid;
+
+pub use json_types::Json;
 
 #[cfg(test)]
 mod tests;
