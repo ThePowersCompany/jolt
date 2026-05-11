@@ -4919,3 +4919,34 @@ Blockers / next notes:
 - **Subprotocol echo** — the `ws!` macro's `subprotocol = "..."` argument is parsed but not used at runtime. A future slice should echo the selected subprotocol back in the 101 response's `Sec-WebSocket-Protocol` header.
 - **`__WsMacroWitness` type is now dead code** — defined in `jolt-core/src/websocket.rs` but no longer referenced by the macro expansion or any test. Remove in a tracker cleanup pass.
 - **The `Default` bound on `WebSocketHandler` is load-bearing for `ws!`** since the macro constructs the handler via `<T>::default()`. If a future PRD item wants to thread a pre-constructed handler state (e.g. `Arc<AppState>`) into `ws!`, the `default()` construction will need to change to accept a closure or an already-constructed instance.
+
+## 2026-05-11 — JOLT-RS-125: ws! integration test with message exchange (closes phase29)
+
+PRD item: JOLT-RS-125 (priority 125, phase29-ws-macro) — "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected." Closes phase29.
+
+Verification:
+- `cargo test -p jolt-core --test ws_integration` → 2 passed (valid_token_upgrade_and_message_exchange, invalid_token_is_rejected_with_401); 0 failed; finished in 0.00s.
+- `cargo check --workspace` → clean in 0.58s; no regressions.
+
+Note on harness instructions: cargo is the verification tool.
+
+Key decisions:
+- Created `jolt-core/tests/ws_integration.rs` as a dedicated integration test binary (the PRD verification target is `cargo test --test ws_integration`). Tests live alongside the existing `ws_macro.rs` integration test and complement its upgrade/lifecycle coverage with actual WebSocket message framing.
+- **Manual WebSocket framing** (no `tokio-tungstenite` dep): implemented `build_masked_frame`, `send_text_frame`, `send_close_frame`, `recv_frame`, `recv_frame_raw`, and `send_pong` helpers. Client-to-server frames are always masked (RFC 6455 §5.3); server-to-client frames are unmasked. Supports payload lengths <126 bytes only (test payloads are short strings); extended-length frame encoding is present for 126/127 but not exercised.
+- **Echo handler with static-based received log:** `EchoHandler` echoes text messages back (`send_text` in `on_message`) and records received messages into a `OnceLock<Mutex<Vec<String>>>`. The `ws!` macro constructs the handler via `Default::default()`, so the static is the only way to observe handler-side state without external construction.
+- Two tests:
+  1. `valid_token_upgrade_and_message_exchange`: connects with valid token, verifies 101 upgrade, receives "welcome" server-side text (pinned from `on_open` via `send_text("welcome")`), sends "hello" (masked text frame), receives echo back (unmasked text frame), verifies handler-side received log contains "hello", sends close frame, verifies server responds with close frame.
+  2. `invalid_token_is_rejected_with_401`: connects with bad token, verifies 401 response, confirms no upgrade (no 101 in response).
+- Pong reply on ping: `recv_frame` detects server pings (opcode 0x9) and replies with a masked pong frame, preventing the server from tearing down the connection before message exchange completes.
+- Mask key derived from `SystemTime::now().as_nanos()` — deterministic enough for test repeatability, random enough to satisfy the RFC's "random 32-bit value" requirement for test purposes.
+- `recv_frame_raw` returns the raw frame bytes for opcode 0x8 (close) to verify the close handshake; returns `None` on timeout or non-close frames.
+
+Files changed:
+- jolt-core/tests/ws_integration.rs (new) — 2 integration tests with WebSocket framing helpers.
+- prd.json — JOLT-RS-125 passes: true.
+
+Blockers / next notes:
+- **phase29-ws-macro is now CLOSED.** All four items (122/123/124/125) are passes: true. The ws! macro is fully implemented and integration-tested for upgrade, auth, lifecycle, and message exchange.
+- **JOLT-RS-126 (priority 126, opens phase30-pubsub-core):** Define `PubSub` struct holding `DashMap<String, broadcast::Sender<PubSubMessage>>` with a broadcast capacity constant. No dependency on phase29 — can proceed immediately.
+- **Subprotocol echo** — still deferred. The `subprotocol = "..."` argument to `ws!` is parsed but not used at runtime.
+- **`__WsMacroWitness` type is dead code** — defined in `jolt-core/src/websocket.rs` but no longer imported or referenced anywhere. Can be removed in a cleanup pass.
