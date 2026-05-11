@@ -6807,3 +6807,72 @@ mod pubsub {
         }
     }
 }
+
+mod sse {
+    use crate::{SseEvent, SseHandler, SseStream};
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    struct UnitHandler;
+
+    impl SseHandler for UnitHandler {}
+
+    struct TickHandler {
+        count: u32,
+    }
+
+    impl SseHandler for TickHandler {
+        fn on_ready(&mut self) -> SseStream {
+            let c = self.count;
+            let s = futures_util::stream::iter((0..c).map(move |i| SseEvent {
+                data: format!("tick-{}", i),
+            }));
+            Box::pin(s)
+        }
+    }
+
+    #[test]
+    fn no_override_compiles_with_defaults() {
+        fn _assert_impls_handler<T: SseHandler>() {}
+        _assert_impls_handler::<UnitHandler>();
+    }
+
+    #[tokio::test]
+    async fn default_on_open_completes_without_panicking() {
+        let mut h = UnitHandler;
+        h.on_open().await;
+    }
+
+    #[tokio::test]
+    async fn default_on_close_completes_without_panicking() {
+        let mut h = UnitHandler;
+        h.on_close().await;
+    }
+
+    #[tokio::test]
+    async fn default_on_shutdown_completes_without_panicking() {
+        let mut h = UnitHandler;
+        h.on_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn default_on_ready_returns_empty_stream() {
+        let mut h = UnitHandler;
+        let stream = h.on_ready();
+        tokio::pin!(stream);
+        let next = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+        assert!(next.is_err() || next.unwrap().is_none(), "default on_ready must be empty");
+    }
+
+    #[tokio::test]
+    async fn custom_on_ready_stream_produces_items() {
+        let mut h = TickHandler { count: 3 };
+        let stream = h.on_ready();
+        tokio::pin!(stream);
+        let mut items = Vec::new();
+        while let Some(event) = stream.next().await {
+            items.push(event.data);
+        }
+        assert_eq!(items, vec!["tick-0", "tick-1", "tick-2"]);
+    }
+}

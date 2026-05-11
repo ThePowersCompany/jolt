@@ -5222,3 +5222,40 @@ Files changed:
 Blockers / next notes:
 - JOLT-RS-135 (priority 135, phase32-sse): define `SseHandler` trait with on_open / on_ready → Stream / on_close / on_shutdown. First SSE item. Phase32 opens.
 - The `ws!` macro's limitation (no pubsub injection) is now load-bearing for its integration tests. If/when the macro gains a `pubsub = ...` named argument, this test can be rewritten to use `ws!` with the new arg — but the manual raw-axum approach remains the canonical test pattern for verifying pubsub integration regardless of macro sugar.
+
+## 2026-05-11 — JOLT-RS-135: SseHandler trait (opens phase32-sse)
+
+PRD item: JOLT-RS-135 (priority 135, phase32-sse) — Define `SseHandler` trait with `on_open` / `on_ready` → stream / `on_close` / `on_shutdown` lifecycle methods. First SSE item; opens phase32.
+
+Verification:
+- `cargo check --workspace` → clean in 1.27s; no regressions.
+- `cargo test -p jolt-core --lib` → 245 passed, 0 failed (up from 239; 6 new `tests::sse` tests).
+- `cargo test -p jolt-core -- tests::sse` → 6/6 passed.
+
+Note on harness instructions: same as all prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Created `jolt-core/src/sse.rs` with three public shapes: (1) `pub struct SseEvent { pub data: String }` — a minimal stub carrying only the mandatory `data` field (JOLT-RS-136 fleshes out the optional `name`, `id`, `retry` fields and the `From<SseEvent> for axum::response::sse::Event` mapping); (2) `pub type SseStream = Pin<Box<dyn Stream<Item = SseEvent> + Send>>` — the boxed return type for `on_ready`, mirroring the `EndpointFuture` type-alias pattern used by the `Endpoint` trait; (3) `pub trait SseHandler` with four lifecycle methods, all carrying default no-op implementations.
+- Picked `#[allow(async_fn_in_trait)]` + boxed `SseStream` return type for `on_ready` rather than an `impl Stream` RPITIT. Rationale: `on_open`, `on_close`, `on_shutdown` follow the same `#[allow(async_fn_in_trait)]` pattern as the existing `WebSocketHandler` trait (118); `on_ready` cannot use `async fn` (it returns a Stream, not a Future), so a named type alias + Box::pin is the conventional stable-Rust path. The trait remains usable as a trait bound in generic code (not trait-object-able, but the SSE endpoint adapter in 137 will use `impl SseHandler` generics rather than `Box<dyn>`, per the axum SSE pattern).
+- Default `on_ready` returns `Box::pin(futures_util::stream::empty())` (terminates immediately). Handlers that need a non-empty event stream override only this one method.
+- `SseEvent.data` is the only field — the minimal viable shape for a trait that compiles. JOLT-RS-136 will add `name: Option<String>`, `id: Option<String>`, `retry: Option<u64>` and the axum SSE Event mapping without changing the trait signature.
+- Re-exported `SseEvent`, `SseHandler`, `SseStream` at the crate root via `pub use sse::{...}` — same ergonomic pattern as `WebSocketHandler`, `WsMessage`, `WebSocketSender`.
+
+Tests added (6 in `tests::sse`):
+- `no_override_compiles_with_defaults` — compile-time witness via `fn _assert_impls_handler<T: SseHandler>() {}` on a unit struct that overrides nothing.
+- `default_on_open_completes_without_panicking` / `default_on_close_completes_without_panicking` / `default_on_shutdown_completes_without_panicking` — three `#[tokio::test]` runtime witnesses that the async no-op defaults return `()` without panicking.
+- `default_on_ready_returns_empty_stream` — `on_ready()` on the unit-struct handler yields a stream that produces `None` within 50ms (resolves immediately).
+- `custom_on_ready_stream_produces_items` — a `TickHandler` with `count: 3` overrides `on_ready` to produce a stream of three `SseEvent`s; the test collects them all and asserts exact data match.
+
+Files changed:
+- jolt-core/src/sse.rs (new) — `SseEvent` stub, `SseStream` type alias, `SseHandler` trait with 4 lifecycle methods.
+- jolt-core/src/lib.rs — added `pub mod sse;` and `pub use sse::{SseEvent, SseHandler, SseStream};`.
+- jolt-core/src/tests.rs — added `mod sse` with 6 tests.
+- prd.json — JOLT-RS-135 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-136 (priority 136): flesh out `SseEvent` with name/id/retry optional fields + `From<SseEvent> for axum::response::sse::Event`. Depends on the trait from 135 and the stub `SseEvent` field shape.
+- JOLT-RS-137 (priority 137): SSE endpoint adapter that creates `axum::response::Sse` from `handler.on_ready()` stream. Will use `impl SseHandler` generics (not trait objects) since `#[allow(async_fn_in_trait)]` methods can't be dispatched through `Box<dyn SseHandler>` — the axum SSE handler will be a concrete generic function `async fn sse_handler<H: SseHandler>(...) -> Sse<...>`.
+- `on_ready` default returns an empty stream. The 137 adapter should detect the empty-stream edge case (e.g., immediate `None` on first poll) and log a warning or return a 204-like response — defer that to 137's implementation.
+- No new workspace dependencies. `futures-util` (for `Stream` trait and `stream::empty()`) and `tokio-stream` are already deps of jolt-core.
+- The `SseEvent` stub deliberately omits `#[derive(Debug, Clone)]` — JOLT-RS-136 will decide the derive surface when adding the axum mapping.

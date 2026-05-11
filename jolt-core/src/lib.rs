@@ -21,6 +21,7 @@ pub mod request_ext;
 pub mod response;
 pub mod router;
 pub mod server;
+pub mod sse;
 pub mod status;
 pub mod to_sql;
 pub mod websocket;
@@ -66,6 +67,7 @@ pub use request_ext::RequestExt;
 pub use response::{JsonBody, Response};
 pub use router::Router;
 pub use server::{CorsConfig, JoltServer, TlsConfig};
+pub use sse::{SseEvent, SseHandler, SseStream};
 pub use status::StatusCode;
 // JOLT-RS-118 surface: the WebSocket lifecycle trait (five async callbacks
 // with no-op defaults).
