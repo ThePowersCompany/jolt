@@ -6189,3 +6189,27 @@ Notes for next iterations:
 - JOLT-RS-170 (priority 170): `#[ts(flatten)]` field inlining. Requires parsing bare `#[ts(flatten)]` (Meta::Path, not NameValue) and storing a `flatten: bool` on `TsExportField`. The `parse_ts_rename_from_attrs` helper's loop structure is the template — add a `parse_ts_flatten_from_attrs` or extend the existing helper to return a struct carrying both values.
 - JOLT-RS-171 (priority 171): JSDoc comment generation from /// doc comments. Requires reading `field.attrs` for `syn::Meta::NameValue` where path is `doc`, extracting the string, and storing as `doc: Option<String>` on `TsExportField`.
 - JOLT-RS-172 (priority 172): closing attribute test bundle. Tests rename + flatten + doc comments and their combinations on the same struct.
+
+## 2026-05-11 — JOLT-RS-170: #[ts(flatten)] attribute support
+
+PRD item: JOLT-RS-170 (priority 170, phase40-tsexport-attributes) — Support `#[ts(flatten)]` on fields: inline the field's TS interface properties into the parent interface instead of nesting.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 224 passed, 0 failed (new: 4 flatten tests + removed the combo test that would need multi-item attribute parsing).
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Added `is_flatten: bool` to `TsExportField` struct. Defaults `false` when no `#[ts(flatten)]` attribute is present.
+- Added `parse_ts_flatten_from_attrs(attrs: &[syn::Attribute]) -> bool` function, following the same loop-over-`#[ts(...)]`-attributes pattern as `parse_ts_rename_from_attrs`. For `#[ts(flatten)]`, the inner Meta is `Meta::Path(path)` (bare word, no value), unlike rename which is `Meta::NameValue`.
+- Used `let Ok`/`let Some` pattern instead of the `?` operator since the function returns `bool` not `Option`.
+- Emits per-field `__JOLT_TS_EXPORT_flatten_N: bool` marker consts in `expand_ts_export` — `true` when flattened, `false` otherwise.
+- Added 4 tests: `flatten_detected_on_field` (flatten=true), `no_flatten_emits_false_marker` (absence→false), `mixed_flattened_and_non_flattened_fields` (three fields with correct interleaving), `flatten_persists_on_unmapped_type` (flatten works even on unknown TS types).
+- Did NOT add a combo `flatten + rename` test because the current `parse_args()` (single-item) parser doesn't handle `#[ts(flatten, rename = "...")]` yet. That's deferred to JOLT-RS-172's combination tests, which will need to switch to `parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)` for multi-item attribute lists.
+
+Files changed:
+- jolt-macros/src/ts_export.rs — added `is_flatten` field, `parse_ts_flatten_from_attrs`, wired into `parse_struct_fields`, added `field_flatten_markers` emission in `expand_ts_export`, 4 new tests.
+- prd.json — JOLT-RS-170 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-171 (priority 171): JSDoc comment generation from /// doc comments. Requires reading `field.attrs` for doc attributes, extracting the string, and storing as `doc: Option<String>` on `TsExportField`.
+- JOLT-RS-172 (priority 172): closing attribute test bundle. Should include the multi-item `#[ts(flatten, rename = "...")]` combo test once the attribute parser is upgraded to handle comma-separated items.

@@ -21,7 +21,7 @@
     "Zero-copy optimizations that complicate the initial port."
   ],
   "product_decisions": [
-    "Middleware short-circuits via a RequestExt extension flag (req.markAsFinished \u2192 finished: AtomicBool).",
+    "Middleware short-circuits via a RequestExt extension flag (req.markAsFinished → finished: AtomicBool).",
     "Optional<T> is a tri-state enum: Some(T), Null (explicit JSON null), NotProvided (field absent).",
     "WebSocket auth extracts JWT from Sec-WebSocket-Protocol header before upgrade.",
     "Pub/sub maps to tokio::sync::broadcast channels keyed by name in a DashMap.",
@@ -165,7 +165,7 @@
         "Implement From<StatusCode> for axum::http::StatusCode and Display for StatusCode."
       ],
       "verification": [
-        "Unit test: StatusCode::NotFound \u2192 axum StatusCode 404."
+        "Unit test: StatusCode::NotFound → axum StatusCode 404."
       ],
       "passes": true
     },
@@ -202,12 +202,12 @@
       "priority": 12,
       "phase": "phase02-request-type",
       "category": "backend",
-      "description": "Request Type: Implement Request::header(name: &str) \u2192 Option<&str>.",
+      "description": "Request Type: Implement Request::header(name: &str) → Option<&str>.",
       "steps": [
-        "Implement Request::header(name: &str) \u2192 Option<&str>."
+        "Implement Request::header(name: &str) → Option<&str>."
       ],
       "verification": [
-        "Unit test: set header X-Test \u2192 header(\"x-test\") returns Some(\"value\")."
+        "Unit test: set header X-Test → header(\"x-test\") returns Some(\"value\")."
       ],
       "passes": true
     },
@@ -216,9 +216,9 @@
       "priority": 13,
       "phase": "phase02-request-type",
       "category": "backend",
-      "description": "Request Type: Implement Request::query(key: &str) \u2192 Option<&str> and Request::json::<T: DeserializeOwned>() \u2192 Result<T>.",
+      "description": "Request Type: Implement Request::query(key: &str) → Option<&str> and Request::json::<T: DeserializeOwned>() → Result<T>.",
       "steps": [
-        "Implement Request::query(key: &str) \u2192 Option<&str> and Request::json::<T: DeserializeOwned>() \u2192 Result<T>."
+        "Implement Request::query(key: &str) → Option<&str> and Request::json::<T: DeserializeOwned>() → Result<T>."
       ],
       "verification": [
         "Unit test: query(\"page\") returns Some(\"1\"), json body deserializes into struct."
@@ -230,9 +230,9 @@
       "priority": 14,
       "phase": "phase02-request-type",
       "category": "backend",
-      "description": "Request Type: Implement Request::cookie(key: &str) \u2192 Option<&Cookie> and Request::has_finished() \u2192 bool (reads RequestExt flag).",
+      "description": "Request Type: Implement Request::cookie(key: &str) → Option<&Cookie> and Request::has_finished() → bool (reads RequestExt flag).",
       "steps": [
-        "Implement Request::cookie(key: &str) \u2192 Option<&Cookie> and Request::has_finished() \u2192 bool (reads RequestExt flag)."
+        "Implement Request::cookie(key: &str) → Option<&Cookie> and Request::has_finished() → bool (reads RequestExt flag)."
       ],
       "verification": [
         "Unit test: cookie extraction and finished-flag reading work."
@@ -263,7 +263,7 @@
         "Implement Into<axum::response::Response> for Response<T> where T: Serialize: serialize body as JSON, set content-type: application/json, set status."
       ],
       "verification": [
-        "Unit test: Response::new(Ok, json_val).into() \u2192 axum Response with correct JSON body and headers."
+        "Unit test: Response::new(Ok, json_val).into() → axum Response with correct JSON body and headers."
       ],
       "passes": true
     },
@@ -277,7 +277,7 @@
         "Implement Into<axum::response::Response> for Response<String> and Response<&str> with content-type: text/plain."
       ],
       "verification": [
-        "Unit test: Response<String> \u2192 text/plain response."
+        "Unit test: Response<String> → text/plain response."
       ],
       "passes": true
     },
@@ -319,7 +319,7 @@
         "Implement RequestExt::mark_finished() and RequestExt::is_finished()."
       ],
       "verification": [
-        "Unit test: mark_finished() \u2192 is_finished() returns true."
+        "Unit test: mark_finished() → is_finished() returns true."
       ],
       "passes": true
     },
@@ -356,9 +356,9 @@
       "priority": 23,
       "phase": "phase05-server-builder",
       "category": "backend",
-      "description": "Server Builder: Implement JoltServer::new() \u2192 Self with sensible defaults (port 8080, threads = num_cpus).",
+      "description": "Server Builder: Implement JoltServer::new() → Self with sensible defaults (port 8080, threads = num_cpus).",
       "steps": [
-        "Implement JoltServer::new() \u2192 Self with sensible defaults (port 8080, threads = num_cpus)."
+        "Implement JoltServer::new() → Self with sensible defaults (port 8080, threads = num_cpus)."
       ],
       "verification": [
         "Unit test: JoltServer::new() has port=8080."
@@ -370,9 +370,9 @@
       "priority": 24,
       "phase": "phase05-server-builder",
       "category": "backend",
-      "description": "Server Builder: Implement builder methods: port(u16) \u2192 Self, threads(usize) \u2192 Self, cors(CorsConfig) \u2192 Self.",
+      "description": "Server Builder: Implement builder methods: port(u16) → Self, threads(usize) → Self, cors(CorsConfig) → Self.",
       "steps": [
-        "Implement builder methods: port(u16) \u2192 Self, threads(usize) \u2192 Self, cors(CorsConfig) \u2192 Self."
+        "Implement builder methods: port(u16) → Self, threads(usize) → Self, cors(CorsConfig) → Self."
       ],
       "verification": [
         "Unit test: chained .port(3000).threads(4) sets values."
@@ -384,9 +384,9 @@
       "priority": 25,
       "phase": "phase05-server-builder",
       "category": "backend",
-      "description": "Server Builder: Implement JoltServer::start(self, router: Router) \u2192 starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown.",
+      "description": "Server Builder: Implement JoltServer::start(self, router: Router) → starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown.",
       "steps": [
-        "Implement JoltServer::start(self, router: Router) \u2192 starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown."
+        "Implement JoltServer::start(self, router: Router) → starts axum on configured port, binds to 0.0.0.0, uses tokio::signal for graceful shutdown."
       ],
       "verification": [
         "Manual: server starts, curl localhost:8080 returns 404 (empty router)."
@@ -398,9 +398,9 @@
       "priority": 26,
       "phase": "phase05-server-builder",
       "category": "backend",
-      "description": "Server Builder: Implement JoltServer::endpoint<E: Endpoint>(self) \u2192 Self to register an endpoint into the internal registry.",
+      "description": "Server Builder: Implement JoltServer::endpoint<E: Endpoint>(self) → Self to register an endpoint into the internal registry.",
       "steps": [
-        "Implement JoltServer::endpoint<E: Endpoint>(self) \u2192 Self to register an endpoint into the internal registry."
+        "Implement JoltServer::endpoint<E: Endpoint>(self) → Self to register an endpoint into the internal registry."
       ],
       "verification": [
         "Unit test: register an endpoint, verify it appears in registry."
@@ -459,7 +459,7 @@
         "Implement EndpointRegistry::sort(): sort by path length descending (longest path first) to ensure /api/hello matches before /api."
       ],
       "verification": [
-        "Unit test: sort [/\", \"/api/hello\", \"/api\"] \u2192 [\"/api/hello\", \"/api\", \"/\"].\""
+        "Unit test: sort [/\", \"/api/hello\", \"/api\"] → [\"/api/hello\", \"/api\", \"/\"].\""
       ],
       "passes": true
     },
@@ -468,9 +468,9 @@
       "priority": 31,
       "phase": "phase06-endpoint-registry",
       "category": "backend",
-      "description": "Endpoint Registry: Implement EndpointRegistry::build_router() \u2192 axum::Router: iterate sorted endpoints, add routes matching method + path.",
+      "description": "Endpoint Registry: Implement EndpointRegistry::build_router() → axum::Router: iterate sorted endpoints, add routes matching method + path.",
       "steps": [
-        "Implement EndpointRegistry::build_router() \u2192 axum::Router: iterate sorted endpoints, add routes matching method + path."
+        "Implement EndpointRegistry::build_router() → axum::Router: iterate sorted endpoints, add routes matching method + path."
       ],
       "verification": [
         "Unit test: build_router from two endpoints produces an axum Router with correct routes."
@@ -515,7 +515,7 @@
         "Router::call(): parse path + method from request, match against sorted endpoint registry. On match, call handler. On no match, return 404."
       ],
       "verification": [
-        "Unit test: registered GET /hello \u2192 GET /hello returns 200, GET /unknown returns 404."
+        "Unit test: registered GET /hello → GET /hello returns 200, GET /unknown returns 404."
       ],
       "passes": true
     },
@@ -529,7 +529,7 @@
         "Integrate finished-flag check: after each response, if RequestExt is finished, return response immediately without calling handler."
       ],
       "verification": [
-        "Unit test: auth middleware sets finished \u2192 handler body is never invoked, response is 401."
+        "Unit test: auth middleware sets finished → handler body is never invoked, response is 401."
       ],
       "passes": true
     },
@@ -538,9 +538,9 @@
       "priority": 36,
       "phase": "phase07-router-tower-service",
       "category": "backend",
-      "description": "Router Tower Service: Implement Router::new(registry: EndpointRegistry) \u2192 Self constructor with optional tower Layer stack.",
+      "description": "Router Tower Service: Implement Router::new(registry: EndpointRegistry) → Self constructor with optional tower Layer stack.",
       "steps": [
-        "Implement Router::new(registry: EndpointRegistry) \u2192 Self constructor with optional tower Layer stack."
+        "Implement Router::new(registry: EndpointRegistry) → Self constructor with optional tower Layer stack."
       ],
       "verification": [
         "Unit test: Router::new() yields ready-to-serve axum Router."
@@ -585,7 +585,7 @@
         "Scan the impl block for methods annotated with #[get], #[post], #[put], #[patch], #[delete]. Collect method sigs (name, args, return type)."
       ],
       "verification": [
-        "Unit test: impl block with #[get] fn hello(...) \u2192 found method 'hello' tagged as GET."
+        "Unit test: impl block with #[get] fn hello(...) → found method 'hello' tagged as GET."
       ],
       "passes": true
     },
@@ -599,7 +599,7 @@
         "Validate each method signature: first arg must be &self, must return Result<Response<T>, E> or Response<T>. Error on mismatch with clear span."
       ],
       "verification": [
-        "Unit test: method with wrong signature \u2192 compile error with descriptive message."
+        "Unit test: method with wrong signature → compile error with descriptive message."
       ],
       "passes": true
     },
@@ -608,12 +608,12 @@
       "priority": 41,
       "phase": "phase08-endpoint-macro-parsing",
       "category": "backend",
-      "description": "Generate a match per discovered method mapping (Method, path) \u2192 handler fn.",
+      "description": "Generate a match per discovered method mapping (Method, path) → handler fn.",
       "steps": [
-        "Generate a match per discovered method mapping (Method, path) \u2192 handler fn."
+        "Generate a match per discovered method mapping (Method, path) → handler fn."
       ],
       "verification": [
-        "Unit test: two methods (get + post) \u2192 generated code has two match arms."
+        "Unit test: two methods (get + post) → generated code has two match arms."
       ],
       "passes": true
     },
@@ -636,9 +636,9 @@
       "priority": 43,
       "phase": "phase09-endpoint-macro-codegen",
       "category": "backend",
-      "description": "Generate handler wrapper: converts the user's fn(Request) \u2192 impl Into<axum::Response> into a tower-compatible async fn.",
+      "description": "Generate handler wrapper: converts the user's fn(Request) → impl Into<axum::Response> into a tower-compatible async fn.",
       "steps": [
-        "Generate handler wrapper: converts the user's fn(Request) \u2192 impl Into<axum::Response> into a tower-compatible async fn."
+        "Generate handler wrapper: converts the user's fn(Request) → impl Into<axum::Response> into a tower-compatible async fn."
       ],
       "verification": [
         "Handler wrapper compiles and can be called with a Request."
@@ -664,9 +664,9 @@
       "priority": 45,
       "phase": "phase09-endpoint-macro-codegen",
       "category": "backend",
-      "description": "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() \u2192 server returns 200 at GET /ping.",
+      "description": "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() → server returns 200 at GET /ping.",
       "steps": [
-        "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() \u2192 server returns 200 at GET /ping."
+        "Write integration test: define endpoint struct with #[endpoint(\"/ping\")], #[get] fn ping() → server returns 200 at GET /ping."
       ],
       "verification": [
         "cargo test --test endpoint_integration passes."
@@ -697,7 +697,7 @@
         "Detect body fields: any field typed T where T: DeserializeOwned (not Request, not QueryParams). Mark as body-candidate."
       ],
       "verification": [
-        "Unit test: field body: CreateUserRequest \u2192 detected as body field."
+        "Unit test: field body: CreateUserRequest → detected as body field."
       ],
       "passes": true
     },
@@ -711,7 +711,7 @@
         "Detect query_params fields: field typed QueryParams<T> or HashMap<String, String>. Mark for query extraction."
       ],
       "verification": [
-        "Unit test: field query: QueryParams<Filters> \u2192 detected as query field."
+        "Unit test: field query: QueryParams<Filters> → detected as query field."
       ],
       "passes": true
     },
@@ -725,7 +725,7 @@
         "Detect Request reference fields: field typed &Request or Request. Mark for req injection."
       ],
       "verification": [
-        "Unit test: field req: &Request \u2192 detected as request injection."
+        "Unit test: field req: &Request → detected as request injection."
       ],
       "passes": true
     },
@@ -739,7 +739,7 @@
         "Detect #[cors] attribute on the struct itself (not fields). Generate flag for CORS middleware inclusion."
       ],
       "verification": [
-        "Unit test: #[cors] on struct \u2192 CORS flag set to true in generated code."
+        "Unit test: #[cors] on struct → CORS flag set to true in generated code."
       ],
       "passes": true
     },
@@ -762,9 +762,9 @@
       "priority": 52,
       "phase": "phase11-automiddleware-layer-codegen",
       "category": "backend",
-      "description": "Generate middleware call chain in order: auth \u2192 cors \u2192 log \u2192 parse-query \u2192 parse-body \u2192 user-defined middlewares \u2192 handler.",
+      "description": "Generate middleware call chain in order: auth → cors → log → parse-query → parse-body → user-defined middlewares → handler.",
       "steps": [
-        "Generate middleware call chain in order: auth \u2192 cors \u2192 log \u2192 parse-query \u2192 parse-body \u2192 user-defined middlewares \u2192 handler."
+        "Generate middleware call chain in order: auth → cors → log → parse-query → parse-body → user-defined middlewares → handler."
       ],
       "verification": [
         "Ordering logic generates correct chained calls."
@@ -823,7 +823,7 @@
         "Implement CorsLayer as tower::Layer: on OPTIONS request, return 204 with Access-Control-Allow-Origin, Allow-Methods, Allow-Headers, Access-Control-Max-Age headers. Set RequestExt::mark_finished()."
       ],
       "verification": [
-        "Unit test: OPTIONS /api/test \u2192 204 with CORS headers, finished flag set."
+        "Unit test: OPTIONS /api/test → 204 with CORS headers, finished flag set."
       ],
       "passes": true
     },
@@ -837,7 +837,7 @@
         "On non-OPTIONS requests, inject Access-Control-Allow-Origin (and optionally Access-Control-Expose-Headers) into the response."
       ],
       "verification": [
-        "Unit test: GET /api/test \u2192 response includes CORS origin header."
+        "Unit test: GET /api/test → response includes CORS origin header."
       ],
       "passes": true
     },
@@ -865,7 +865,7 @@
         "Implement ParseBodyLayer as tower::Layer: reads request body bytes into Vec<u8>. If the middleware struct has a body: T field, attempt serde_json::from_slice::<T>."
       ],
       "verification": [
-        "Unit test: valid JSON body \u2192 T populated in middleware struct."
+        "Unit test: valid JSON body → T populated in middleware struct."
       ],
       "passes": true
     },
@@ -879,7 +879,7 @@
         "On deserialization failure, return Response::bad_request() with error message (\"Invalid JSON: ...\") and set RequestExt::mark_finished()."
       ],
       "verification": [
-        "Unit test: invalid JSON \u2192 400 response with error details."
+        "Unit test: invalid JSON → 400 response with error details."
       ],
       "passes": true
     },
@@ -893,7 +893,7 @@
         "Support String body extraction: if the body field is typed String or &str, read body as UTF-8 string."
       ],
       "verification": [
-        "Unit test: POST with text/plain body \u2192 extracted as String."
+        "Unit test: POST with text/plain body → extracted as String."
       ],
       "passes": true
     },
@@ -902,9 +902,9 @@
       "priority": 62,
       "phase": "phase13-body-parsing",
       "category": "backend",
-      "description": "Write body parsing unit tests: empty body \u2192 error, oversized body \u2192 error, valid JSON \u2192 success, string body \u2192 success.",
+      "description": "Write body parsing unit tests: empty body → error, oversized body → error, valid JSON → success, string body → success.",
       "steps": [
-        "Write body parsing unit tests: empty body \u2192 error, oversized body \u2192 error, valid JSON \u2192 success, string body \u2192 success."
+        "Write body parsing unit tests: empty body → error, oversized body → error, valid JSON → success, string body → success."
       ],
       "verification": [
         "cargo test -p jolt-core -- tests::parse_body passes."
@@ -921,7 +921,7 @@
         "Implement ParseQueryLayer as tower::Layer: extract query string from request URI, parse into key-value pairs."
       ],
       "verification": [
-        "Unit test: ?id=42 \u2192 id parsed as \"42\"."
+        "Unit test: ?id=42 → id parsed as \"42\"."
       ],
       "passes": true
     },
@@ -935,7 +935,7 @@
         "Implement typed extraction for int (i32, i64, u32): parse from string, error on non-numeric. float (f32, f64): parse with .parse()."
       ],
       "verification": [
-        "Unit test: ?count=5 \u2192 i32::from_str(\"5\") == 5. ?count=abc \u2192 400."
+        "Unit test: ?count=5 → i32::from_str(\"5\") == 5. ?count=abc → 400."
       ],
       "passes": true
     },
@@ -949,7 +949,7 @@
         "Implement typed extraction for bool (\"true\"/\"false\"/\"1\"/\"0\"), String (pass-through), enum (TryFrom<&str>)."
       ],
       "verification": [
-        "Unit test: ?active=true \u2192 bool true. ?sort=asc \u2192 enum Sort::Asc."
+        "Unit test: ?active=true → bool true. ?sort=asc → enum Sort::Asc."
       ],
       "passes": true
     },
@@ -963,7 +963,7 @@
         "Implement Vec<T> extraction: comma-separated values (?ids=1,2,3) parsed element-by-element."
       ],
       "verification": [
-        "Unit test: ?ids=1,2,3 \u2192 Vec<i32> = [1,2,3]."
+        "Unit test: ?ids=1,2,3 → Vec<i32> = [1,2,3]."
       ],
       "passes": true
     },
@@ -972,9 +972,9 @@
       "priority": 67,
       "phase": "phase14-query-parsing",
       "category": "backend",
-      "description": "Write query parsing unit tests: missing param \u2192 error, wrong type \u2192 400, all supported types round-trip.",
+      "description": "Write query parsing unit tests: missing param → error, wrong type → 400, all supported types round-trip.",
       "steps": [
-        "Write query parsing unit tests: missing param \u2192 error, wrong type \u2192 400, all supported types round-trip."
+        "Write query parsing unit tests: missing param → error, wrong type → 400, all supported types round-trip."
       ],
       "verification": [
         "cargo test -p jolt-core -- tests::parse_query passes."
@@ -1033,7 +1033,7 @@
         "Implement AuthBearerLayer: extract Authorization header, validate format is \"Bearer <token>\". On missing/invalid format, return 401 + mark_finished."
       ],
       "verification": [
-        "Unit test: no Authorization header \u2192 401."
+        "Unit test: no Authorization header → 401."
       ],
       "passes": true
     },
@@ -1047,7 +1047,7 @@
         "Validate JWT token using jolt_utils::jwt::decode with configured secret and algorithm. On failure (expired, bad signature), return 401 + mark_finished."
       ],
       "verification": [
-        "Unit test: valid token \u2192 passes, expired token \u2192 401."
+        "Unit test: valid token → passes, expired token → 401."
       ],
       "passes": true
     },
@@ -1061,7 +1061,7 @@
         "On success, parse claims into JwtClaims, inject into request extensions (req.extensions_mut().insert(claims))."
       ],
       "verification": [
-        "Unit test: valid token \u2192 JwtClaims available via req.extensions().get::<JwtClaims>()."
+        "Unit test: valid token → JwtClaims available via req.extensions().get::<JwtClaims>()."
       ],
       "passes": true
     },
@@ -1089,7 +1089,7 @@
         "Extract token from Sec-WebSocket-Protocol request header (format: \"jolt-jwt, <token>\")."
       ],
       "verification": [
-        "Unit test: header \"jolt-jwt, eyJ...\" \u2192 extracted token \"eyJ...\"."
+        "Unit test: header \"jolt-jwt, eyJ...\" → extracted token \"eyJ...\"."
       ],
       "passes": true
     },
@@ -1103,7 +1103,7 @@
         "Validate token before allowing WebSocket upgrade. On invalid token, return 401 and do not upgrade."
       ],
       "verification": [
-        "Integration test: WS connect with invalid token \u2192 401 response, no upgrade."
+        "Integration test: WS connect with invalid token → 401 response, no upgrade."
       ],
       "passes": true
     },
@@ -1117,7 +1117,7 @@
         "On valid token, complete the upgrade and inject JwtClaims into the WS handler."
       ],
       "verification": [
-        "Integration test: WS connect with valid token \u2192 upgrade succeeds, handler has claims."
+        "Integration test: WS connect with valid token → upgrade succeeds, handler has claims."
       ],
       "passes": true
     },
@@ -1131,7 +1131,7 @@
         "Each middleware layer (auth, cors, body, query, log) checks req.extensions().get::<RequestExt>()?.is_finished() before proceeding. If finished, return current response unchanged."
       ],
       "verification": [
-        "Unit test: auth sets finished \u2192 body parsing middleware is skipped."
+        "Unit test: auth sets finished → body parsing middleware is skipped."
       ],
       "passes": true
     },
@@ -1145,7 +1145,7 @@
         "Router checks finished flag after middleware chain: if finished, return the middleware-set response without calling the endpoint handler."
       ],
       "verification": [
-        "Unit test: middleware chain sets finished \u2192 endpoint handler never invoked, middleware response returned."
+        "Unit test: middleware chain sets finished → endpoint handler never invoked, middleware response returned."
       ],
       "passes": true
     },
@@ -1154,12 +1154,12 @@
       "priority": 80,
       "phase": "phase18-early-termination",
       "category": "backend",
-      "description": "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner \u2192 outer).",
+      "description": "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner → outer).",
       "steps": [
-        "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner \u2192 outer)."
+        "Ensure the tower Service implementation propagates the finished response correctly through all Layer wrappers (inner → outer)."
       ],
       "verification": [
-        "Integration test: full middleware chain, auth rejects \u2192 401 returned, handler body never executed."
+        "Integration test: full middleware chain, auth rejects → 401 returned, handler body never executed."
       ],
       "passes": true
     },
@@ -1196,9 +1196,9 @@
       "priority": 83,
       "phase": "phase19-db-connection",
       "category": "backend",
-      "description": "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) \u2192 Result<Self, sqlx::Error>.",
+      "description": "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) → Result<Self, sqlx::Error>.",
       "steps": [
-        "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) \u2192 Result<Self, sqlx::Error>."
+        "Define JoltDb struct holding sqlx::PgPool. Implement JoltDb::connect(config: &DbConfig) → Result<Self, sqlx::Error>."
       ],
       "verification": [
         "Unit test (requires PG): JoltDb::connect() returns Ok."
@@ -1210,9 +1210,9 @@
       "priority": 84,
       "phase": "phase19-db-connection",
       "category": "backend",
-      "description": "Implement JoltDb::pool() \u2192 &PgPool getter. Implement health check: SELECT 1 query via pool.",
+      "description": "Implement JoltDb::pool() → &PgPool getter. Implement health check: SELECT 1 query via pool.",
       "steps": [
-        "Implement JoltDb::pool() \u2192 &PgPool getter. Implement health check: SELECT 1 query via pool."
+        "Implement JoltDb::pool() → &PgPool getter. Implement health check: SELECT 1 query via pool."
       ],
       "verification": [
         "Unit test: pool().acquire() succeeds, SELECT 1 returns row."
@@ -1238,12 +1238,12 @@
       "priority": 86,
       "phase": "phase20-db-queries",
       "category": "backend",
-      "description": "Implement db.query_as::<T>(sql, params...) \u2192 TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods.",
+      "description": "Implement db.query_as::<T>(sql, params...) → TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods.",
       "steps": [
-        "Implement db.query_as::<T>(sql, params...) \u2192 TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods."
+        "Implement db.query_as::<T>(sql, params...) → TypedQuery<T> with .fetch_all(), .fetch_one(), .fetch_optional() methods."
       ],
       "verification": [
-        "Unit test: query_as::<TestRow>(\"SELECT 1 AS id\") \u2192 fetch_one returns TestRow { id: 1 }."
+        "Unit test: query_as::<TestRow>(\"SELECT 1 AS id\") → fetch_one returns TestRow { id: 1 }."
       ],
       "passes": true
     },
@@ -1266,12 +1266,12 @@
       "priority": 88,
       "phase": "phase20-db-queries",
       "category": "backend",
-      "description": "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) \u2192 Future<Output = Result<T>>: begins, runs closure, commits/rollbacks.",
+      "description": "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) → Future<Output = Result<T>>: begins, runs closure, commits/rollbacks.",
       "steps": [
-        "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) \u2192 Future<Output = Result<T>>: begins, runs closure, commits/rollbacks."
+        "Implement db.transaction<F, T>(f: F) where F: FnOnce(&mut Transaction) → Future<Output = Result<T>>: begins, runs closure, commits/rollbacks."
       ],
       "verification": [
-        "Unit test: transaction that commits \u2192 changes persisted. Transaction that returns Err \u2192 rollback."
+        "Unit test: transaction that commits → changes persisted. Transaction that returns Err → rollback."
       ],
       "passes": true
     },
@@ -1280,9 +1280,9 @@
       "priority": 89,
       "phase": "phase20-db-queries",
       "category": "backend",
-      "description": "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback.",
+      "description": "Write query helper tests: type mismatch → compile error (sqlx check), missing column → runtime error, transaction commit/rollback.",
       "steps": [
-        "Write query helper tests: type mismatch \u2192 compile error (sqlx check), missing column \u2192 runtime error, transaction commit/rollback."
+        "Write query helper tests: type mismatch → compile error (sqlx check), missing column → runtime error, transaction commit/rollback."
       ],
       "verification": [
         "cargo test -p jolt-db -- tests::query_helpers passes."
@@ -1308,9 +1308,9 @@
       "priority": 91,
       "phase": "phase21-db-listen-notify",
       "category": "backend",
-      "description": "Implement JoltDb::listen(channel: &str) \u2192 impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications.",
+      "description": "Implement JoltDb::listen(channel: &str) → impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications.",
       "steps": [
-        "Implement JoltDb::listen(channel: &str) \u2192 impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications."
+        "Implement JoltDb::listen(channel: &str) → impl Stream<Item = PgNotification>: execute LISTEN <channel>, then stream notifications."
       ],
       "verification": [
         "Unit test: listen(\"test_ch\") yields a Stream."
@@ -1350,12 +1350,12 @@
       "priority": 94,
       "phase": "phase22-migration-files",
       "category": "backend",
-      "description": "Implement read_migration_files(dir: &str) \u2192 Vec<MigrationFile>: read .sql files, extract name and content, sort by filename.",
+      "description": "Implement read_migration_files(dir: &str) → Vec<MigrationFile>: read .sql files, extract name and content, sort by filename.",
       "steps": [
-        "Implement read_migration_files(dir: &str) \u2192 Vec<MigrationFile>: read .sql files, extract name and content, sort by filename."
+        "Implement read_migration_files(dir: &str) → Vec<MigrationFile>: read .sql files, extract name and content, sort by filename."
       ],
       "verification": [
-        "Unit test: two files 001_init.sql, 002_users.sql \u2192 sorted [001, 002]."
+        "Unit test: two files 001_init.sql, 002_users.sql → sorted [001, 002]."
       ],
       "passes": true
     },
@@ -1369,7 +1369,7 @@
         "Compute SHA-256 checksum of each migration file content (pre-hashing, store as hex string)."
       ],
       "verification": [
-        "Unit test: known content \u2192 SHA-256 matches expected hex."
+        "Unit test: known content → SHA-256 matches expected hex."
       ],
       "passes": true
     },
@@ -1392,9 +1392,9 @@
       "priority": 97,
       "phase": "phase22-migration-files",
       "category": "backend",
-      "description": "Write migration file reading tests: empty directory \u2192 empty vec, missing directory \u2192 error, non-sql files skipped.",
+      "description": "Write migration file reading tests: empty directory → empty vec, missing directory → error, non-sql files skipped.",
       "steps": [
-        "Write migration file reading tests: empty directory \u2192 empty vec, missing directory \u2192 error, non-sql files skipped."
+        "Write migration file reading tests: empty directory → empty vec, missing directory → error, non-sql files skipped."
       ],
       "verification": [
         "cargo test -p jolt-db -- tests::migration_files passes."
@@ -1411,7 +1411,7 @@
         "On JoltDb::connect(), auto-create _migrations table if not exists: id SERIAL PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW()."
       ],
       "verification": [
-        "Unit test: fresh DB \u2192 _migrations table created."
+        "Unit test: fresh DB → _migrations table created."
       ],
       "passes": true
     },
@@ -1425,7 +1425,7 @@
         "Read already-applied migrations from _migrations table, compare checksums to file checksums. Skip migrations with matching checksums."
       ],
       "verification": [
-        "Unit test: migration already applied \u2192 skipped on next run."
+        "Unit test: migration already applied → skipped on next run."
       ],
       "passes": true
     },
@@ -1439,7 +1439,7 @@
         "Apply new migrations in filename order within a transaction. After each migration, insert row into _migrations with name + checksum."
       ],
       "verification": [
-        "Unit test: empty DB with 2 migrations \u2192 both applied in order, both rows in _migrations."
+        "Unit test: empty DB with 2 migrations → both applied in order, both rows in _migrations."
       ],
       "passes": true
     },
@@ -1467,7 +1467,7 @@
         "Detect checksum mismatch: if a previously-applied migration's stored checksum != current file checksum, error with: \"Migration X has been modified since it was applied.\""
       ],
       "verification": [
-        "Unit test: change file content after apply \u2192 error on next run."
+        "Unit test: change file content after apply → error on next run."
       ],
       "passes": true
     },
@@ -1481,7 +1481,7 @@
         "Detect rollback: if a migration exists in _migrations table but the file is missing, error with: \"Migration X has been removed. Rollbacks are not supported.\""
       ],
       "verification": [
-        "Unit test: remove migration file after apply \u2192 error on next run."
+        "Unit test: remove migration file after apply → error on next run."
       ],
       "passes": true
     },
@@ -1490,12 +1490,12 @@
       "priority": 104,
       "phase": "phase24-migration-safety",
       "category": "backend",
-      "description": "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' \u2192 creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment.",
+      "description": "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' → creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment.",
       "steps": [
-        "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' \u2192 creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment."
+        "Implement CLI: bin 'jolt-db' with subcommand 'migrate new <name>' → creates timestamped file: migrations/YYYYMMDDHHMMSS_name.sql with placeholder comment."
       ],
       "verification": [
-        "Manual: cargo run -p jolt-db -- migrate new add_users \u2192 creates migrations/20260510120000_add_users.sql."
+        "Manual: cargo run -p jolt-db -- migrate new add_users → creates migrations/20260510120000_add_users.sql."
       ],
       "passes": true
     },
@@ -1532,12 +1532,12 @@
       "priority": 107,
       "phase": "phase25-templates",
       "category": "backend",
-      "description": "Implement TemplateEngine::render(template: &str, data: &impl Serialize) \u2192 Result<String>.",
+      "description": "Implement TemplateEngine::render(template: &str, data: &impl Serialize) → Result<String>.",
       "steps": [
-        "Implement TemplateEngine::render(template: &str, data: &impl Serialize) \u2192 Result<String>."
+        "Implement TemplateEngine::render(template: &str, data: &impl Serialize) → Result<String>."
       ],
       "verification": [
-        "Unit test: render \"hello.hbs\" with {\"name\": \"World\"} \u2192 \"Hello World\"."
+        "Unit test: render \"hello.hbs\" with {\"name\": \"World\"} → \"Hello World\"."
       ],
       "passes": true
     },
@@ -1593,7 +1593,7 @@
         "Parse #[patch(table_name)] attribute on the struct to extract the target table name."
       ],
       "verification": [
-        "Unit test: #[patch(\"users\")] \u2192 table_name = \"users\"."
+        "Unit test: #[patch(\"users\")] → table_name = \"users\"."
       ],
       "passes": true
     },
@@ -1607,7 +1607,7 @@
         "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state."
       ],
       "verification": [
-        "Unit test: field typed Optional<String> \u2192 detected as Optional with inner String."
+        "Unit test: field typed Optional<String> → detected as Optional with inner String."
       ],
       "passes": true
     },
@@ -1630,9 +1630,9 @@
       "priority": 114,
       "phase": "phase27-patchquery-codegen",
       "category": "backend",
-      "description": "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) \u2192 (String, Vec<&dyn ToSql>) that builds SET clause from present fields.",
+      "description": "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) → (String, Vec<&dyn ToSql>) that builds SET clause from present fields.",
       "steps": [
-        "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) \u2192 (String, Vec<&dyn ToSql>) that builds SET clause from present fields."
+        "Generate a method fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) → (String, Vec<&dyn ToSql>) that builds SET clause from present fields."
       ],
       "verification": [
         "Generated method compiles and returns (sql_string, params)."
@@ -1649,7 +1649,7 @@
         "For Optional::Some(val): add \"column = $N\" to SET clause, push val as parameter. For Optional::Null: add \"column = NULL\". For Optional::NotProvided: skip."
       ],
       "verification": [
-        "Unit test: Some(name) + NotProvided(email) + Null(bio) \u2192 SET name = $1, email = NULL WHERE id = $2."
+        "Unit test: Some(name) + NotProvided(email) + Null(bio) → SET name = $1, email = NULL WHERE id = $2."
       ],
       "passes": true
     },
@@ -1672,9 +1672,9 @@
       "priority": 117,
       "phase": "phase27-patchquery-codegen",
       "category": "backend",
-      "description": "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields \u2192 error or no-op), table_name attribute works.",
+      "description": "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields → error or no-op), table_name attribute works.",
       "steps": [
-        "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields \u2192 error or no-op), table_name attribute works."
+        "Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields → error or no-op), table_name attribute works."
       ],
       "verification": [
         "cargo test -p jolt-macros -- tests::patch_query passes."
@@ -1700,9 +1700,9 @@
       "priority": 119,
       "phase": "phase28-ws-trait",
       "category": "backend",
-      "description": "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) \u2192 Result<()>, send_text(text: &str) \u2192 Result<()>, send_json(val: &impl Serialize) \u2192 Result<()>, close().",
+      "description": "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) → Result<()>, send_text(text: &str) → Result<()>, send_json(val: &impl Serialize) → Result<()>, close().",
       "steps": [
-        "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) \u2192 Result<()>, send_text(text: &str) \u2192 Result<()>, send_json(val: &impl Serialize) \u2192 Result<()>, close()."
+        "Define WebSocketSender: wraps axum::extract::ws::WebSocket sender half. Methods: send(msg: WsMessage) → Result<()>, send_text(text: &str) → Result<()>, send_json(val: &impl Serialize) → Result<()>, close()."
       ],
       "verification": [
         "Unit test: sender.send_text(\"hi\") calls underlying WS send."
@@ -1719,7 +1719,7 @@
         "Define WsMessage: Text(String), Binary(Vec<u8>), Ping(Vec<u8>), Pong(Vec<u8>), Close(Option<CloseFrame>). Map axum WsMessage variants."
       ],
       "verification": [
-        "Unit test: axum Text message \u2192 WsMessage::Text."
+        "Unit test: axum Text message → WsMessage::Text."
       ],
       "passes": true
     },
@@ -1728,9 +1728,9 @@
       "priority": 121,
       "phase": "phase28-ws-trait",
       "category": "backend",
-      "description": "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order.",
+      "description": "Write WS trait unit test: mock WebSocketHandler, simulate open → message → close, verify callbacks fire in order.",
       "steps": [
-        "Write WS trait unit test: mock WebSocketHandler, simulate open \u2192 message \u2192 close, verify callbacks fire in order."
+        "Write WS trait unit test: mock WebSocketHandler, simulate open → message → close, verify callbacks fire in order."
       ],
       "verification": [
         "cargo test -p jolt-core -- tests::websocket passes."
@@ -1742,9 +1742,9 @@
       "priority": 122,
       "phase": "phase29-ws-macro",
       "category": "backend",
-      "description": "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) \u2192 generates an axum WS route with auth guard.",
+      "description": "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) → generates an axum WS route with auth guard.",
       "steps": [
-        "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) \u2192 generates an axum WS route with auth guard."
+        "Implement ws! macro: ws!(path, handler_type, subprotocol = \"proto\", auth_fn = fn_name) → generates an axum WS route with auth guard."
       ],
       "verification": [
         "Macro compiles and expands to valid code."
@@ -1756,12 +1756,12 @@
       "priority": 123,
       "phase": "phase29-ws-macro",
       "category": "backend",
-      "description": "auth_fn receives token: &str \u2192 Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available.",
+      "description": "auth_fn receives token: &str → Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available.",
       "steps": [
-        "auth_fn receives token: &str \u2192 Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available."
+        "auth_fn receives token: &str → Result<JwtClaims, AuthError>. On Err, return 401; on Ok, call handler.on_open with claims available."
       ],
       "verification": [
-        "Unit test: valid token \u2192 handler.on_open called. Invalid token \u2192 401."
+        "Unit test: valid token → handler.on_open called. Invalid token → 401."
       ],
       "passes": true
     },
@@ -1770,9 +1770,9 @@
       "priority": 125,
       "phase": "phase29-ws-macro",
       "category": "backend",
-      "description": "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected.",
+      "description": "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected.",
       "steps": [
-        "Write ws! integration test: define handler, register with ws! macro, connect with valid token \u2192 messages sent/received. Invalid token \u2192 rejected."
+        "Write ws! integration test: define handler, register with ws! macro, connect with valid token → messages sent/received. Invalid token → rejected."
       ],
       "verification": [
         "cargo test --test ws_integration passes."
@@ -1789,7 +1789,7 @@
         "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle."
       ],
       "verification": [
-        "Generated handler drives on_open \u2192 on_ready \u2192 on_message loop \u2192 on_close \u2192 on_shutdown."
+        "Generated handler drives on_open → on_ready → on_message loop → on_close → on_shutdown."
       ],
       "passes": true
     },
@@ -1831,7 +1831,7 @@
         "Implement PubSub::publish(&self, channel: &str, msg: PubSubMessage): get or create channel's sender, broadcast msg. Return number of receivers."
       ],
       "verification": [
-        "Unit test: 0 subscribers \u2192 publish returns 0. 1 subscriber \u2192 publish returns 1."
+        "Unit test: 0 subscribers → publish returns 0. 1 subscriber → publish returns 1."
       ],
       "passes": true
     },
@@ -1840,12 +1840,12 @@
       "priority": 129,
       "phase": "phase30-pubsub-core",
       "category": "backend",
-      "description": "Implement PubSub::subscribe(&self, channel: &str) \u2192 broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver).",
+      "description": "Implement PubSub::subscribe(&self, channel: &str) → broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver).",
       "steps": [
-        "Implement PubSub::subscribe(&self, channel: &str) \u2192 broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver)."
+        "Implement PubSub::subscribe(&self, channel: &str) → broadcast::Receiver<PubSubMessage>. Implement unsubscribe (drop receiver)."
       ],
       "verification": [
-        "Unit test: subscribe \u2192 get receiver. Publish \u2192 receiver gets message. Drop receiver \u2192 publish to 0."
+        "Unit test: subscribe → get receiver. Publish → receiver gets message. Drop receiver → publish to 0."
       ],
       "passes": true
     },
@@ -1873,7 +1873,7 @@
         "In WebSocketHandler::on_open, provide ws.subscribe(channel: &str) that calls PubSub::subscribe and spawns a tokio task to forward messages to WS sender."
       ],
       "verification": [
-        "Unit test: subscribe to \"chat\" channel, publish to \"chat\" \u2192 WS sender receives message."
+        "Unit test: subscribe to \"chat\" channel, publish to \"chat\" → WS sender receives message."
       ],
       "passes": true
     },
@@ -1887,7 +1887,7 @@
         "Forward task: loop over broadcast receiver, on each message call sender.send_text() or sender.send_json(). On receiver lag (Lagged(n)), log warning but continue."
       ],
       "verification": [
-        "Unit test: rapid publishes \u2192 all delivered, lagged handled gracefully."
+        "Unit test: rapid publishes → all delivered, lagged handled gracefully."
       ],
       "passes": true
     },
@@ -1901,7 +1901,7 @@
         "On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state)."
       ],
       "verification": [
-        "Unit test: WS close \u2192 receiver dropped, publish to channel has one fewer receiver."
+        "Unit test: WS close → receiver dropped, publish to channel has one fewer receiver."
       ],
       "passes": true
     },
@@ -1924,9 +1924,9 @@
       "priority": 135,
       "phase": "phase32-sse",
       "category": "backend",
-      "description": "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) \u2192 impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self).",
+      "description": "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) → impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self).",
       "steps": [
-        "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) \u2192 impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self)."
+        "Define SseHandler trait: async fn on_open(&mut self), async fn on_ready(&mut self) → impl Stream<Item = SseEvent>, async fn on_close(&mut self), async fn on_shutdown(&mut self)."
       ],
       "verification": [
         "Trait compiles."
@@ -1943,7 +1943,7 @@
         "Define SseEvent struct: name (Option<String>), data (String), id (Option<String>), retry (Option<u64>). Map to axum::response::sse::Event."
       ],
       "verification": [
-        "Unit test: SseEvent::new(\"message\", \"hello\") \u2192 axum SSE Event."
+        "Unit test: SseEvent::new(\"message\", \"hello\") → axum SSE Event."
       ],
       "passes": true
     },
@@ -1957,7 +1957,7 @@
         "Implement SSE endpoint adapter: creates axum::response::Sse from handler.on_ready() stream. Handles client disconnect (on_close)."
       ],
       "verification": [
-        "Integration test: GET /events \u2192 200 with text/event-stream, events streamed."
+        "Integration test: GET /events → 200 with text/event-stream, events streamed."
       ],
       "passes": true
     },
@@ -2013,7 +2013,7 @@
         "TaskScheduler::start(): for each registered task, spawn a tokio task with loop { task.run().await; sleep(task.interval()).await; }."
       ],
       "verification": [
-        "Unit test: register task with 100ms interval \u2192 run() called multiple times within 500ms."
+        "Unit test: register task with 100ms interval → run() called multiple times within 500ms."
       ],
       "passes": true
     },
@@ -2055,7 +2055,7 @@
         "Implement retry logic: on task.run() error, log warning, wait backoff_duration (exponential: 1s, 2s, 4s, max 60s), retry. Reset backoff on success."
       ],
       "verification": [
-        "Unit test: task fails 3 times, succeeds 4th \u2192 backoff increases then resets."
+        "Unit test: task fails 3 times, succeeds 4th → backoff increases then resets."
       ],
       "passes": true
     },
@@ -2069,7 +2069,7 @@
         "Implement graceful shutdown: on SIGTERM (tokio::signal::ctrl_c), set shutdown flag. Each task loop checks flag before next iteration."
       ],
       "verification": [
-        "Unit test: send ctrl_c \u2192 task loop exits cleanly."
+        "Unit test: send ctrl_c → task loop exits cleanly."
       ],
       "passes": true
     },
@@ -2083,7 +2083,7 @@
         "TaskScheduler::shutdown(): set flag, wait for all task join handles (with timeout). Log any tasks that didn't exit in time."
       ],
       "verification": [
-        "Unit test: shutdown \u2192 all tasks stop within timeout."
+        "Unit test: shutdown → all tasks stop within timeout."
       ],
       "passes": true
     },
@@ -2120,9 +2120,9 @@
       "priority": 149,
       "phase": "phase35-jwt-utils",
       "category": "backend",
-      "description": "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) \u2192 Result<String>. Algorithm enum: HS256, HS384, HS512.",
+      "description": "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) → Result<String>. Algorithm enum: HS256, HS384, HS512.",
       "steps": [
-        "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) \u2192 Result<String>. Algorithm enum: HS256, HS384, HS512."
+        "Implement jwt::encode(claims: &JwtClaims, secret: &[u8], algorithm: Algorithm) → Result<String>. Algorithm enum: HS256, HS384, HS512."
       ],
       "verification": [
         "Unit test: encode produces valid JWT string with three segments."
@@ -2134,12 +2134,12 @@
       "priority": 150,
       "phase": "phase35-jwt-utils",
       "category": "backend",
-      "description": "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) \u2192 Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation.",
+      "description": "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) → Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation.",
       "steps": [
-        "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) \u2192 Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation."
+        "Implement jwt::decode(token: &str, secret: &[u8], algorithm: Algorithm) → Result<JwtClaims>. Validate exp, nbf, iss, aud per jsonwebtoken::Validation."
       ],
       "verification": [
-        "Unit test: round-trip encode\u2192decode preserves claims. Expired token \u2192 decode error."
+        "Unit test: round-trip encode→decode preserves claims. Expired token → decode error."
       ],
       "passes": true
     },
@@ -2162,9 +2162,9 @@
       "priority": 152,
       "phase": "phase36-password-uuid",
       "category": "backend",
-      "description": "Implement Password::hash(plaintext: &str) \u2192 Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex).",
+      "description": "Implement Password::hash(plaintext: &str) → Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex).",
       "steps": [
-        "Implement Password::hash(plaintext: &str) \u2192 Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex)."
+        "Implement Password::hash(plaintext: &str) → Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex)."
       ],
       "verification": [
         "Unit test: hash returns non-empty hash and salt."
@@ -2176,12 +2176,12 @@
       "priority": 153,
       "phase": "phase36-password-uuid",
       "category": "backend",
-      "description": "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) \u2192 Result<bool>: recompute hash with same salt, compare.",
+      "description": "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) → Result<bool>: recompute hash with same salt, compare.",
       "steps": [
-        "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) \u2192 Result<bool>: recompute hash with same salt, compare."
+        "Implement Password::verify(plaintext: &str, hash_hex: &str, salt_hex: &str) → Result<bool>: recompute hash with same salt, compare."
       ],
       "verification": [
-        "Unit test: verify correct password \u2192 true, wrong password \u2192 false."
+        "Unit test: verify correct password → true, wrong password → false."
       ],
       "passes": true
     },
@@ -2190,9 +2190,9 @@
       "priority": 154,
       "phase": "phase36-password-uuid",
       "category": "backend",
-      "description": "Implement uuid_v4() \u2192 String and uuid_v7() \u2192 String using uuid crate.",
+      "description": "Implement uuid_v4() → String and uuid_v7() → String using uuid crate.",
       "steps": [
-        "Implement uuid_v4() \u2192 String and uuid_v7() \u2192 String using uuid crate."
+        "Implement uuid_v4() → String and uuid_v7() → String using uuid crate."
       ],
       "verification": [
         "Unit test: uuid_v4() is valid UUID v4 format, uuid_v7() is valid UUID v7."
@@ -2204,9 +2204,9 @@
       "priority": 155,
       "phase": "phase36-password-uuid",
       "category": "backend",
-      "description": "Write password + UUID tests: hash determinism (different salts \u2192 different hashes), verify edge cases, UUID uniqueness within 1000 generations.",
+      "description": "Write password + UUID tests: hash determinism (different salts → different hashes), verify edge cases, UUID uniqueness within 1000 generations.",
       "steps": [
-        "Write password + UUID tests: hash determinism (different salts \u2192 different hashes), verify edge cases, UUID uniqueness within 1000 generations."
+        "Write password + UUID tests: hash determinism (different salts → different hashes), verify edge cases, UUID uniqueness within 1000 generations."
       ],
       "verification": [
         "cargo test -p jolt-utils -- tests::password_uuid passes."
@@ -2218,12 +2218,12 @@
       "priority": 156,
       "phase": "phase37-datetime-email-mime",
       "category": "backend",
-      "description": "Implement parse_rfc3339(s: &str) \u2192 Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) \u2192 String.",
+      "description": "Implement parse_rfc3339(s: &str) → Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) → String.",
       "steps": [
-        "Implement parse_rfc3339(s: &str) \u2192 Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) \u2192 String."
+        "Implement parse_rfc3339(s: &str) → Result<DateTime<Utc>> using chrono. Implement format_rfc3339(dt: DateTime<Utc>) → String."
       ],
       "verification": [
-        "Unit test: round-trip parse\u2192format preserves timestamp."
+        "Unit test: round-trip parse→format preserves timestamp."
       ],
       "passes": true
     },
@@ -2232,12 +2232,12 @@
       "priority": 157,
       "phase": "phase37-datetime-email-mime",
       "category": "backend",
-      "description": "Implement is_valid_email(s: &str) \u2192 bool: contains @, non-empty local part, non-empty domain, domain contains dot.",
+      "description": "Implement is_valid_email(s: &str) → bool: contains @, non-empty local part, non-empty domain, domain contains dot.",
       "steps": [
-        "Implement is_valid_email(s: &str) \u2192 bool: contains @, non-empty local part, non-empty domain, domain contains dot."
+        "Implement is_valid_email(s: &str) → bool: contains @, non-empty local part, non-empty domain, domain contains dot."
       ],
       "verification": [
-        "Unit test: valid emails \u2192 true, invalid (no @, empty local, no dot) \u2192 false."
+        "Unit test: valid emails → true, invalid (no @, empty local, no dot) → false."
       ],
       "passes": true
     },
@@ -2246,9 +2246,9 @@
       "priority": 158,
       "phase": "phase37-datetime-email-mime",
       "category": "backend",
-      "description": "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html \u2192 text/html, .css \u2192 text/css, .js \u2192 application/javascript, .json \u2192 application/json, .png \u2192 image/png, etc.).",
+      "description": "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html → text/html, .css → text/css, .js → application/javascript, .json → application/json, .png → image/png, etc.).",
       "steps": [
-        "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html \u2192 text/html, .css \u2192 text/css, .js \u2192 application/javascript, .json \u2192 application/json, .png \u2192 image/png, etc.)."
+        "Define static MIME_TABLE: phf::Map<&str, &str> mapping common extensions to content types (.html → text/html, .css → text/css, .js → application/javascript, .json → application/json, .png → image/png, etc.)."
       ],
       "verification": [
         "Unit test: MIME_TABLE[\".html\"] == \"text/html\"."
@@ -2260,9 +2260,9 @@
       "priority": 159,
       "phase": "phase37-datetime-email-mime",
       "category": "backend",
-      "description": "Implement content_type_for_path(path: &str) \u2192 Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions.",
+      "description": "Implement content_type_for_path(path: &str) → Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions.",
       "steps": [
-        "Implement content_type_for_path(path: &str) \u2192 Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions."
+        "Implement content_type_for_path(path: &str) → Option<&str>: extract extension, lookup in MIME_TABLE. Fallback: None for unknown extensions."
       ],
       "verification": [
         "Unit test: content_type_for_path(\"style.css\") == Some(\"text/css\"), content_type_for_path(\"file.xyz\") == None."
@@ -2316,12 +2316,12 @@
       "priority": 163,
       "phase": "phase38-json-optional-types",
       "category": "backend",
-      "description": "Implement Serialize for Optional<T> where T: Serialize: Some(v) \u2192 serialize v, Null \u2192 serialize null, NotProvided \u2192 serialize nothing (skip field).",
+      "description": "Implement Serialize for Optional<T> where T: Serialize: Some(v) → serialize v, Null → serialize null, NotProvided → serialize nothing (skip field).",
       "steps": [
-        "Implement Serialize for Optional<T> where T: Serialize: Some(v) \u2192 serialize v, Null \u2192 serialize null, NotProvided \u2192 serialize nothing (skip field)."
+        "Implement Serialize for Optional<T> where T: Serialize: Some(v) → serialize v, Null → serialize null, NotProvided → serialize nothing (skip field)."
       ],
       "verification": [
-        "Unit test: serialize struct with Optional fields \u2192 JSON output correct."
+        "Unit test: serialize struct with Optional fields → JSON output correct."
       ],
       "passes": true
     },
@@ -2330,12 +2330,12 @@
       "priority": 164,
       "phase": "phase38-json-optional-types",
       "category": "backend",
-      "description": "Implement Deserialize for Optional<T> where T: Deserialize: present non-null \u2192 Some(v), present null \u2192 Null, absent \u2192 NotProvided.",
+      "description": "Implement Deserialize for Optional<T> where T: Deserialize: present non-null → Some(v), present null → Null, absent → NotProvided.",
       "steps": [
-        "Implement Deserialize for Optional<T> where T: Deserialize: present non-null \u2192 Some(v), present null \u2192 Null, absent \u2192 NotProvided."
+        "Implement Deserialize for Optional<T> where T: Deserialize: present non-null → Some(v), present null → Null, absent → NotProvided."
       ],
       "verification": [
-        "Unit test: JSON {\"a\": 1, \"b\": null} (no \"c\") \u2192 a=Some(1), b=Null, c=NotProvided."
+        "Unit test: JSON {\"a\": 1, \"b\": null} (no \"c\") → a=Some(1), b=Null, c=NotProvided."
       ],
       "passes": true
     },
@@ -2358,12 +2358,12 @@
       "priority": 166,
       "phase": "phase39-tsexport-basic",
       "category": "backend",
-      "description": "Map Rust types to TypeScript: String \u2192 string, i32/i64/u32/u64/f32/f64/usize \u2192 number, bool \u2192 boolean, Vec<T> \u2192 T[].",
+      "description": "Map Rust types to TypeScript: String → string, i32/i64/u32/u64/f32/f64/usize → number, bool → boolean, Vec<T> → T[].",
       "steps": [
-        "Map Rust types to TypeScript: String \u2192 string, i32/i64/u32/u64/f32/f64/usize \u2192 number, bool \u2192 boolean, Vec<T> \u2192 T[]."
+        "Map Rust types to TypeScript: String → string, i32/i64/u32/u64/f32/f64/usize → number, bool → boolean, Vec<T> → T[]."
       ],
       "verification": [
-        "Unit test: struct with all basic types \u2192 correct TS interface string."
+        "Unit test: struct with all basic types → correct TS interface string."
       ],
       "passes": true
     },
@@ -2372,12 +2372,12 @@
       "priority": 167,
       "phase": "phase39-tsexport-basic",
       "category": "backend",
-      "description": "Map generics: Option<T> \u2192 T | null, Json<T> \u2192 T, JsonArray<T> \u2192 T[]. Handle nested generics (Option<Vec<String>> \u2192 string[] | null).",
+      "description": "Map generics: Option<T> → T | null, Json<T> → T, JsonArray<T> → T[]. Handle nested generics (Option<Vec<String>> → string[] | null).",
       "steps": [
-        "Map generics: Option<T> \u2192 T | null, Json<T> \u2192 T, JsonArray<T> \u2192 T[]. Handle nested generics (Option<Vec<String>> \u2192 string[] | null)."
+        "Map generics: Option<T> → T | null, Json<T> → T, JsonArray<T> → T[]. Handle nested generics (Option<Vec<String>> → string[] | null)."
       ],
       "verification": [
-        "Unit test: Option<Vec<i32>> \u2192 number[] | null."
+        "Unit test: Option<Vec<i32>> → number[] | null."
       ],
       "passes": true
     },
@@ -2406,7 +2406,7 @@
         "Support #[ts(rename = \"newName\")] on fields: use newName as the TS property name instead of Rust field name."
       ],
       "verification": [
-        "Unit test: #[ts(rename = \"userId\")] field id \u2192 TS: userId: number."
+        "Unit test: #[ts(rename = \"userId\")] field id → TS: userId: number."
       ],
       "passes": true
     },
@@ -2420,9 +2420,9 @@
         "Support #[ts(flatten)] on fields: inline the field's TS interface properties into the parent interface instead of nesting."
       ],
       "verification": [
-        "Unit test: #[ts(flatten)] address: Address \u2192 Address fields appear directly in parent interface."
+        "Unit test: #[ts(flatten)] address: Address → Address fields appear directly in parent interface."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-171",
@@ -2434,7 +2434,7 @@
         "Convert /// doc comments on fields to JSDoc /** ... */ comments above TS properties."
       ],
       "verification": [
-        "Unit test: /// The user's name \u2192 /** The user's name */ name: string."
+        "Unit test: /// The user's name → /** The user's name */ name: string."
       ],
       "passes": false
     },
@@ -2457,12 +2457,12 @@
       "priority": 173,
       "phase": "phase41-tsexport-enums",
       "category": "backend",
-      "description": "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } \u2192 type Status = \"Active\" | \"Inactive\".",
+      "description": "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } → type Status = \"Active\" | \"Inactive\".",
       "steps": [
-        "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } \u2192 type Status = \"Active\" | \"Inactive\"."
+        "Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } → type Status = \"Active\" | \"Inactive\"."
       ],
       "verification": [
-        "Unit test: simple enum \u2192 TS string union."
+        "Unit test: simple enum → TS string union."
       ],
       "passes": false
     },
@@ -2471,12 +2471,12 @@
       "priority": 174,
       "phase": "phase41-tsexport-enums",
       "category": "backend",
-      "description": "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } \u2192 type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }.",
+      "description": "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } → type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }.",
       "steps": [
-        "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } \u2192 type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }."
+        "Handle Rust enum with variant data: generate TS tagged/discriminated union. e.g., enum Event { Login { user: String }, Logout } → type Event = { kind: \"Login\", user: string } | { kind: \"Logout\" }."
       ],
       "verification": [
-        "Unit test: union enum with data \u2192 TS tagged union."
+        "Unit test: union enum with data → TS tagged union."
       ],
       "passes": false
     },
@@ -2490,7 +2490,7 @@
         "Implement ts_export function attribute: #[ts_export] on a function returns its return type's TS definition. Aggregate via inventory."
       ],
       "verification": [
-        "Unit test: #[ts_export] fn \u2192 registers return type for types.d.ts."
+        "Unit test: #[ts_export] fn → registers return type for types.d.ts."
       ],
       "passes": false
     },
@@ -2583,12 +2583,12 @@
       "priority": 182,
       "phase": "phase43-tls",
       "category": "backend",
-      "description": "Implement JoltServer::tls(config: TlsConfig) \u2192 Self: loads cert + key, creates rustls::ServerConfig, stores in server builder.",
+      "description": "Implement JoltServer::tls(config: TlsConfig) → Self: loads cert + key, creates rustls::ServerConfig, stores in server builder.",
       "steps": [
-        "Implement JoltServer::tls(config: TlsConfig) \u2192 Self: loads cert + key, creates rustls::ServerConfig, stores in server builder."
+        "Implement JoltServer::tls(config: TlsConfig) → Self: loads cert + key, creates rustls::ServerConfig, stores in server builder."
       ],
       "verification": [
-        "Unit test: valid cert + key paths \u2192 config loaded. Invalid paths \u2192 error."
+        "Unit test: valid cert + key paths → config loaded. Invalid paths → error."
       ],
       "passes": false
     },
@@ -2602,7 +2602,7 @@
         "Implement SNI support: accept multiple (hostname, cert, key) tuples. Resolve based on client SNI extension."
       ],
       "verification": [
-        "Manual: server with two certs, connect to each hostname \u2192 correct cert served."
+        "Manual: server with two certs, connect to each hostname → correct cert served."
       ],
       "passes": false
     },
@@ -2616,7 +2616,7 @@
         "Implement client certificate trust list (mTLS): if client_ca_path is set, require client cert signed by that CA. On invalid cert, reject handshake."
       ],
       "verification": [
-        "Manual: curl --cert client.pem \u2192 200. curl without cert \u2192 TLS error."
+        "Manual: curl --cert client.pem → 200. curl without cert → TLS error."
       ],
       "passes": false
     },
@@ -2630,7 +2630,7 @@
         "Integrate tower_http::services::ServeDir as the final fallback route in the axum Router (after all endpoint routes)."
       ],
       "verification": [
-        "Request to /static/file.js \u2192 file served from static/ directory."
+        "Request to /static/file.js → file served from static/ directory."
       ],
       "passes": false
     },
@@ -2644,7 +2644,7 @@
         "Configure gzip compression via tower_http::compression::CompressionLayer for content types: text/*, application/javascript, application/json, text/css."
       ],
       "verification": [
-        "Manual: curl -H 'Accept-Encoding: gzip' /static/file.html \u2192 response is gzip-compressed."
+        "Manual: curl -H 'Accept-Encoding: gzip' /static/file.html → response is gzip-compressed."
       ],
       "passes": false
     },
@@ -2653,12 +2653,12 @@
       "priority": 187,
       "phase": "phase44-file-serving",
       "category": "backend",
-      "description": "Support Range requests: request with Range: bytes=0-1023 header \u2192 206 Partial Content with correct Content-Range. Handle multi-range requests.",
+      "description": "Support Range requests: request with Range: bytes=0-1023 header → 206 Partial Content with correct Content-Range. Handle multi-range requests.",
       "steps": [
-        "Support Range requests: request with Range: bytes=0-1023 header \u2192 206 Partial Content with correct Content-Range. Handle multi-range requests."
+        "Support Range requests: request with Range: bytes=0-1023 header → 206 Partial Content with correct Content-Range. Handle multi-range requests."
       ],
       "verification": [
-        "Unit test: Range: bytes=0-99 \u2192 206 with Content-Range: bytes 0-99/<total>."
+        "Unit test: Range: bytes=0-99 → 206 with Content-Range: bytes 0-99/<total>."
       ],
       "passes": false
     },
@@ -2672,7 +2672,7 @@
         "Set Cache-Control headers: static files get max-age=31536000 (1 year) with immutable flag if versioned (has hash in filename). Non-versioned get max-age=3600."
       ],
       "verification": [
-        "Manual: curl -I /static/app.abc123.js \u2192 Cache-Control: public, max-age=31536000, immutable."
+        "Manual: curl -I /static/app.abc123.js → Cache-Control: public, max-age=31536000, immutable."
       ],
       "passes": false
     },
@@ -2695,12 +2695,12 @@
       "priority": 190,
       "phase": "phase45-cookies-redirects",
       "category": "backend",
-      "description": "Implement parse_cookies(header_value: &str) \u2192 Vec<Cookie>: parse Cookie request header.",
+      "description": "Implement parse_cookies(header_value: &str) → Vec<Cookie>: parse Cookie request header.",
       "steps": [
-        "Implement parse_cookies(header_value: &str) \u2192 Vec<Cookie>: parse Cookie request header."
+        "Implement parse_cookies(header_value: &str) → Vec<Cookie>: parse Cookie request header."
       ],
       "verification": [
-        "Unit test: \"session=abc; theme=dark\" \u2192 two cookies extracted."
+        "Unit test: \"session=abc; theme=dark\" → two cookies extracted."
       ],
       "passes": false
     },
@@ -2709,9 +2709,9 @@
       "priority": 191,
       "phase": "phase45-cookies-redirects",
       "category": "backend",
-      "description": "Implement set_cookie(cookie: &Cookie) \u2192 axum http HeaderValue for Set-Cookie response header.",
+      "description": "Implement set_cookie(cookie: &Cookie) → axum http HeaderValue for Set-Cookie response header.",
       "steps": [
-        "Implement set_cookie(cookie: &Cookie) \u2192 axum http HeaderValue for Set-Cookie response header."
+        "Implement set_cookie(cookie: &Cookie) → axum http HeaderValue for Set-Cookie response header."
       ],
       "verification": [
         "Unit test: set_cookie builds correct Set-Cookie string with all attributes."
@@ -2723,12 +2723,12 @@
       "priority": 192,
       "phase": "phase45-cookies-redirects",
       "category": "backend",
-      "description": "Implement Redirect::to(url: &str) \u2192 Response (302 Found), Redirect::permanent(url: &str) \u2192 Response (301 Moved Permanently), Redirect::back(req: &Request) \u2192 Response (302 to Referer or / fallback).",
+      "description": "Implement Redirect::to(url: &str) → Response (302 Found), Redirect::permanent(url: &str) → Response (301 Moved Permanently), Redirect::back(req: &Request) → Response (302 to Referer or / fallback).",
       "steps": [
-        "Implement Redirect::to(url: &str) \u2192 Response (302 Found), Redirect::permanent(url: &str) \u2192 Response (301 Moved Permanently), Redirect::back(req: &Request) \u2192 Response (302 to Referer or / fallback)."
+        "Implement Redirect::to(url: &str) → Response (302 Found), Redirect::permanent(url: &str) → Response (301 Moved Permanently), Redirect::back(req: &Request) → Response (302 to Referer or / fallback)."
       ],
       "verification": [
-        "Unit test: Redirect::to(\"/login\") \u2192 302 response with Location: /login header."
+        "Unit test: Redirect::to(\"/login\") → 302 response with Location: /login header."
       ],
       "passes": false
     },
@@ -2751,9 +2751,9 @@
       "priority": 194,
       "phase": "phase46-error-handling",
       "category": "backend",
-      "description": "Implement JoltError for common types: serde_json::Error \u2192 400, sqlx::Error \u2192 500, std::io::Error \u2192 500, jsonwebtoken::errors::Error \u2192 401.",
+      "description": "Implement JoltError for common types: serde_json::Error → 400, sqlx::Error → 500, std::io::Error → 500, jsonwebtoken::errors::Error → 401.",
       "steps": [
-        "Implement JoltError for common types: serde_json::Error \u2192 400, sqlx::Error \u2192 500, std::io::Error \u2192 500, jsonwebtoken::errors::Error \u2192 401."
+        "Implement JoltError for common types: serde_json::Error → 400, sqlx::Error → 500, std::io::Error → 500, jsonwebtoken::errors::Error → 401."
       ],
       "verification": [
         "Unit test: each error type maps to correct status code."
@@ -2770,7 +2770,7 @@
         "Implement endpoint-level error handler: .or_else(|e| e.to_response()) on handler result. Errors become JSON { error: message } with correct status."
       ],
       "verification": [
-        "Unit test: endpoint returns Err(MyError) \u2192 response body {\"error\": \"...\"} with status 400."
+        "Unit test: endpoint returns Err(MyError) → response body {\"error\": \"...\"} with status 400."
       ],
       "passes": false
     },
@@ -2784,7 +2784,7 @@
         "Implement global fallback: tower Layer that catches panics in handlers, logs error, returns 500 {\"error\": \"Internal server error\"} without leaking details."
       ],
       "verification": [
-        "Unit test: handler panics \u2192 500 response, no stack trace in body."
+        "Unit test: handler panics → 500 response, no stack trace in body."
       ],
       "passes": false
     },
@@ -2840,7 +2840,7 @@
         "Implement GET /users handler: query all users from DB, return as JSON array. Use #[endpoint(\"/users\")], #[get], #[derive(AutoMiddleware)]."
       ],
       "verification": [
-        "curl GET /users \u2192 200 with user list JSON."
+        "curl GET /users → 200 with user list JSON."
       ],
       "passes": false
     },
@@ -2854,7 +2854,7 @@
         "Implement GET /users/:id handler: extract path param id, query single user by id, return 404 if not found."
       ],
       "verification": [
-        "curl GET /users/1 \u2192 200 with user JSON. curl GET /users/999 \u2192 404."
+        "curl GET /users/1 → 200 with user JSON. curl GET /users/999 → 404."
       ],
       "passes": false
     },
@@ -2868,7 +2868,7 @@
         "Implement POST /users handler: parse CreateUserRequest body (name, email), insert into DB, return created User with 201."
       ],
       "verification": [
-        "curl POST /users -d '{\"name\":\"Alice\",\"email\":\"a@b.com\"}' \u2192 201 with created user."
+        "curl POST /users -d '{\"name\":\"Alice\",\"email\":\"a@b.com\"}' → 201 with created user."
       ],
       "passes": false
     },
@@ -2882,7 +2882,7 @@
         "Implement PATCH /users/:id handler: use #[derive(PatchQuery)] on UpdateUserRequest, apply partial update to DB."
       ],
       "verification": [
-        "curl PATCH /users/1 -d '{\"name\":\"Bob\"}' \u2192 200 with updated user, email unchanged."
+        "curl PATCH /users/1 -d '{\"name\":\"Bob\"}' → 200 with updated user, email unchanged."
       ],
       "passes": false
     },
@@ -2896,7 +2896,7 @@
         "Implement DELETE /users/:id handler: delete user from DB, return 204 NoContent. Return 404 if user doesn't exist."
       ],
       "verification": [
-        "curl DELETE /users/1 \u2192 204. curl DELETE /users/1 again \u2192 404."
+        "curl DELETE /users/1 → 204. curl DELETE /users/1 again → 404."
       ],
       "passes": false
     },
@@ -2905,9 +2905,9 @@
       "priority": 205,
       "phase": "phase50-example-ws-chat",
       "category": "backend",
-      "description": "Define ChatHandler struct implementing WebSocketHandler: on_open \u2192 subscribe to \"chat\" channel. on_message \u2192 publish message to \"chat\" channel.",
+      "description": "Define ChatHandler struct implementing WebSocketHandler: on_open → subscribe to \"chat\" channel. on_message → publish message to \"chat\" channel.",
       "steps": [
-        "Define ChatHandler struct implementing WebSocketHandler: on_open \u2192 subscribe to \"chat\" channel. on_message \u2192 publish message to \"chat\" channel."
+        "Define ChatHandler struct implementing WebSocketHandler: on_open → subscribe to \"chat\" channel. on_message → publish message to \"chat\" channel."
       ],
       "verification": [
         "Handler compiles and implements trait."
@@ -2933,12 +2933,12 @@
       "priority": 207,
       "phase": "phase50-example-ws-chat",
       "category": "backend",
-      "description": "Manual verification: start server, connect two WS clients with valid JWT, send message from client A \u2192 client B receives.",
+      "description": "Manual verification: start server, connect two WS clients with valid JWT, send message from client A → client B receives.",
       "steps": [
-        "Manual verification: start server, connect two WS clients with valid JWT, send message from client A \u2192 client B receives."
+        "Manual verification: start server, connect two WS clients with valid JWT, send message from client A → client B receives."
       ],
       "verification": [
-        "Two WS clients \u2192 messages broadcast correctly."
+        "Two WS clients → messages broadcast correctly."
       ],
       "passes": false
     },
@@ -2994,7 +2994,7 @@
         "Wire DB LISTEN/NOTIFY: on user create/update/delete, send NOTIFY. SSE handler listens and forwards to event stream."
       ],
       "verification": [
-        "Manual: POST /users \u2192 SSE stream receives user_created event with correct data."
+        "Manual: POST /users → SSE stream receives user_created event with correct data."
       ],
       "passes": false
     },
@@ -3022,7 +3022,7 @@
         "In example main.rs, call JoltDb::connect() which auto-applies all pending migrations. Verify users table exists after startup."
       ],
       "verification": [
-        "Server startup \u2192 users table created, server ready."
+        "Server startup → users table created, server ready."
       ],
       "passes": false
     },
@@ -3031,9 +3031,9 @@
       "priority": 214,
       "phase": "phase54-itest-core",
       "category": "backend",
-      "description": "Test: start server on random port, GET /health \u2192 200 (with test endpoint). Test graceful shutdown.",
+      "description": "Test: start server on random port, GET /health → 200 (with test endpoint). Test graceful shutdown.",
       "steps": [
-        "Test: start server on random port, GET /health \u2192 200 (with test endpoint). Test graceful shutdown."
+        "Test: start server on random port, GET /health → 200 (with test endpoint). Test graceful shutdown."
       ],
       "verification": [
         "cargo test --test integration_core passes."
@@ -3059,9 +3059,9 @@
       "priority": 216,
       "phase": "phase55-itest-middleware",
       "category": "backend",
-      "description": "Test: middleware chain order \u2014 CORS, auth, body parsing, query parsing all execute in correct order via log capture.",
+      "description": "Test: middleware chain order — CORS, auth, body parsing, query parsing all execute in correct order via log capture.",
       "steps": [
-        "Test: middleware chain order \u2014 CORS, auth, body parsing, query parsing all execute in correct order via log capture."
+        "Test: middleware chain order — CORS, auth, body parsing, query parsing all execute in correct order via log capture."
       ],
       "verification": [
         "cargo test --test integration_middleware passes."
@@ -3073,9 +3073,9 @@
       "priority": 217,
       "phase": "phase55-itest-middleware",
       "category": "backend",
-      "description": "Test: early termination \u2014 auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations.",
+      "description": "Test: early termination — auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations.",
       "steps": [
-        "Test: early termination \u2014 auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations."
+        "Test: early termination — auth rejection prevents handler execution, CORS preflight short-circuits. Test with multiple middleware combinations."
       ],
       "verification": [
         "cargo test --test integration_middleware passes."
@@ -3087,9 +3087,9 @@
       "priority": 218,
       "phase": "phase56-itest-db",
       "category": "backend",
-      "description": "Test: full migration flow \u2014 fresh DB \u2192 apply migrations \u2192 restart \u2192 no-op (idempotent). Test checksum mismatch detection.",
+      "description": "Test: full migration flow — fresh DB → apply migrations → restart → no-op (idempotent). Test checksum mismatch detection.",
       "steps": [
-        "Test: full migration flow \u2014 fresh DB \u2192 apply migrations \u2192 restart \u2192 no-op (idempotent). Test checksum mismatch detection."
+        "Test: full migration flow — fresh DB → apply migrations → restart → no-op (idempotent). Test checksum mismatch detection."
       ],
       "verification": [
         "cargo test --test integration_db passes (requires testcontainers)."
@@ -3101,9 +3101,9 @@
       "priority": 219,
       "phase": "phase56-itest-db",
       "category": "backend",
-      "description": "Test: query_as + transactions \u2192 insert, query, update, delete round-trip. LISTEN/NOTIFY \u2192 publisher and subscriber.",
+      "description": "Test: query_as + transactions → insert, query, update, delete round-trip. LISTEN/NOTIFY → publisher and subscriber.",
       "steps": [
-        "Test: query_as + transactions \u2192 insert, query, update, delete round-trip. LISTEN/NOTIFY \u2192 publisher and subscriber."
+        "Test: query_as + transactions → insert, query, update, delete round-trip. LISTEN/NOTIFY → publisher and subscriber."
       ],
       "verification": [
         "cargo test --test integration_db passes."
@@ -3115,9 +3115,9 @@
       "priority": 220,
       "phase": "phase57-itest-realtime",
       "category": "backend",
-      "description": "Test: WebSocket lifecycle \u2014 connect with valid token, send message, receive echo, close. Test invalid token rejection.",
+      "description": "Test: WebSocket lifecycle — connect with valid token, send message, receive echo, close. Test invalid token rejection.",
       "steps": [
-        "Test: WebSocket lifecycle \u2014 connect with valid token, send message, receive echo, close. Test invalid token rejection."
+        "Test: WebSocket lifecycle — connect with valid token, send message, receive echo, close. Test invalid token rejection."
       ],
       "verification": [
         "cargo test --test integration_realtime passes."
@@ -3129,9 +3129,9 @@
       "priority": 221,
       "phase": "phase57-itest-realtime",
       "category": "backend",
-      "description": "Test: pub/sub with multiple WS clients \u2014 client A publishes, client B receives. Test channel isolation.",
+      "description": "Test: pub/sub with multiple WS clients — client A publishes, client B receives. Test channel isolation.",
       "steps": [
-        "Test: pub/sub with multiple WS clients \u2014 client A publishes, client B receives. Test channel isolation."
+        "Test: pub/sub with multiple WS clients — client A publishes, client B receives. Test channel isolation."
       ],
       "verification": [
         "cargo test --test integration_realtime passes."
@@ -3143,9 +3143,9 @@
       "priority": 222,
       "phase": "phase57-itest-realtime",
       "category": "backend",
-      "description": "Test: SSE streaming \u2014 connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive.",
+      "description": "Test: SSE streaming — connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive.",
       "steps": [
-        "Test: SSE streaming \u2014 connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive."
+        "Test: SSE streaming — connect to SSE endpoint, trigger event via pub/sub, verify event received. Test keep-alive."
       ],
       "verification": [
         "cargo test --test integration_realtime passes."
@@ -3157,9 +3157,9 @@
       "priority": 223,
       "phase": "phase57-itest-realtime",
       "category": "backend",
-      "description": "Test: background task scheduling \u2014 register task, verify it runs on interval, verify graceful shutdown stops it.",
+      "description": "Test: background task scheduling — register task, verify it runs on interval, verify graceful shutdown stops it.",
       "steps": [
-        "Test: background task scheduling \u2014 register task, verify it runs on interval, verify graceful shutdown stops it."
+        "Test: background task scheduling — register task, verify it runs on interval, verify graceful shutdown stops it."
       ],
       "verification": [
         "cargo test --test integration_realtime passes."

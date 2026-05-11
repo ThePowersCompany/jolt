@@ -51,6 +51,7 @@ pub(crate) struct TsExportField {
     pub(crate) rust_type: Type,
     pub(crate) ts_type: Option<String>,
     pub(crate) ts_name: Option<String>,
+    pub(crate) is_flatten: bool,
 }
 
 /// Map a Rust type to its TypeScript equivalent.
@@ -164,6 +165,28 @@ fn parse_ts_rename_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
     None
 }
 
+/// Detect the `#[ts(flatten)]` attribute on a field.
+///
+/// Returns `true` when the field carries `#[ts(flatten)]`, `false` otherwise
+/// (attribute absent, or `#[ts(...)]` with other forms like `rename`).
+///
+/// Scans all `#[ts(...)]` attributes on the field and returns `true` if any
+/// `flatten` path is found.
+fn parse_ts_flatten_from_attrs(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("ts") {
+            continue;
+        }
+        let Ok(list) = attr.meta.require_list() else { continue };
+        let Some(meta) = list.parse_args().ok() else { continue };
+        match meta {
+            Meta::Path(path) if path.is_ident("flatten") => return true,
+            _ => continue,
+        }
+    }
+    false
+}
+
 fn parse_struct_fields(
     data: &DataStruct,
     owner: &Ident,
@@ -178,11 +201,13 @@ fn parse_struct_fields(
                     .expect("Fields::Named guarantees every field has an ident");
                 let ts_type = rust_type_to_ts(&field.ty);
                 let ts_name = parse_ts_rename_from_attrs(&field.attrs);
+                let is_flatten = parse_ts_flatten_from_attrs(&field.attrs);
                 out.push(TsExportField {
                     name: field_ident,
                     rust_type: field.ty.clone(),
                     ts_type,
                     ts_name,
+                    is_flatten,
                 });
             }
             Ok(out)
@@ -222,6 +247,7 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
 
     let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
     let mut field_name_markers = Vec::with_capacity(parsed.fields.len());
+    let mut field_flatten_markers = Vec::with_capacity(parsed.fields.len());
     for (i, f) in parsed.fields.iter().enumerate() {
         let type_const_name = quote::format_ident!("__JOLT_TS_EXPORT_type_{i}");
         match &f.ts_type {
@@ -254,6 +280,13 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
                 });
             }
         }
+
+        let flatten_const_name = quote::format_ident!("__JOLT_TS_EXPORT_flatten_{i}");
+        let is_flatten = f.is_flatten;
+        field_flatten_markers.push(quote! {
+            #[doc(hidden)]
+            pub const #flatten_const_name: bool = #is_flatten;
+        });
     }
 
     quote! {
@@ -268,6 +301,8 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             #(#field_type_markers)*
 
             #(#field_name_markers)*
+
+            #(#field_flatten_markers)*
         }
     }
 }
@@ -708,6 +743,94 @@ mod tests {
         assert!(
             before_name2.contains("None"),
             "field 1 (no rename) must have None name marker between field 0 and field 2, got chunk: {before_name2}"
+        );
+    }
+
+    // ── JOLT-RS-170: #[ts(flatten)] tests ──
+
+    #[test]
+    fn flatten_detected_on_field() {
+        let input = parse_derive(
+            r#"
+            struct FlattenExport {
+                #[ts(flatten)]
+                address: Address,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+            "field 0 with #[ts(flatten)] must emit flatten_0 = true, got: {out}"
+        );
+    }
+
+    #[test]
+    fn no_flatten_emits_false_marker() {
+        let input = parse_derive(
+            r#"
+            struct NoFlatten {
+                name: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("false"),
+            "field without #[ts(flatten)] must emit flatten_0 = false, got: {out}"
+        );
+    }
+
+    #[test]
+    fn mixed_flattened_and_non_flattened_fields() {
+        let input = parse_derive(
+            r#"
+            struct MixedFlatten {
+                #[ts(flatten)]
+                addr: Address,
+                name: String,
+                #[ts(flatten)]
+                meta: Meta,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+            "field 0 (addr) must be flatten=true, got: {out}"
+        );
+        // field 1 (name) must be false between flatten_0 and flatten_2
+        let after_flatten0 = out.split("__JOLT_TS_EXPORT_flatten_0").nth(1).unwrap_or("");
+        let before_flatten2 = after_flatten0.split("__JOLT_TS_EXPORT_flatten_2").next().unwrap_or("");
+        assert!(
+            before_flatten2.contains("false"),
+            "field 1 (name, no flatten) must have false marker between flatten_0 and flatten_2, got chunk: {before_flatten2}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_2") && out.contains("true"),
+            "field 2 (meta) must be flatten=true, got: {out}"
+        );
+    }
+
+    #[test]
+    fn flatten_persists_on_unmapped_type() {
+        let input = parse_derive(
+            r#"
+            struct FlattenUnknown {
+                #[ts(flatten)]
+                blob: UnknownType,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+            "flatten must persist even for unmapped TS type, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_type_0") && out.contains("None"),
+            "type marker must still be None for unknown type, got: {out}"
         );
     }
 }
