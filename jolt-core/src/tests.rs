@@ -7277,7 +7277,7 @@ mod task {
         });
         scheduler.start();
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_secs(4)).await;
         let runs = run_count.load(Ordering::SeqCst);
         assert!(runs >= 3, "erroring task must keep retrying; got {runs} runs, expected >= 3");
     }
@@ -7435,5 +7435,88 @@ mod task {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let runs = run_count.load(Ordering::SeqCst);
         assert!(runs >= 3, "successful task must run multiple times; got {runs}");
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_increases_on_failure_resets_on_success() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        struct FailThriceThenSucceed {
+            count: Arc<AtomicUsize>,
+            timestamps: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        }
+
+        impl Task for FailThriceThenSucceed {
+            fn name(&self) -> &str {
+                "fail-thrice-then-succeed"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(1)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                let timestamps = Arc::clone(&self.timestamps);
+                Box::pin(async move {
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    timestamps.lock().unwrap().push(std::time::Instant::now());
+                    if n < 3 {
+                        Err(crate::TaskError::new("deliberate failure"))
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(FailThriceThenSucceed {
+            count: Arc::clone(&run_count),
+            timestamps: Arc::clone(&timestamps),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let runs = run_count.load(Ordering::SeqCst);
+        assert!(runs >= 5, "task must run at least 5 times (3 failures + 2 successes); got {runs}");
+
+        let times = timestamps.lock().unwrap();
+        assert!(
+            times.len() >= 5,
+            "need at least 5 timestamps for backoff measurement; got {}",
+            times.len()
+        );
+
+        let d1 = times[1].duration_since(times[0]);
+        let d2 = times[2].duration_since(times[1]);
+        let d3 = times[3].duration_since(times[2]);
+        let d4 = times[4].duration_since(times[3]);
+
+        assert!(
+            d1.as_millis() > 500,
+            "first backoff should be ~1s; got delta={:?}",
+            d1
+        );
+        assert!(
+            d2 > d1,
+            "second backoff ({:?}) must be larger than first ({:?})",
+            d2,
+            d1
+        );
+        assert!(
+            d3 > d2,
+            "third backoff ({:?}) must be larger than second ({:?})",
+            d3,
+            d2
+        );
+        assert!(
+            d4 < d1,
+            "after success, next delta ({:?}) must be normal interval, smaller than first backoff ({:?})",
+            d4,
+            d1
+        );
     }
 }

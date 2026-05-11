@@ -90,15 +90,27 @@ impl TaskScheduler {
     pub fn start(self) {
         for (_, mut task) in self.tasks {
             tokio::spawn(async move {
+                const BACKOFF_BASE: Duration = Duration::from_secs(1);
+                const BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+                let mut backoff = BACKOFF_BASE;
                 loop {
-                    if let Err(e) = task.run().await {
-                        tracing::warn!(
-                            error = %e,
-                            name = task.name(),
-                            "background task failed, will retry after interval"
-                        );
+                    match task.run().await {
+                        Ok(()) => {
+                            backoff = BACKOFF_BASE;
+                            tokio::time::sleep(task.interval()).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                name = task.name(),
+                                backoff_secs = backoff.as_secs(),
+                                "background task failed, backing off before retry"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(BACKOFF_MAX);
+                        }
                     }
-                    tokio::time::sleep(task.interval()).await;
                 }
             });
         }

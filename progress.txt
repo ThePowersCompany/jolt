@@ -5509,3 +5509,36 @@ Blockers / next notes:
 - The `task_error_runs_multiple_iterations_without_stopping_loop` test asserts >= 3 runs within 50ms (5ms interval). If the backoff changes the error-path sleep duration, this test will need updating.
 - The timing tolerance test uses factor-of-4 tolerance. On overloaded CI, even this may be insufficient. If it flakes, increase the sleep time or widen to factor-of-8.
 
+## 2026-05-11 — JOLT-RS-144: Retry backoff logic (opens phase34)
+
+PRD item: JOLT-RS-144 (priority 144, phase34-task-retry-shutdown) — Implement retry logic: on task.run() error, log warning, wait backoff_duration (exponential: 1s, 2s, 4s, max 60s), retry. Reset backoff on success.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task` → 16/16 passed (15 prior + 1 new), 0 failed; finished in 10.00s.
+- `cargo test -p jolt-core --lib` → 269/269 passed (268 prior + 1 new), 0 failed.
+- `cargo check --workspace` → all crates check clean in 0.82s; no regressions.
+- WARN log output confirmed backoff_secs progression: 1 → 2 → 4 for the fail-thrice-then-succeed test task.
+
+Note on harness instructions: same as prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Refactored `TaskScheduler::start()` loop from a simple `if let Err` + unconditional `sleep(interval)` to a `match` with two arms: on `Ok` reset backoff + sleep interval; on `Err` log warning + sleep backoff + double backoff (capped at 60s). Uses `const BACKOFF_BASE: Duration = Duration::from_secs(1)` and `const BACKOFF_MAX: Duration = Duration::from_secs(60)` at the start of the spawned future — scoped to each spawned task rather than static/global, so future per-task backoff customization (if ever needed) is a local change.
+- Backoff is applied AFTER logging and BEFORE the next retry attempt. The first task run is always immediate (backoff=1s is not slept before the first attempt). Subsequent failures each sleep the current backoff value, then double it.
+- On success, backoff resets to BACKOFF_BASE (1s). The normal `task.interval()` is slept — NOT backoff — ensuring successful tasks proceed at their intended cadence.
+- The warning log now includes `backoff_secs` field for observability: `tracing::warn!(error = %e, name = task.name(), backoff_secs = backoff.as_secs(), ...)`.
+- Updated `task_error_runs_multiple_iterations_without_stopping_loop` test: changed sleep from 50ms to 4s, kept assertion at runs >= 3. With 1s base backoff, the 3rd error run arrives at ~3s (1+2s cumulative), so 4s is safe. Was necessary because the pre-backoff code used the task's 5ms interval for error-path sleep; now the error path uses 1s+ backoff.
+- Added `retry_backoff_increases_on_failure_resets_on_success` test: FailThriceThenSucceed task with 1ms interval, fails first 3 runs, succeeds thereafter. Test records `Instant::now()` timestamps in a Mutex-protected Vec on each run. After 10s sleep, asserts 5+ runs (3 failures + 2 successes needed for reset proof). Then verifies four deltas: d1 ≈ 1s (first→second fail), d2 > d1 (doubling), d3 > d2 (doubling to 4s), d4 < d1 (after success, next delta is the 1ms normal interval). The `d4 < d1` assertion is the key reset proof — without backoff reset, d4 would be 8s (next backoff doubling).
+- The time deltas between consecutive failure runs serve as proxy verification for the unobservable backoff internal state. Backoff values 1s/2s/4s are verified by checking the first delta > 500ms, second > first, third > second — directionality is sufficient because exact 1000ms assertion would be flaky under scheduler jitter.
+- Did NOT refactor unrelated tests. All 15 prior task tests pass unchanged (except the timing update to `task_error_runs_multiple_iterations_without_stopping_loop` which was directly broken by the backoff change).
+- Did NOT add a configurable backoff or a `fn backoff(&self) -> Duration` method to the Task trait. The PRD specifies fixed backoff (1s/2s/4s/max 60s), and adding an API surface without a concrete consumer would be premature. If a future need arises, the constants are local to the spawned future and easily parameterized.
+
+Files changed:
+- jolt-core/src/task.rs — replaced the `loop { if let Err ... }` / `sleep(interval)` body in `start()` with a match-based retry loop using exponential backoff.
+- jolt-core/src/tests.rs — updated `task_error_runs_multiple_iterations_without_stopping_loop` sleep from 50ms to 4s; added `retry_backoff_increases_on_failure_resets_on_success` test.
+- prd.json — JOLT-RS-144 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-145 (priority 145): graceful shutdown — on SIGTERM set a shutdown flag; each task loop checks flag before next iteration. The current `start()` spawns tasks in a loop that never checks for shutdown. 145 will need either a shared AtomicBool (Arc<AtomicBool>) shared across all spawned tasks, or a tokio CancellationToken.
+- JOLT-RS-146 (priority 146): TaskScheduler::shutdown() — set flag, wait for all join handles with timeout, log stragglers. Currently `start()` drops join handles immediately (fire-and-forget); 146 will need to store them and provide a shutdown entrypoint.
+- JOLT-RS-147 (priority 147, closes phase34): comprehensive retry + shutdown tests. The existing retry test only covers the backoff pattern; 147 should test: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks.
+

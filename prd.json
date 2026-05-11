@@ -2057,7 +2057,7 @@
       "verification": [
         "Unit test: task fails 3 times, succeeds 4th \u2192 backoff increases then resets."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-145",
