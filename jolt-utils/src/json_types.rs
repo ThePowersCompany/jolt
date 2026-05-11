@@ -19,6 +19,24 @@ impl<T> DerefMut for Json<T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonArray<T>(pub Vec<T>);
+
+impl<T> Deref for JsonArray<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for JsonArray<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +86,48 @@ mod tests {
         let mut json = Json(vec![1, 2, 3]);
         json.push(4);
         assert_eq!(*json, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn jsonarray_deserializes_from_json_array() {
+        let raw = r#"[1, 2, 3, 4, 5]"#;
+        let arr: JsonArray<i32> = serde_json::from_str(raw).unwrap();
+        assert_eq!(*arr, vec![1, 2, 3, 4, 5]);
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn jsonarray_serializes_to_json_array() {
+        let arr = JsonArray(vec!["a".to_string(), "b".to_string()]);
+        let json = serde_json::to_string(&arr).unwrap();
+        assert_eq!(json, r#"["a","b"]"#);
+    }
+
+    #[test]
+    fn jsonarray_deref_and_deref_mut() {
+        let mut arr = JsonArray(vec![10, 20]);
+        assert_eq!(*arr, vec![10, 20]);
+        assert_eq!(arr[0], 10);
+
+        arr.push(30);
+        assert_eq!(*arr, vec![10, 20, 30]);
+
+        arr[0] = 99;
+        assert_eq!(*arr, vec![99, 20, 30]);
+    }
+
+    #[test]
+    fn jsonarray_empty_deserialization() {
+        let raw = r#"[]"#;
+        let arr: JsonArray<i32> = serde_json::from_str(raw).unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn jsonarray_round_trip() {
+        let original = JsonArray(vec![Json(42), Json(99)]);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: JsonArray<Json<i32>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
     }
 }

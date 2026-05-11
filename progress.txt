@@ -5990,3 +5990,28 @@ Notes for next iterations:
 - JOLT-RS-162 (priority 162): `Optional<T>` enum {Some(T), Null, NotProvided} — this is a jolt-core type per the PRD (used in patch queries and auto-middleware body extraction). Should live in jolt-core, not jolt-utils, since it's a request/response lifecycle primitive.
 - JOLT-RS-163/164 add Serialize/Deserialize for `Optional<T>` — same jolt-core home. The tri-state serialization (Some = serialize inner; Null = serialize null; NotProvided = skip field entirely) is the load-bearing UX for PATCH endpoint semantics.
 - Phase38 spans both jolt-utils (Json/JsonArray) and jolt-core (Optional<T> + serde impls). Keep the crate boundary clean: utility newtypes in jolt-utils, framework lifecycle types in jolt-core.
+
+## 2026-05-11 — JOLT-RS-161: JsonArray<T> newtype
+
+PRD item: JOLT-RS-161 (priority 161, phase38-json-optional-types) — Define JsonArray<T> newtype wrapping Vec<T> with Deref<Target=Vec<T>>, serde transparent.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 98 passed (93 prior + 5 new in json_types::tests); 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 1.36s; no regressions.
+
+Key decisions:
+- Mirrored Json<T> shape exactly: `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]` with `#[serde(transparent)]`, `Deref` to `Vec<T>`, `DerefMut` to `Vec<T>`.
+- Placed in the same `jolt-utils/src/json_types.rs` file as `Json<T>` — single module for serde-wrapping newtypes, no new file overhead.
+- Re-exported from `jolt-utils::lib.rs` as `pub use json_types::{Json, JsonArray};`.
+- Five tests: deserialization from JSON array, serialization to JSON array, Deref/DerefMut (index, push, mutate), empty array deserialization, and a round-trip with nested `Json<i32>` values.
+- Did NOT add `From<Vec<T>>` or `IntoIterator` impls — Deref already gives full Vec borrow access; the extra trait impls would be premature abstraction without a concrete consumer.
+
+Files changed:
+- jolt-utils/src/json_types.rs — added `JsonArray<T>` struct + `Deref`/`DerefMut` impls + 5 tests.
+- jolt-utils/src/lib.rs — updated re-export to `pub use json_types::{Json, JsonArray};`.
+- prd.json — JOLT-RS-161 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-162 (priority 162): `Optional<T>` enum {Some(T), Null, NotProvided}. Already stubbed in `jolt-core/src/optional.rs` with is_some/is_null/is_not_provided/as_ref helpers but no Serialize/Deserialize impls (those are JOLT-RS-163/164). The PRD step is "Unit test: construct all three variants" — the stub already supports this.
+- JOLT-RS-163/164 add Serialize/Deserialize for Optional<T> — the tri-state serde behavior (Some = serialize inner; Null = serialize null; NotProvided = skip field) requires custom Serialize/Deserialize impls using the serde attributes or manual implementations.
+- JsonArray is a straightforward container — no edge cases beyond empty and non-empty JSON arrays. The serde transparent handling handles all serde_json::Value-compatible types.

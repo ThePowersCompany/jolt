@@ -14,7 +14,7 @@ pub mod mime;
 pub mod password;
 pub mod uuid;
 
-pub use json_types::Json;
+pub use json_types::{Json, JsonArray};
 
 #[cfg(test)]
 mod tests;
