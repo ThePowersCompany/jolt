@@ -1805,7 +1805,7 @@
       "verification": [
         "Struct compiles."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-127",

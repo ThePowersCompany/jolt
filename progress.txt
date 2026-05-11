@@ -4950,3 +4950,36 @@ Blockers / next notes:
 - **JOLT-RS-126 (priority 126, opens phase30-pubsub-core):** Define `PubSub` struct holding `DashMap<String, broadcast::Sender<PubSubMessage>>` with a broadcast capacity constant. No dependency on phase29 — can proceed immediately.
 - **Subprotocol echo** — still deferred. The `subprotocol = "..."` argument to `ws!` is parsed but not used at runtime.
 - **`__WsMacroWitness` type is dead code** — defined in `jolt-core/src/websocket.rs` but no longer imported or referenced anywhere. Can be removed in a cleanup pass.
+
+## 2026-05-11 — JOLT-RS-126: PubSub struct with DashMap + broadcast constant (opens phase30)
+
+PRD item: JOLT-RS-126 (priority 126, phase30-pubsub-core) — Define PubSub struct holding DashMap<String, broadcast::Sender<PubSubMessage>> and a broadcast capacity constant (e.g., 256).
+
+Verification:
+- `cargo check -p jolt-core` → clean (struct compiles; one expected `dead_code` warning on `channels` field — will be consumed by JOLT-RS-128/129 publish/subscribe methods).
+- `cargo check --workspace` → all crates check clean; no regressions.
+- `cargo test -p jolt-core --lib` → 223 passed, 0 failed (no new tests added; verification is "Struct compiles." — the 223 existing tests ensure the new module doesn't break anything).
+
+Note on harness instructions: same as JOLT-RS-007..125 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- **Added `dashmap = { workspace = true }` to jolt-core/Cargo.toml.** dashmap 6.1.0 was already in the workspace pin; jolt-core just wasn't pulling it in yet. tokio::sync::broadcast is available through the existing `tokio = { workspace = true }` dep (feature `full` includes `sync`).
+- **`PubSubMessage` defined as a minimal unit struct (`pub struct PubSubMessage;`) in the same module.** JOLT-RS-126 references `PubSubMessage` in the DashMap type but JOLT-RS-127 is the item that defines its fields (channel, payload, sender_id). The unit struct is the minimum viable shape that lets the DashMap type compile — JOLT-RS-127 will replace it with the named-field struct. Same pattern as how `CorsConfig` and `TlsConfig` started as stub unit structs in JOLT-RS-022.
+- **`PubSub.channels` is private.** Contrast with Request/Response's all-pub-fields pattern — the DashMap is an implementation detail that publish/subscribe methods (JOLT-RS-128/129) will mediate. Direct field access would let callers bypass channel creation/cleanup logic.
+- **`PubSub::new()` returns Self with `DashMap::new()`.** No capacity or shard-amount configuration — DashMap defaults are load-bearing (adaptive sharding based on available parallelism). Trivial 3-line method.
+- **`PUBSUB_BROADCAST_CAPACITY: usize = 256` is a plain `const`.** Not associated with the struct — it's a framework configuration constant, not per-instance state. Consumers import it as `jolt_core::PUBSUB_BROADCAST_CAPACITY`. The value 256 mirrors the Zig version's cap() function and is sufficient for typical pub/sub use (256 unread messages per subscriber before Lagged errors). If a future PRD wants per-channel capacities, the constant becomes a default and the publish/subscribe API surface grows a capacity parameter.
+- **Module file is `jolt-core/src/pubsub.rs`** — flat module list at crate root, same pattern as `server.rs`, `router.rs`, `websocket.rs`. Re-exported at crate root via `pub use pubsub::{PubSub, PUBSUB_BROADCAST_CAPACITY};`.
+- **Did NOT add a `#[derive(Debug)]` on PubSub or PubSubMessage.** DashMap is `!Debug` (the internal shard type is), and #[derive(Debug)] would fail. When JOLT-RS-127 adds fields to PubSubMessage a Debug derive will be possible there; PubSub may need a manual Debug impl that skips the channels field. Deferred until a consumer asks for it.
+- **Did NOT add any tests.** The PRD verification is "Struct compiles." — running the full `cargo test -p jolt-core --lib` suite (223 tests) verifies the new module doesn't break existing functionality. JOLT-RS-130 is the dedicated "write pubsub unit tests" item.
+
+Files changed:
+- jolt-core/Cargo.toml — added `dashmap = { workspace = true }`.
+- jolt-core/src/pubsub.rs (new) — PubSub struct with channels field, PubSubMessage unit struct stub, PUBSUB_BROADCAST_CAPACITY constant, PubSub::new().
+- jolt-core/src/lib.rs — added `pub mod pubsub;` and `pub use pubsub::{PubSub, PUBSUB_BROADCAST_CAPACITY};`.
+- prd.json — JOLT-RS-126 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-127 (priority 127, phase30): Define PubSubMessage struct with fields (channel, payload, sender_id). This replaces the current unit struct with a named-field struct. The substitution is mechanical — add fields to the existing `pub struct PubSubMessage;` definition, derive Clone (needed for broadcast channel's Clone bound on the item type).
+- JOLT-RS-128 (priority 128): PubSub::publish() — needs the channel field. The `dead_code` warning on `channels` resolves at that point.
+- JOLT-RS-129 (priority 129): PubSub::subscribe() — needs broadcast::Sender::subscribe() which creates the receiver.
+- PubSubMessage will need `#[derive(Clone)]` — tokio::sync::broadcast::channel::<T>(capacity) requires `T: Clone` because the broadcast delivers a clone to each receiver. This is a hard requirement, not a design choice.

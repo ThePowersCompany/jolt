@@ -18,6 +18,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jolt-macros = { path = "../jolt-macros" }
 jolt-utils = { path = "../jolt-utils" }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 # Used by the `auth_jwt` test module (JOLT-RS-072) to mint signed test tokens

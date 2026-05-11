@@ -14,6 +14,7 @@ pub mod method;
 pub mod optional;
 pub mod parse_body;
 pub mod parse_query;
+pub mod pubsub;
 pub mod registered_endpoint;
 pub mod request;
 pub mod request_ext;
@@ -58,6 +59,7 @@ pub use parse_query::{
     extract_vec as extract_query_vec, ParseQueryLayer, ParseQueryService, QueryExtractError,
     QueryParams,
 };
+pub use pubsub::{PubSub, PUBSUB_BROADCAST_CAPACITY};
 pub use registered_endpoint::RegisteredEndpoint;
 pub use request::Request;
 pub use request_ext::RequestExt;
