@@ -6041,3 +6041,27 @@ Notes for next iterations:
 - JOLT-RS-163 (priority 163): Implement Serialize for Optional<T> — Some(v) serializes v, Null serializes null, NotProvided skips the field entirely. Requires a custom `impl Serialize for Optional<T>` using `serialize_struct` + `serialize_field` / `skip_serializing_field`. Tricky: NotProvided must NOT appear in the serialized output at all, which means the containing struct's Serialize impl must also cooperate (or the custom serialize impl must not emit anything for the field).
 - JOLT-RS-164 (priority 164): Implement Deserialize for Optional<T> — present non-null → Some(v), present null → Null, absent → NotProvided. Requires a custom `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Optional<T>` visitor pattern.
 - Optional<T> already compiles and is used by the patch query codegen path (phase26-27). Serialize/Deserialize concerns are independent of the enum definition.
+
+## 2026-05-11 — JOLT-RS-163: Serialize for Optional<T>
+
+PRD item: JOLT-RS-163 (priority 163, phase38-json-optional-types) — Implement Serialize for Optional<T> where T: Serialize: Some(v) → serialize v, Null → serialize null, NotProvided → serialize nothing (skip field).
+
+Verification:
+- `cargo test -p jolt-core --lib -- tests::optional` → 3/3 passed (2 prior constructors/default + 1 new serialize test); 273 filtered out.
+- `cargo test -p jolt-core --lib` → 276 passed (up from 275); 0 failed.
+- `cargo check --workspace` → clean.
+
+Key decisions:
+- Simple match: `Some(v)` → `v.serialize(serializer)`, `Null` → `serializer.serialize_none()`, `NotProvided` → `serializer.serialize_none()`. Both Null and NotProvided land on the same serialize_none() call because the distinction only matters at the CONTAINING struct level via `#[serde(skip_serializing_if = "Optional::is_not_provided")]` — serde's derive generates a guard that checks `is_not_provided()` before calling serialize_field, so NotProvided is skipped entirely by the struct level while Null reaches the Serialize impl and renders as JSON null.
+- Did NOT use serialize_struct + serialize_field for NotProvided — that pattern would require the Optional<T> to know the field name of its parent struct, which is impossible. The `skip_serializing_if` approach is canonical for this use case.
+- Doc comment on the enum updated to document the tri-state contract and the skip_serializing_if requirement.
+- One test: `serialize_struct_with_optional_fields` creates a struct with three Optional<T> fields (Some/Null/NotProvided), serializes, asserts the JSON object has the Some value, the Null as null, and the NotProvided field absent.
+- No new dependencies.
+
+Files changed:
+- jolt-core/src/optional.rs — added `impl<T: Serialize> Serialize for Optional<T>`; updated doc comment.
+- jolt-core/src/tests.rs — added `serialize_struct_with_optional_fields` test in `mod optional`.
+- prd.json — JOLT-RS-163 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-164 (priority 164): Implement Deserialize for Optional<T> — present non-null → Some(v), present null → Null, absent → NotProvided. Requires a custom `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Optional<T>` with a visitor that handles the three states. The test fixture from 163 can be reused (round-trip: serialize → deserialize). The Deserialize impl is the last piece of the Optional<T> tri-state surface.

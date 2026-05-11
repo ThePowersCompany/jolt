@@ -7765,4 +7765,44 @@ mod optional {
     fn default_is_not_provided() {
         assert_eq!(Optional::<String>::default(), Optional::NotProvided);
     }
+
+    #[test]
+    fn serialize_struct_with_optional_fields() {
+        // PRD-mandated verification for JOLT-RS-163: Some → inner value,
+        // Null → null, NotProvided → field absent.
+        //
+        // The `skip_serializing_if` attribute is load-bearing for the
+        // tri-state: serde's derive generates a guard that checks
+        // `is_not_provided()` before calling serialize_field, so
+        // NotProvided never reaches the Serialize impl. Null reaches it
+        // and serialize_none() renders as JSON null.
+
+        #[derive(serde::Serialize)]
+        struct PatchUser {
+            #[serde(skip_serializing_if = "Optional::is_not_provided")]
+            name: Optional<&'static str>,
+            #[serde(skip_serializing_if = "Optional::is_not_provided")]
+            bio: Optional<&'static str>,
+            #[serde(skip_serializing_if = "Optional::is_not_provided")]
+            age: Optional<u32>,
+        }
+
+        let patch = PatchUser {
+            name: Optional::Some("Alice"),
+            bio: Optional::Null,
+            age: Optional::NotProvided,
+        };
+
+        let json = serde_json::to_string(&patch).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("Alice"));
+        assert_eq!(obj.get("bio"), Some(&serde_json::Value::Null));
+        assert!(
+            !obj.contains_key("age"),
+            "NotProvided field must be absent from JSON output, got: {json}"
+        );
+    }
 }

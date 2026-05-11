@@ -3,9 +3,17 @@
 /// Used by `#[derive(PatchQuery)]` to distinguish between explicit `null`
 /// (update the column to `NULL`) and field omission (skip the column).
 ///
-/// Serialize + Deserialize are not implemented here — they belong to
-/// JOLT-RS-163/164 in phase38. The three-variant shape is the load-bearing
-/// part for phase27 PatchQuery codegen.
+/// # Serialization (JOLT-RS-163)
+///
+/// `Some(T)` delegates to `T::serialize`. `Null` and `NotProvided` both call
+/// `serializer.serialize_none()`. The tri-state is distinguished at the
+/// CONTAINING struct level via `#[serde(skip_serializing_if =
+/// "Optional::is_not_provided")]`: `NotProvided` fields are skipped before
+/// serialization; `Null` fields render as JSON `null`; `Some(T)` fields
+/// render as the inner value.
+///
+/// Deserialize is not implemented here — it belongs to JOLT-RS-164 in
+/// phase38.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Optional<T> {
     Some(T),
@@ -38,5 +46,15 @@ impl<T> Optional<T> {
 impl<T> Default for Optional<T> {
     fn default() -> Self {
         Self::NotProvided
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for Optional<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Some(v) => v.serialize(serializer),
+            Self::Null => serializer.serialize_none(),
+            Self::NotProvided => serializer.serialize_none(),
+        }
     }
 }
