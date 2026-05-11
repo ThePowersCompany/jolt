@@ -519,7 +519,7 @@ mod tests {
     //!   preserves the code and reason.
 
     use super::*;
-    use crate::pubsub::PubSubMessage;
+    use crate::pubsub::{PubSubMessage, PUBSUB_BROADCAST_CAPACITY};
 
     /// A minimal handler that overrides nothing. Witnesses claim (1):
     /// `WebSocketHandler` is implementable with all-default methods.
@@ -951,5 +951,80 @@ mod tests {
             timeout.is_err(),
             "dropping Subscription must abort the forward task; no second message must arrive"
         );
+    }
+
+    /// JOLT-RS-132: publish more messages than the broadcast channel capacity
+    /// without consuming the mpsc reader. The forward task must survive
+    /// `RecvError::Lagged(n)` and continue delivering subsequent messages.
+    #[tokio::test]
+    async fn forward_task_survives_broadcast_lag_and_continues() {
+        let pubsub = Arc::new(PubSub::new());
+        let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+
+        let capacity = PUBSUB_BROADCAST_CAPACITY;
+        let overflow = 10_usize;
+
+        // Rapid-publish enough messages to overflow the broadcast buffer.
+        // The forward task drains at its own pace; by publishing capacity +
+        // overflow before touching the mpsc receiver we guarantee at least
+        // one Lagged(n) event (the broadcast sender drops messages when the
+        // receiver falls behind by more than `capacity`).
+        for i in 0..(capacity + overflow) {
+            pubsub.publish(
+                "chat",
+                PubSubMessage {
+                    channel: "chat".to_string(),
+                    payload: format!("msg-{i}"),
+                    sender_id: None,
+                },
+            );
+        }
+
+        // Drain the mpsc channel to let the forward task catch up. We
+        // expect to receive exactly the last `capacity` messages (the ones
+        // that fit in the broadcast buffer after the lag event). The first
+        // `overflow` messages were dropped.
+        let mut received = 0_usize;
+        loop {
+            let timeout =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+            match timeout {
+                Ok(Some(_)) => received += 1,
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        assert!(
+            received > 0,
+            "forward task must deliver at least one message after lag"
+        );
+        assert!(
+            received <= capacity,
+            "must receive at most capacity messages (overflow were dropped by lag)"
+        );
+
+        // Prove the forward task is still running: publish one final message
+        // and verify it arrives.
+        pubsub.publish(
+            "chat",
+            PubSubMessage {
+                channel: "chat".to_string(),
+                payload: "post-lag-recovery".to_string(),
+                sender_id: None,
+            },
+        );
+
+        let post_lag = rx
+            .recv()
+            .await
+            .expect("forward task must deliver message after lag recovery");
+        match post_lag {
+            AxumMessage::Text(json) => {
+                assert!(json.contains("post-lag-recovery"), "got {json}");
+            }
+            other => panic!("expected Text frame after lag, got {other:?}"),
+        }
     }
 }

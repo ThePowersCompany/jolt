@@ -1889,7 +1889,7 @@
       "verification": [
         "Unit test: rapid publishes \u2192 all delivered, lagged handled gracefully."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-133",

@@ -5145,3 +5145,28 @@ Notes for next iterations:
 - JOLT-RS-133 (priority 133): "On WebSocketHandler::on_close, unsubscribe from all subscribed channels (drop receiver handles stored in handler state)." The `Subscription` Drop impl (aborts forward task + drops receiver) already provides the unsubscribe primitive. The handler must store the `Subscription` handle(s) and drop them in `on_close`. The ws! macro's generated code will need to collect subscriptions and invoke drop — defer the macro integration to 133 or a subsequent item.
 - JOLT-RS-134 (priority 134): "WS + pubsub integration test: two WS clients on same channel, client A publishes via ws.publish(), client B receives." This requires a running server + real WebSocket upgrade — depends on ws! macro integration. The pubsub core + subscribe path from 131 are the prerequisites; this item is the end-to-end test.
 - The `PbSubMessage` import lives in the test module (not the parent module) since the production code only references it through type inference. Adding a `PubSubMessage::new(channel, payload, sender_id)` constructor would reduce test boilerplate (3 fields to fill every time) — consider for JOLT-RS-132 if it lands as a refinement pass.
+
+## 2026-05-11 — JOLT-RS-132: Lagged(n) unit test for forward task
+
+PRD item: JOLT-RS-132 (priority 132, phase31-ws-pubsub-integration) — Forward task: loop over broadcast receiver, on each message call sender.send_json(). On receiver lag (Lagged(n)), log warning but continue.
+
+Verification:
+- `cargo test -p jolt-core --lib -- forward_task_survives` → 1 passed; the test publishes 266 messages (256 capacity + 10 overflow) to trigger Lagged, verifies the forward task continues by delivering a post-lag message.
+- `cargo test -p jolt-core --lib` → 238 passed, 0 failed.
+- `cargo check --workspace` → clean in 0.53s; no regressions.
+
+Note on harness instructions: cargo is the verification tool.
+
+Key decisions:
+- Implementation was ALREADY complete from JOLT-RS-131 — the `subscribe()` method in websocket.rs already loops over the broadcast receiver, calls `sender.send_json()`, logs `tracing::warn!` on `RecvError::Lagged(n)`, and exits on `Closed` or `send_json` failure. This item only adds the missing Lagged-specific unit test.
+- Test `forward_task_survives_broadcast_lag_and_continues`: publishes `PUBSUB_BROADCAST_CAPACITY + 10` messages without draining the mpsc receiver, forcing a Lagged(n=10) event. Then drains the mpsc backlog, verifies at least one message arrived (the forward task survived), then publishes one final message and verifies it arrives (proving the forward task is alive post-lag). The tracing subscriber (already active from the tokio test runtime) emits `WARN pubsub receiver lagged; skipping messages lagged=10`, visible in test output.
+- Did NOT add `send_text()` path — the PRD step mentions `send_text()` OR `send_json()`, but the implementation uses `send_json()` exclusively (serializing the full PubSubMessage). No test covers a send_text path because it doesn't exist in the production code. If a future PRD item wants a send_text variant, the forward task dispatch will need to choose between them.
+- Did NOT add a tracing-subscriber assertion. The test asserts functional correctness (post-lag delivery) rather than inspecting the warn log event — same pattern as all other tests in the suite. The tracing output is visible in test stdout but not programmatically checked.
+
+Files changed:
+- jolt-core/src/websocket.rs — added `use crate::pubsub::PUBSUB_BROADCAST_CAPACITY` to test imports; added `forward_task_survives_broadcast_lag_and_continues` test (one `#[tokio::test]` function, ~65 lines).
+- prd.json — JOLT-RS-132 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-133 (priority 133): "On WebSocketHandler::on_close, unsubscribe from all subscribed channels." The Subscription Drop impl already aborts the forward task and drops the broadcast receiver. The handler needs to store Subscription handles and drop them in on_close. The ws! macro's generated code will need to collect subscriptions — this is the remaining macro integration work.
+- JOLT-RS-134 (priority 134): full WS + pubsub integration test with two clients on same channel, message exchange. Depends on ws! macro routing Publisher into the handler.
