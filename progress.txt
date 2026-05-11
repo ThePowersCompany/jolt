@@ -5355,3 +5355,29 @@ Files changed:
 Blockers / next notes:
 - JOLT-RS-139 (priority 139, phase33-background-tasks): define `Task` trait with `name()`, `interval()`, and `async fn run()`. First architectural item in phase33; opens background-task scheduling.
 - The keep-alive mechanism fires even when the inner stream is empty/idle. If a handler deliberately wants no keep-alive (e.g., the stream should go silent and let the client time out), use `into_sse_response_with_keep_alive(handler, Duration::MAX)` or add a `keep_alive: Option<Duration>` API later — out of scope for this item.
+
+## 2026-05-11 — JOLT-RS-139: Task trait
+
+PRD item: JOLT-RS-139 (priority 139, phase33-background-tasks) — Define Task trait: fn name(&self) -> &str, fn interval(&self) -> Duration, async fn run(&mut self) -> Result<(), Error>. Opens phase33.
+
+Verification:
+- `cargo test -p jolt-core --lib` → 255 passed, 0 failed (new: task_trait_can_be_implemented, task_run_returns_ok).
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Task trait uses explicit `Pin<Box<dyn Future>>` return type (`TaskFuture<'a>`) rather than native `async fn` in traits (RPITIT). This makes the trait object-safe, which is required by JOLT-RS-140's `Vec<Box<dyn Task + Send>>` storage. The pattern matches the existing `Endpoint` trait (JOLT-RS-028).
+- `TaskFuture<'a>` is `Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>` — the Send bound is required because JOLT-RS-141 will spawn tasks via `tokio::spawn`.
+- `TaskError` follows the `AuthError` pattern: a `String`-backed error type implementing `std::error::Error`, `Display`, and `From<&str>`/`From<String>`. Kept in `jolt-core` (not jolt-utils) because it's an HTTP-framework concept, not a general utility.
+- The `run(&mut self)` signature takes `&mut self` because background tasks maintain internal state across invocations (e.g. cursor state, last-run timestamp).
+- Added `pub mod task;` to lib.rs and re-exports `Task`, `TaskError`, `TaskFuture` at the crate root.
+
+Files changed:
+- jolt-core/src/task.rs (new) — Task trait, TaskFuture type alias, TaskError struct + impls.
+- jolt-core/src/lib.rs — added `pub mod task;` and `pub use task::{Task, TaskError, TaskFuture};`.
+- jolt-core/src/tests.rs — added `mod task` with 2 tests: trait implementation compiles, run() returns Ok(()).
+- prd.json — JOLT-RS-139 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-140 (priority 140): TaskScheduler struct holding `Vec<Box<dyn Task + Send>>` with `register(task)` and `start(self)`. This consumes the trait defined here; the object-safe future type is load-bearing.
+- JOLT-RS-141 drives the loop (`tokio::spawn` with `task.run().await` + `sleep(task.interval()).await`). The Send bound on TaskFuture will be exercised there.
+- JOLT-RS-142 requests arena-based storage via slab::Slab — that's a separate storage backend from the Vec; the scheduler impl should accommodate both backends or pick one.

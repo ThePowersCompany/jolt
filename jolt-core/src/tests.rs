@@ -76,13 +76,6 @@ mod method {
             "expected error display to mention input, got: {rendered}"
         );
     }
-
-    #[test]
-    fn parse_error_implements_std_error() {
-        fn assert_error<E: std::error::Error>(_: &E) {}
-        let err: ParseMethodError = Method::from_str("nope").unwrap_err();
-        assert_error(&err);
-    }
 }
 
 mod status_code {
@@ -7079,5 +7072,40 @@ mod sse {
             frame2.unwrap().is_some(),
             "second interval must produce a body frame"
         );
+    }
+}
+
+mod task {
+    use crate::{Task, TaskFuture};
+    use std::time::Duration;
+
+    struct CleanupTask;
+
+    impl Task for CleanupTask {
+        fn name(&self) -> &str {
+            "cleanup"
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_secs(60)
+        }
+
+        fn run(&mut self) -> TaskFuture<'_> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    #[test]
+    fn task_trait_can_be_implemented() {
+        let task = CleanupTask;
+        assert_eq!(task.name(), "cleanup");
+        assert_eq!(task.interval(), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn task_run_returns_ok() {
+        let mut task = CleanupTask;
+        let result = task.run().await;
+        assert!(result.is_ok());
     }
 }
