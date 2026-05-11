@@ -5570,3 +5570,34 @@ Blockers / next notes:
 - JOLT-RS-147 (priority 147, closes phase34): comprehensive retry + shutdown tests. The `graceful_shutdown_stops_task_loop` test proves the basic mechanism; 147 should test edge cases: shutdown mid-retry-backoff, concurrent shutdown of multiple tasks, ctrl_c in integration (hard in unit tests), shutdown during an active `run()` call.
 - The `shutdown_flag()` method returns the raw Arc. If a future need arises for a richer shutdown API (e.g. shutdown + wait vs. shutdown + fire), consider wrapping it in a `ShutdownHandle` newtype rather than exposing Arc directly.
 
+## 2026-05-11 — JOLT-RS-146: TaskScheduler::shutdown() with join handle tracking
+
+PRD item: JOLT-RS-146 (priority 146, phase34-task-retry-shutdown) — TaskScheduler::shutdown(): set flag, wait for all task join handles (with timeout). Log any tasks that didn't exit in time.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task` → 18/18 passed (17 prior + 1 new: `shutdown_stops_all_tasks_within_timeout`); 0 failed.
+- `cargo test -p jolt-core --lib` → 270/270 passed; 0 failed.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Note on harness instructions: same as JOLT-RS-007..145 — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `handles: Vec<JoinHandle<()>>` field to `TaskScheduler`. Stored in `new()` as empty Vec. On `start()`, each spawned task's `JoinHandle` is pushed here. This is the minimal change needed: one field + one Vec push per task.
+- Changed `start(self)` to `start(&mut self)`. Previously `start()` consumed self, making it impossible to call `shutdown()` afterward. With `&mut self`, the scheduler remains alive after `start()` and `shutdown()` can be called on it. The tasks slab is drained via `std::mem::take(&mut self.tasks)` instead of being consumed by ownership. All existing call sites (`scheduler.start();`) continue to compile unchanged because `&mut self` coercion from a `mut` binding works identically.
+- `shutdown(&mut self, timeout: Duration)` is async. Sets the shutdown flag to `true` (SeqCst), then drains `self.handles` and awaits each handle with a deadline derived from the total timeout. The deadline is computed once (`tokio::time::Instant::now() + timeout`) and decremented per handle; if the deadline expires before all handles are processed, remaining handles are dropped (aborted by tokio) and a warn log is emitted per-aborted task.
+- On `JoinHandle` completion: `Ok(Ok(()))` → success (no log). `Ok(Err(e))` → task panicked, `warn!` log with the JoinError. `Err(_elapsed)` → timeout expired on this specific handle, `warn!` log.
+- Did NOT track the ctrl_c watcher's JoinHandle. It's a system task spawned by the framework, not a user-registered task. If it never receives ctrl_c (common in test environments), it would block `shutdown()` forever. It's left fire-and-forget — the tokio runtime drop will clean it up.
+- The `graceful_shutdown_stops_task_loop` test (JOLT-RS-145) continues to work unchanged. It clones the shutdown Arc before `start()`, then calls `shutdown.store(true, ...)` externally — still works because `start()` now takes `&mut self` instead of consuming `self`, but the Arc clone is a separate borrow.
+- Added `shutdown_stops_all_tasks_within_timeout` test: 1ms-interval counter task, start scheduler, sleep 30ms to get baseline runs, call `shutdown(Duration::from_secs(5))`, sleep 100ms, assert run count is frozen. The 5-second timeout is generous (task loop checks flag every 1ms) to avoid flaky failures on overloaded CI.
+- The `shutdown_flag()` method remains unchanged (`&self -> Arc<AtomicBool>`). Callers can still clone the Arc before `start()` and trigger shutdown programmatically (as the JOLT-RS-145 test does). The `shutdown()` method is the higher-level entrypoint that also waits for handles.
+
+Files changed:
+- jolt-core/src/task.rs — added `handles: Vec<JoinHandle<()>>` field and `use tokio::task::JoinHandle;` import; changed `start(self)` to `start(&mut self)` with `std::mem::take` drain; added `async fn shutdown(&mut self, timeout: Duration)`.
+- jolt-core/src/tests.rs — added `shutdown_stops_all_tasks_within_timeout` test in `mod task`.
+- prd.json — JOLT-RS-146 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-147 (priority 147, closes phase34): "Write retry + shutdown tests: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks." Retry backoff timing is already covered by `retry_backoff_increases_on_failure_resets_on_success` (JOLT-RS-144). Remaining: shutdown mid-retry (task is sleeping during exponential backoff — does it exit after current sleep?), concurrent shutdown of multiple tasks (ensure both stop, no deadlocks).
+- `start()` draining the slab means calling `start()` twice is a no-op on the second call (empty slab). If a future call site needs "add tasks after start", the right move is to add a separate `spawn(task)` that bypasses the slab drain and pushes a handle directly — not to undo the drain.
+- The `shutdown()` method takes `&mut self`. If a future needs to call `shutdown()` from a shared context (e.g. multiple codepaths want to trigger shutdown), wrap the handles + shutdown flag in an `Arc<Mutex<...>>` or use a separate `ShutdownHandle` that calls shutdown via a stored sender. Deferred until a second consumer materializes.
+

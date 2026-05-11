@@ -7567,4 +7567,51 @@ mod task {
             "task must stop running after shutdown; before={runs_before}, after={runs_after}"
         );
     }
+
+    #[tokio::test]
+    async fn shutdown_stops_all_tasks_within_timeout() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        struct CountTask {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Task for CountTask {
+            fn name(&self) -> &str {
+                "counter"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(1)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(CountTask {
+            count: Arc::clone(&run_count),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let runs_before = run_count.load(Ordering::SeqCst);
+        assert!(runs_before > 0, "task must have run before shutdown");
+
+        scheduler.shutdown(Duration::from_secs(5)).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let runs_after = run_count.load(Ordering::SeqCst);
+
+        assert_eq!(
+            runs_before, runs_after,
+            "task must stop after shutdown; before={runs_before}, after={runs_after}"
+        );
+    }
 }

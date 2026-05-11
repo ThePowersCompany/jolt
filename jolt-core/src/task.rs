@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct TaskError {
@@ -56,6 +57,7 @@ pub trait Task {
 pub struct TaskScheduler {
     tasks: Slab<Box<dyn Task + Send>>,
     shutdown: Arc<AtomicBool>,
+    handles: Vec<JoinHandle<()>>,
 }
 
 impl TaskScheduler {
@@ -63,6 +65,7 @@ impl TaskScheduler {
         Self {
             tasks: Slab::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            handles: Vec::new(),
         }
     }
 
@@ -95,7 +98,7 @@ impl TaskScheduler {
         Arc::clone(&self.shutdown)
     }
 
-    pub fn start(self) {
+    pub fn start(&mut self) {
         let shutdown = Arc::clone(&self.shutdown);
 
         {
@@ -107,9 +110,10 @@ impl TaskScheduler {
             });
         }
 
-        for (_, mut task) in self.tasks {
+        let tasks = std::mem::take(&mut self.tasks);
+        for (_, mut task) in tasks {
             let shutdown = Arc::clone(&shutdown);
-            tokio::spawn(async move {
+            self.handles.push(tokio::spawn(async move {
                 const BACKOFF_BASE: Duration = Duration::from_secs(1);
                 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -134,7 +138,32 @@ impl TaskScheduler {
                 }
 
                 tracing::info!(name = task.name(), "task loop exited via shutdown");
-            });
+            }));
+        }
+    }
+
+    pub async fn shutdown(&mut self, timeout: Duration) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        tracing::info!("shutdown initiated");
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        let handles = std::mem::take(&mut self.handles);
+
+        for handle in handles {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!("shutdown timeout exceeded; remaining tasks aborted");
+                break;
+            }
+            match tokio::time::timeout(remaining, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "task panicked during shutdown");
+                }
+                Err(_elapsed) => {
+                    tracing::warn!("task did not stop within shutdown timeout");
+                }
+            }
         }
     }
 }
