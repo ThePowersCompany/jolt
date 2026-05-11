@@ -4313,3 +4313,38 @@ Blockers / next notes:
 - JOLT-RS-081 is the next highest-priority pass:false item after 078/079/080 (which are already true).
 - The full WebSocket handler lifecycle driver (read/write task spawning around axum WebSocket split) is deferred to JOLT-RS-124. The 077 integration test's upgrade callback deliberately does NOT drive the lifecycle — just captures claims and returns, which is sufficient for the PRD verification ("handler has claims"). 124's ws! macro codegen will combine the 076 auth layer, the 077 `set_claims` call, and socket read/write task spawns into a single generated axum route handler.
 - `jolt_utils::jwt::JwtClaims` is now referenced in a trait signature via `websocket.rs`'s `set_claims` method. This creates a compile-time dependency from jolt-core → jolt-utils in the public trait surface (previously this was only inside tower::Service impls via `use jolt_utils::jwt::JwtClaims`). The dependency already exists at the crate level (`jolt-core/Cargo.toml` has `jolt-utils`), so no new crate-graph edge.
+
+## 2026-05-11 — JOLT-RS-081: Early termination integration tests (closes phase18)
+
+PRD item: JOLT-RS-081 (priority 81, phase18-early-termination) — Write early termination unit tests: single-layer finish, multi-layer finish, finish+before+handler, finish+after+handler (should not reach handler).
+
+Verification:
+- `cargo test -p jolt-core -- tests::early_termination` → 15 passed (11 prior + 4 new), 0 failed.
+- `cargo test -p jolt-core --lib` → 219 passed total, 0 failed.
+- `cargo check --workspace` → all 5 crates check clean in 0.23s; no regressions.
+
+Key decisions:
+- Added 4 integration-level tests to the existing `mod early_termination` block. These complement the JOLT-RS-078 layer-skip tests (which verify individual layers bypass their work when finished is already set) by exercising the full dispatch chain with real Router + EndpointRegistry.
+
+  1. `single_layer_finish_propagates_response`: AuthBearerLayer wraps Router with a TrackingEndpoint. Request with no Authorization header → AuthBearerLayer marks finished + returns 401 directly (without delegating to inner). Asserts 401 response propagates out, handler never invoked.
+
+  2. `multi_layer_finish_propagates_through_outer_layers`: CorsLayer → AuthBearerLayer → Router. GET request with Origin but no Authorization → AuthBearerLayer rejects 401 + marks finished, CorsLayer's response-side injection adds Access-Control-Allow-Origin to the 401. Asserts both headers are present, handler never invoked.
+
+  3. `finish_before_handler_skips_handler`: Pre-inserted finished Arc<RequestExt> with stashed 403 response → Router's first finished check (before registry walk) short-circuits → returns 403. Handler never invoked.
+
+  4. `finish_after_path_match_still_skips_handler`: Same pre-insertion pattern but explicitly tests Router's SECOND finished check (the guard immediately before handler dispatch). Path + method match a registered endpoint, but the second check catches the finished flag. Pins the guard independently from the first check — a regression that removes only the second check would silently begin dispatching matched routes with a finished RequestExt.
+
+- All 4 tests use a `TrackingEndpoint` with an `Arc<AtomicBool>` to distinguish "handler skipped" from "handler ran but returned same status". Each test's endpoint handler is registered at a path that matches the test request, so a guard failure would surface as a handler invocation rather than a 404.
+
+- Tests reuse the existing `read_body` async helper already in `mod early_termination`. Imported `ServiceBuilder`, `Router`, `EndpointRegistry`, `Endpoint`, `EndpointFuture`, `Method`, and `Request` at the module level alongside the existing imports.
+
+- Notably did NOT duplicate the existing `mod router::registry_dispatch` tests (JOLT-RS-035/079/080 cover similar scenarios under `tests::router::registry_dispatch::`). JOLT-RS-081's tests live under `tests::early_termination` per the PRD verification filter and focus on the handler-not-invoked contract with real tower layers rather than stub inner services.
+
+Files changed:
+- jolt-core/src/tests.rs — added `ServiceBuilder`, `Router`, `EndpointRegistry`, `Endpoint`, `EndpointFuture`, `Method`, `Request` to module imports; added 4 `#[tokio::test]` functions in `mod early_termination` (with per-function `use std::sync::atomic::{AtomicBool, Ordering}`).
+- prd.json — JOLT-RS-081 passes: true.
+
+Blockers / next notes:
+- Phase18-early-termination is now CLOSED. All 4 items (078/079/080/081) are passes: true.
+- Next highest-priority pass:false items: JOLT-RS-085 (priority 85, DB connection test), JOLT-RS-087 (priority 87, query helpers .fetch_all/.fetch_one/.fetch_optional), JOLT-RS-089 (priority 89, query helper tests). All are DB-dependent tests in phase19/phase20.
+- The `mod early_termination` block now has 15 tests total (11 JOLT-RS-078 layer-skip + 4 JOLT-RS-081 integration). The test module-level docstring (lines 5631-5648) only references JOLT-RS-078; a future housekeeping pass should update it to also mention JOLT-RS-081.

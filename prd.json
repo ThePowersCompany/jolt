@@ -1175,7 +1175,7 @@
       "verification": [
         "cargo test -p jolt-core -- tests::early_termination passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-082",

@@ -5673,14 +5673,15 @@ mod early_termination {
     use axum::response::Response;
     use jolt_utils::jwt::JwtConfig;
     use jsonwebtoken::Algorithm;
-    use tower::{Layer, ServiceExt};
+    use tower::{Layer, ServiceBuilder, ServiceExt};
 
     use crate::auth_bearer::BearerToken;
     use crate::auth_websocket::WsJwtToken;
     use crate::parse_query::QueryParams;
     use crate::{
-        AuthBearerLayer, AuthJwtLayer, AuthWsJwtLayer, CorsConfig, CorsLayer, ParseBodyLayer,
-        ParseBodyStringLayer, ParseQueryLayer, RequestExt,
+        AuthBearerLayer, AuthJwtLayer, AuthWsJwtLayer, CorsConfig, CorsLayer, Endpoint,
+        EndpointFuture, EndpointRegistry, Method, ParseBodyLayer, ParseBodyStringLayer,
+        ParseQueryLayer, Request, RequestExt, Router,
     };
     use jolt_utils::jwt::JwtClaims;
 
@@ -6106,5 +6107,289 @@ mod early_termination {
     #[allow(dead_code)]
     fn _ws_protocol_header_ref() -> HeaderName {
         SEC_WEBSOCKET_PROTOCOL
+    }
+
+    // ---------------------------------------------------------------------------
+    // JOLT-RS-081: end-to-end early-termination integration tests
+    //
+    // These tests exercise the full dispatch chain (middleware → Router →
+    // handler) and verify that when a layer marks the request finished, the
+    // stashed response propagates correctly and the endpoint handler is never
+    // invoked. They complement the JOLT-RS-078 layer-skip tests (above) by
+    // wiring real Router + EndpointRegistry rather than stub inner services.
+    //
+    // Four scenarios per the PRD:
+    //   1. single-layer finish  — one layer marks finished, response propagates
+    //   2. multi-layer finish   — outer layers still decorate the propagated resp
+    //   3. finish+before+handler — handler is skipped when finished (first check)
+    //   4. finish+after+handler  — handler is NOT reached even on path+method match
+    // ---------------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn single_layer_finish_propagates_response() {
+        // Stack: AuthBearerLayer → Router (with a tracking ProtectedEndpoint).
+        // Sending a GET /protected with NO Authorization header causes
+        // AuthBearerLayer to mark_finished + return 401 directly (without
+        // delegating to inner). Router's handler must never be invoked.
+        let invoked = Arc::new(AtomicBool::new(false));
+
+        struct ProtectedEndpoint {
+            invoked: Arc<AtomicBool>,
+        }
+
+        impl Endpoint for ProtectedEndpoint {
+            fn path(&self) -> &str {
+                "/protected"
+            }
+            fn method(&self) -> Method {
+                Method::Get
+            }
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let invoked = Arc::clone(&self.invoked);
+                Box::pin(async move {
+                    invoked.store(true, Ordering::Relaxed);
+                    Response::new(Body::from("should-never-run"))
+                })
+            }
+        }
+
+        let mut registry = EndpointRegistry::new();
+        registry.register(ProtectedEndpoint {
+            invoked: Arc::clone(&invoked),
+        });
+        let router = Router::new(registry);
+        let svc = ServiceBuilder::new()
+            .layer(AuthBearerLayer::new())
+            .service(router);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/protected")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "AuthBearerLayer must reject missing Authorization with 401"
+        );
+        let body = read_body(resp).await;
+        assert!(
+            body == "Missing Authorization header",
+            "AuthBearerLayer's 401 body must survive; got: {body}"
+        );
+        assert!(
+            !invoked.load(Ordering::Relaxed),
+            "handler must not be invoked when single layer finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_layer_finish_propagates_through_outer_layers() {
+        // Stack (outer → inner): CorsLayer → AuthBearerLayer → Router.
+        // Request: GET /protected with Origin header but NO Authorization.
+        // AuthBearerLayer rejects with 401 + marks_finished. CorsLayer, on
+        // the response path, must still inject Access-Control-Allow-Origin
+        // (JOLT-RS-057 non-OPTIONS contract) into the propagated 401.
+        // Router's handler must never be invoked.
+        use axum::http::header::{ORIGIN, WWW_AUTHENTICATE};
+
+        let invoked = Arc::new(AtomicBool::new(false));
+
+        struct ProtectedEndpoint {
+            invoked: Arc<AtomicBool>,
+        }
+
+        impl Endpoint for ProtectedEndpoint {
+            fn path(&self) -> &str {
+                "/protected"
+            }
+            fn method(&self) -> Method {
+                Method::Get
+            }
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let invoked = Arc::clone(&self.invoked);
+                Box::pin(async move {
+                    invoked.store(true, Ordering::Relaxed);
+                    Response::new(Body::from("should-never-run"))
+                })
+            }
+        }
+
+        let mut registry = EndpointRegistry::new();
+        registry.register(ProtectedEndpoint {
+            invoked: Arc::clone(&invoked),
+        });
+        let router = Router::new(registry);
+
+        let cors = CorsLayer::new(CorsConfig {
+            allow_origins: vec!["*".to_string()],
+            ..Default::default()
+        });
+        let svc = ServiceBuilder::new()
+            .layer(cors)
+            .layer(AuthBearerLayer::new())
+            .service(router);
+
+        let req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/protected")
+            .header(ORIGIN, "https://example.com")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer"),
+            "WWW-Authenticate must survive propagation through outer CorsLayer"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "CorsLayer must inject ACAO header on the propagated 401"
+        );
+        assert!(
+            !invoked.load(Ordering::Relaxed),
+            "handler must not be invoked in multi-layer finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_before_handler_skips_handler() {
+        // Router's first finished check: when a caller-supplied
+        // Arc<RequestExt> is already finished AND has a stashed response
+        // BEFORE the registry walk, Router short-circuits and returns the
+        // stashed response immediately. This test pins the early-out branch
+        // (the check at the top of Router::call, before the registry walk).
+        let invoked = Arc::new(AtomicBool::new(false));
+
+        struct ProtectedEndpoint {
+            invoked: Arc<AtomicBool>,
+        }
+
+        impl Endpoint for ProtectedEndpoint {
+            fn path(&self) -> &str {
+                "/protected"
+            }
+            fn method(&self) -> Method {
+                Method::Get
+            }
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let invoked = Arc::clone(&self.invoked);
+                Box::pin(async move {
+                    invoked.store(true, Ordering::Relaxed);
+                    Response::new(Body::from("should-never-run"))
+                })
+            }
+        }
+
+        let mut registry = EndpointRegistry::new();
+        registry.register(ProtectedEndpoint {
+            invoked: Arc::clone(&invoked),
+        });
+        let router = Router::new(registry);
+
+        let ext = Arc::new(RequestExt::new());
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::from("blocked by guard"))
+                .unwrap(),
+        );
+        ext.mark_finished();
+
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/protected")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(read_body(resp).await, "blocked by guard");
+        assert!(
+            !invoked.load(Ordering::Relaxed),
+            "handler must not be invoked when finished flag is set before dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_after_path_match_still_skips_handler() {
+        // Router's SECOND finished check (the guard immediately before
+        // `endpoint.handler(jolt_req).await` in Router::call). Even when
+        // the path + method match a registered endpoint, the handler must
+        // NOT be invoked if RequestExt is finished.
+        //
+        // Distinct from `finish_before_handler_skips_handler` because THAT
+        // test exercises the first check (before registry walk). This test
+        // pins the second check independently: a regression that removed
+        // only the second check while keeping the first would silently begin
+        // dispatching requests that matched a route but whose RequestExt
+        // was finished by an in-band middleware tier.
+        let invoked = Arc::new(AtomicBool::new(false));
+
+        struct ProtectedEndpoint {
+            invoked: Arc<AtomicBool>,
+        }
+
+        impl Endpoint for ProtectedEndpoint {
+            fn path(&self) -> &str {
+                "/api/users"
+            }
+            fn method(&self) -> Method {
+                Method::Get
+            }
+            fn handler(&self, _req: Request) -> EndpointFuture {
+                let invoked = Arc::clone(&self.invoked);
+                Box::pin(async move {
+                    invoked.store(true, Ordering::Relaxed);
+                    Response::new(Body::from("should-never-run"))
+                })
+            }
+        }
+
+        let mut registry = EndpointRegistry::new();
+        registry.register(ProtectedEndpoint {
+            invoked: Arc::clone(&invoked),
+        });
+        let router = Router::new(registry);
+
+        let ext = Arc::new(RequestExt::new());
+        ext.set_response(
+            axum::response::Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::from("second-check block"))
+                .unwrap(),
+        );
+        ext.mark_finished();
+
+        let mut req = AxumRequest::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/users")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(Arc::clone(&ext));
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "second finished check must block handler even on path+method match"
+        );
+        assert_eq!(read_body(resp).await, "second-check block");
+        assert!(
+            !invoked.load(Ordering::Relaxed),
+            "handler must not be invoked when finished — second-check guard failed"
+        );
     }
 }
