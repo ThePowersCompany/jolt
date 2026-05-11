@@ -2408,7 +2408,7 @@
       "verification": [
         "Unit test: #[ts(rename = \"userId\")] field id \u2192 TS: userId: number."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-170",

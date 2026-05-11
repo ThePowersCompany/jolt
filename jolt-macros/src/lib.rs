@@ -142,7 +142,7 @@ pub fn patch_query_derive(input: TokenStream) -> TokenStream {
 /// On parse failure the emission is a single `compile_error!` token — no
 /// partial codegen. Mirrors the contract from `#[derive(PatchQuery)]`
 /// (JOLT-RS-110).
-#[proc_macro_derive(TsExport)]
+#[proc_macro_derive(TsExport, attributes(ts))]
 pub fn ts_export_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     ts_export::expand_ts_export(input).into()

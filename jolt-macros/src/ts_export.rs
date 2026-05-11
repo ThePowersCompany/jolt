@@ -20,7 +20,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type};
+use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Type};
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
 ///
@@ -50,6 +50,7 @@ pub(crate) struct TsExportField {
     #[allow(dead_code)]
     pub(crate) rust_type: Type,
     pub(crate) ts_type: Option<String>,
+    pub(crate) ts_name: Option<String>,
 }
 
 /// Map a Rust type to its TypeScript equivalent.
@@ -131,6 +132,38 @@ pub(crate) fn parse_ts_export_input(
     }
 }
 
+/// Extract the TS property name override from field-level `#[ts(rename = "...")]`.
+///
+/// Returns `Some("name_string")` when the field carries `#[ts(rename = "newName")]`,
+/// `None` otherwise (attribute absent, or `#[ts(...)]` with other forms like `flatten`).
+///
+/// Scans all `#[ts(...)]` attributes on the field and returns the first `rename` value
+/// found. If multiple `rename` attributes exist, the first wins (same as Rust's
+/// standard attribute resolution).
+fn parse_ts_rename_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("ts") {
+            continue;
+        }
+        let meta: Meta = match attr.meta.require_list() {
+            Ok(ok) => ok.parse_args().ok()?,
+            Err(_) => continue,
+        };
+        match meta {
+            Meta::NameValue(nv) if nv.path.is_ident("rename") => {
+                match nv.value {
+                    syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) => {
+                        return Some(s.value());
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
 fn parse_struct_fields(
     data: &DataStruct,
     owner: &Ident,
@@ -144,10 +177,12 @@ fn parse_struct_fields(
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
                 let ts_type = rust_type_to_ts(&field.ty);
+                let ts_name = parse_ts_rename_from_attrs(&field.attrs);
                 out.push(TsExportField {
                     name: field_ident,
                     rust_type: field.ty.clone(),
                     ts_type,
+                    ts_name,
                 });
             }
             Ok(out)
@@ -186,19 +221,36 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     let mapped_count = parsed.fields.iter().filter(|f| f.ts_type.is_some()).count();
 
     let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
+    let mut field_name_markers = Vec::with_capacity(parsed.fields.len());
     for (i, f) in parsed.fields.iter().enumerate() {
-        let const_name = quote::format_ident!("__JOLT_TS_EXPORT_type_{i}");
+        let type_const_name = quote::format_ident!("__JOLT_TS_EXPORT_type_{i}");
         match &f.ts_type {
             Some(ts) => {
                 field_type_markers.push(quote! {
                     #[doc(hidden)]
-                    pub const #const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#ts);
+                    pub const #type_const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#ts);
                 });
             }
             None => {
                 field_type_markers.push(quote! {
                     #[doc(hidden)]
-                    pub const #const_name: ::core::option::Option<&'static str> = ::core::option::Option::None;
+                    pub const #type_const_name: ::core::option::Option<&'static str> = ::core::option::Option::None;
+                });
+            }
+        }
+
+        let name_const_name = quote::format_ident!("__JOLT_TS_EXPORT_name_{i}");
+        match &f.ts_name {
+            Some(name) => {
+                field_name_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #name_const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#name);
+                });
+            }
+            None => {
+                field_name_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #name_const_name: ::core::option::Option<&'static str> = ::core::option::Option::None;
                 });
             }
         }
@@ -214,6 +266,8 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             pub const __JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize = #mapped_count;
 
             #(#field_type_markers)*
+
+            #(#field_name_markers)*
         }
     }
 }
@@ -553,6 +607,107 @@ mod tests {
         assert!(
             out.contains("__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT : usize = 2"),
             "both vec fields are mapped, got: {out}"
+        );
+    }
+
+    // ── JOLT-RS-169: #[ts(rename = "...")] tests ──
+
+    #[test]
+    fn rename_overrides_ts_property_name() {
+        let input = parse_derive(
+            r#"
+            struct RenameExport {
+                #[ts(rename = "userId")]
+                id: u32,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+            "field 0 (id) renamed to userId must emit Some(\"userId\"), got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_type_0") && out.contains(r#"Some ("number")"#),
+            "field 0 type must still map to number, got: {out}"
+        );
+    }
+
+    #[test]
+    fn rename_persists_on_unmapped_type() {
+        let input = parse_derive(
+            r#"
+            struct RenameUnknown {
+                #[ts(rename = "customBlob")]
+                blob: UnknownType,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("customBlob")"#),
+            "rename must persist even for unmapped TS type, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_type_0") && out.contains("None"),
+            "type marker must still be None for unknown type, got: {out}"
+        );
+    }
+
+    #[test]
+    fn no_rename_emits_none_name_marker() {
+        let input = parse_derive(
+            r#"
+            struct NoRename {
+                title: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_0") && out.contains("None"),
+            "field without #[ts(rename)] must emit None for name marker, got: {out}"
+        );
+    }
+
+    #[test]
+    fn mixed_renamed_and_non_renamed_fields() {
+        let input = parse_derive(
+            r#"
+            struct MixedRename {
+                #[ts(rename = "userId")]
+                id: u32,
+                name: String,
+                #[ts(rename = "isActive")]
+                active: bool,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+
+        // field 0: renamed to userId
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+            "field 0 must emit Some(\"userId\"), got: {out}"
+        );
+        // field 1: no rename → None
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_1")
+                && out.matches("__JOLT_TS_EXPORT_name_1").count() == 1,
+            "field 1 must have exactly one name_1 marker, got: {out}"
+        );
+        // field 2: renamed to isActive
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_2") && out.contains(r#"Some ("isActive")"#),
+            "field 2 must emit Some(\"isActive\"), got: {out}"
+        );
+
+        // Verify field 1's name marker is None (between name_0 and name_2)
+        let after_name0 = out.split("__JOLT_TS_EXPORT_name_0").nth(1).unwrap_or("");
+        let before_name2 = after_name0.split("__JOLT_TS_EXPORT_name_2").next().unwrap_or("");
+        assert!(
+            before_name2.contains("None"),
+            "field 1 (no rename) must have None name marker between field 0 and field 2, got chunk: {before_name2}"
         );
     }
 }

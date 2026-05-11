@@ -6163,3 +6163,29 @@ Notes for next iterations:
 - JOLT-RS-169 (priority 169, `#[ts(rename = "newName")]` support) is the next legitimate unfinished item. Requires: (a) adding `attributes(ts)` to the `#[proc_macro_derive(TsExport)]` declaration in lib.rs, (b) parsing `#[ts(rename = "...")]` on fields in `parse_struct_fields`, (c) storing the rename string in `TsExportField`, (d) emitting it into the marker consts so tests can observe it.
 - JOLT-RS-170 (flatten), JOLT-RS-171 (doc comments), JOLT-RS-172 (closing tests) follow.
 - JOLT-RS-167 and JOLT-RS-168 are both marked passes: true in the PRD — skip them.
+
+## 2026-05-11 — JOLT-RS-169: #[ts(rename = "newName")] field attribute support
+
+PRD item: JOLT-RS-169 (priority 169, phase40-tsexport-attributes) — Support #[ts(rename = "newName")] on fields: use newName as the TS property name instead of Rust field name.
+
+Verification:
+- `cargo test -p jolt-macros --lib -- ts_export` → 26 passed (22 prior + 4 new ts_export rename tests), 0 failed.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Added `attributes(ts)` to the `#[proc_macro_derive(TsExport)]` declaration in lib.rs — without this the compiler rejects `#[ts(rename = "...")]` at the user's source site before the derive runs. Same pattern as `attributes(patch)` on PatchQuery and `attributes(cors)` on AutoMiddleware.
+- Added `ts_name: Option<String>` field to `TsExportField`. When `Some`, it carries the TS property name override; when `None`, the Rust field name is used (caller-side concern; JOLT-RS-168 will apply this).
+- Added `parse_ts_rename_from_attrs(attrs: &[syn::Attribute]) -> Option<String>` helper that scans field-level attributes for `#[ts(name = value)]` meta specifying `rename = "..."`. Returns the first match's string value, or `None` if absent. Uses `attr.path().is_ident("ts")` to filter, `attr.meta.require_list()` to enter the `#[ts(...)]` group, `parse_args::<Meta>()` to extract inner meta, then `Meta::NameValue` pattern match for `rename = "..."`.
+- Updated `parse_struct_fields` to call `parse_ts_rename_from_attrs` and store the result in `TsExportField::ts_name`.
+- Emits per-field `__JOLT_TS_EXPORT_name_N` marker consts in `expand_ts_export` — `Some("renamed_name")` when a rename is set, `None` when using the default Rust name. Uses `quote::format_ident!("__JOLT_TS_EXPORT_name_{i}")` indexed by position.
+- 4 new tests in `ts_export::tests`: `rename_overrides_ts_property_name` (id → userId on u32 field), `rename_persists_on_unmapped_type` (rename works even for unknown TS types), `no_rename_emits_none_name_marker` (absence of rename yields None), `mixed_renamed_and_non_renamed_fields` (three fields: renamed, not-renamed, renamed — verifies correct interleaving in output).
+
+Files changed:
+- jolt-macros/src/lib.rs — `#[proc_macro_derive(TsExport)]` → `#[proc_macro_derive(TsExport, attributes(ts))]`.
+- jolt-macros/src/ts_export.rs — added `Meta`/`Lit` imports, `ts_name` field on `TsExportField`, `parse_ts_rename_from_attrs` helper, updated `parse_struct_fields`, added `field_name_markers` to `expand_ts_export`, 4 new tests.
+- prd.json — JOLT-RS-169 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-170 (priority 170): `#[ts(flatten)]` field inlining. Requires parsing bare `#[ts(flatten)]` (Meta::Path, not NameValue) and storing a `flatten: bool` on `TsExportField`. The `parse_ts_rename_from_attrs` helper's loop structure is the template — add a `parse_ts_flatten_from_attrs` or extend the existing helper to return a struct carrying both values.
+- JOLT-RS-171 (priority 171): JSDoc comment generation from /// doc comments. Requires reading `field.attrs` for `syn::Meta::NameValue` where path is `doc`, extracting the string, and storing as `doc: Option<String>` on `TsExportField`.
+- JOLT-RS-172 (priority 172): closing attribute test bundle. Tests rename + flatten + doc comments and their combinations on the same struct.
