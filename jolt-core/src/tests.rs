@@ -1096,6 +1096,66 @@ mod endpoint_registry {
         assert!(registry.is_empty());
     }
 
+    // --- duplicate path/method detection (JOLT-RS-032) ---
+    //
+    // The registry is a Vec, not a set, so identical (path, method) pairs are
+    // stored independently. The build_router path (axum) overwrites duplicate
+    // routes (last one wins). The registry-driven dispatch path calls the first
+    // matching endpoint due to sequential iteration. Both behaviors are
+    // documented here so a future dedup or error-on-duplicate change must
+    // update these tests intentionally.
+
+    #[test]
+    fn duplicate_path_and_method_both_stored_in_registry() {
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/dup",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/dup",
+            method: Method::Get,
+        });
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_path_different_methods_both_stored_in_registry() {
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/shared",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/shared",
+            method: Method::Post,
+        });
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_path_sort_preserves_registration_order_for_equal_lengths() {
+        let mut registry = EndpointRegistry::new();
+        registry.register(Stub {
+            path: "/dup",
+            method: Method::Get,
+        });
+        registry.register(Stub {
+            path: "/dup",
+            method: Method::Post,
+        });
+        registry.sort();
+        let methods: Vec<Method> = registry.iter().map(Endpoint::method).collect();
+        assert_eq!(methods, vec![Method::Get, Method::Post]);
+    }
+
+    // Wildcard/path-param extraction is not applicable to the current
+    // Endpoint design (JOLT-RS-028), which uses exact string matching via
+    // Endpoint::path() -> &str. Dynamic path segments (e.g. /api/:id) would
+    // require a different trait or a pattern-matching layer — neither of
+    // which is in scope for phase06. A future phase that adds path-param
+    // extraction must update this comment and add corresponding tests.
+
     /// JOLT-RS-031 verification: build_router from two endpoints produces an
     /// axum Router whose routes dispatch to the matching endpoint handler.
     /// Driven via `tower::ServiceExt::oneshot` so the test stays fully

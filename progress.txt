@@ -4054,3 +4054,32 @@ Notes for next iterations:
 - phase05-server-builder is now CLOSED. All items (022..027) are passes: true.
 - JOLT-RS-032 (priority 32, endpoint-registry test bundle) is the next phase06 holdout. Same "test sweep" shape: 030+031's coverage (register, sort, build_router) already exists in `mod endpoint_registry`; 032 adds duplicate-path detection, wildcard/path-param extraction, and a verdict on the axum panic-shape for duplicate routes.
 - The `std::net::TcpListener` trick for avoiding `SO_REUSEADDR` on macOS is a reusable pattern. If a future test needs to hold a port with no reuse, use `std::net` — tokio's listener always sets reuse.
+
+## 2026-05-10 — JOLT-RS-032: endpoint registry unit tests
+
+PRD item: JOLT-RS-032 (priority 32, phase06-endpoint-registry) — "Write endpoint registry unit tests: register, sort order, duplicate path detection, wildcard/path-param extraction."
+
+Why picked over higher-priority pass:false items (JOLT-RS-045 etc.): JOLT-RS-032 is the highest-priority pass:false item (priority 32); all lower-priority phase06- holdouts had registration, sort, and build_router coverage already written during 029-031. Only duplicate-path detection was missing.
+
+Verification:
+- `cargo test -p jolt-core -- tests::endpoint_registry` → 13 passed, 0 failed (was 10; +3 new tests).
+- `cargo test -p jolt-core --lib` → 209 passed, 0 failed (was 206; +3 new tests).
+- `cargo check --workspace` → all crates check clean.
+
+Note on harness instructions: same as JOLT-RS-007..027 — npm/Bun commands don't apply to this Rust workspace. Cargo is the verification tool.
+
+Key decisions:
+- **Duplicate path+method: both endpoints stored.** The registry is a Vec, not a set. Registering two endpoints with identical (path="/dup", method=Get) yields `len() == 2`. This documents the current behavior: the build_router path (axum) overwrites duplicates (last-registered wins); the registry-driven dispatch path calls the first match. Pinned by `duplicate_path_and_method_both_stored_in_registry`.
+- **Duplicate path, different methods: both stored.** Registering GET /shared and POST /shared stores both independently. Sort preserves registration order for equal-length paths (stable sort). Pinned by `duplicate_path_different_methods_both_stored_in_registry` and `duplicate_path_sort_preserves_registration_order_for_equal_lengths`.
+- **Wildcard/path-param extraction: NOT APPLICABLE.** The Endpoint trait (JOLT-RS-028) uses exact string matching via `Endpoint::path() -> &str`. There is no wildcard or dynamic-path-segment support in the current design. A future phase that adds path-param extraction would need a different trait or a pattern-matching layer — neither is in scope for phase06. Documented via a comment block in the test module so a future reader knows the gap is intentional.
+- **No error-on-duplicate detection added.** The PRD calls for "detection," not "rejection." The existing behavior (both stored, first-dispatch wins) is deterministic and documented. Adding a compile_error or runtime error for duplicates would be a new feature beyond test coverage — leave that to a future PRD item that explicitly requests duplicate rejection.
+
+Files changed:
+- jolt-core/src/tests.rs — added 3 new tests in `mod endpoint_registry` (duplicate_path_and_method_both_stored_in_registry, duplicate_path_different_methods_both_stored_in_registry, duplicate_path_sort_preserves_registration_order_for_equal_lengths) + a comment block documenting wildcard/path-param as N/A for the current design.
+- prd.json — JOLT-RS-032 passes: true.
+
+Notes for next iterations:
+- phase06-endpoint-registry is now CLOSED. All items (028..032) are passes: true.
+- JOLT-RS-045 (priority 45, endpoint-macro-codegen integration test) is the next phase09 holdout.
+- JOLT-RS-054 (priority 54, auto-middleware derive test) is the next phase11 holdout.
+- When (if ever) path-param extraction is added to the Endpoint trait, the N/A comment block in `mod endpoint_registry` marks the spot where wildcard-matching tests should land.
