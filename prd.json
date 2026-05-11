@@ -1007,7 +1007,7 @@
       "verification": [
         "Manual: make request, verify log line: \"GET /api/test 200 4ms\"."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-070",

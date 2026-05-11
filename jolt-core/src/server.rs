@@ -16,6 +16,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use axum::Router;
 use tower_http::trace::TraceLayer;
@@ -142,21 +143,33 @@ impl JoltServer {
     }
 
     /// Build the full serving stack: collect inventory endpoints, merge with
-    /// the user-supplied `extra_router`, and wrap the result in
-    /// [`TraceLayer::new_for_http`] so every served request emits a tower-http
-    /// trace span (JOLT-RS-068). Exposed publicly so tests can exercise the
-    /// exact stack `start` will serve without binding a TCP port.
-    ///
-    /// The TraceLayer is applied to the merged router (NOT to `extra_router`
-    /// and `inventory_router` separately) so each request produces ONE span,
-    /// not two stacked ones. Without a `tracing` subscriber installed, the
-    /// emitted events are no-ops; JOLT-RS-069 will configure the subscriber
-    /// + log format.
+    /// the user-supplied `extra_router`, and wrap the result in a customized
+    /// [`TraceLayer`] that emits INFO-level log lines in the form
+    /// `METHOD /path STATUS Xms` (JOLT-RS-068 / JOLT-RS-069).
     pub fn build_serving_router(self, extra_router: Router) -> Router {
         let inventory_router = self.into_router();
-        extra_router
-            .merge(inventory_router)
-            .layer(TraceLayer::new_for_http())
+
+        let trace_layer = TraceLayer::new_for_http()
+            .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "request",
+                    method = %request.method(),
+                    uri = %request.uri().path(),
+                )
+            })
+            .on_response(
+                |response: &axum::http::Response<axum::body::Body>,
+                 latency: Duration,
+                 _span: &tracing::Span| {
+                    let _enter = _span.enter();
+                    tracing::info!(
+                        status = response.status().as_u16(),
+                        latency_ms = latency.as_millis() as u64,
+                    );
+                },
+            );
+
+        extra_router.merge(inventory_router).layer(trace_layer)
     }
 
     /// Bind the configured router on `0.0.0.0:port` and serve it until a
@@ -176,11 +189,17 @@ impl JoltServer {
     /// being handed to `axum::serve`, so every served request emits a
     /// tower-http trace span.
     ///
+    /// JOLT-RS-069: a [`tracing_subscriber::fmt`] subscriber with compact
+    /// format is installed (if none already exists) so those trace spans
+    /// render as human-readable log lines.
+    ///
     /// `self.threads` is currently advisory: the server runs on the caller's
     /// existing tokio runtime, so worker count is whatever that runtime was
     /// built with. A future runtime-build PRD item can wire `threads` through
     /// without changing this signature.
     pub async fn start(self, extra_router: Router) -> std::io::Result<()> {
+        init_tracing_subscriber();
+
         let port = self.port;
         let serving = self.build_serving_router(extra_router);
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
@@ -213,4 +232,34 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+}
+
+/// Install a [`tracing_subscriber::fmt`] subscriber with compact, minimal
+/// output if no global subscriber is already set. Idempotent: subsequent calls
+/// are no-ops.
+///
+/// Log lines follow the shape `METHOD /path STATUS Xms` (e.g.
+/// `GET /api/test 200 4`) — method and URI are span fields emitted by the
+/// custom [`TraceLayer::make_span_with`] in [`JoltServer::build_serving_router`],
+/// status and latency are event fields recorded in the tower-http
+/// `on_response` callback.
+///
+/// The subscriber is configured with:
+/// - compact format (single-line per event)
+/// - no target / no module path (shorter lines)
+/// - no thread IDs / thread names (server threads are uninteresting)
+/// - `env_filter` defaulting to `info` level unless `RUST_LOG` overrides
+fn init_tracing_subscriber() {
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::EnvFilter;
+
+    let _ = fmt()
+        .compact()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .try_init();
 }

@@ -2323,6 +2323,7 @@ mod router {
 }
 
 mod server {
+    use std::sync::Arc;
     use crate::{CorsConfig, Endpoint, EndpointFuture, JoltServer, Method, Request};
     use axum::body::Body;
 
@@ -2528,6 +2529,88 @@ mod server {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn build_serving_router_emits_tracing_events_for_each_request() {
+        // JOLT-RS-069: the customized TraceLayer in build_serving_router
+        // must emit INFO-level tracing events with method, uri, status, and
+        // latency_ms fields. Runs in a dedicated OS thread with its own
+        // tokio runtime so `tracing::subscriber::with_default` can wrap
+        // async work without nesting runtimes.
+        use std::io;
+        use std::sync::Mutex;
+
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_cap = Arc::clone(&events);
+
+        let make_writer = move || {
+            let events = Arc::clone(&events_cap);
+            struct CaptureWriter {
+                events: Arc<Mutex<Vec<String>>>,
+            }
+            impl io::Write for CaptureWriter {
+                fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                    if let Ok(s) = std::str::from_utf8(buf) {
+                        self.events.lock().unwrap().push(s.to_string());
+                    }
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            CaptureWriter { events }
+        };
+
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_writer(make_writer)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        let events_ret = Arc::clone(&events);
+
+        std::thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                let rt = tokio::runtime::Runtime::new().expect("create runtime");
+                rt.block_on(async {
+                    let router =
+                        JoltServer::new().build_serving_router(axum::Router::new());
+                    let req = axum::http::Request::builder()
+                        .method("GET")
+                        .uri("/api/test")
+                        .body(Body::empty())
+                        .unwrap();
+                    let _resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+                });
+            });
+        })
+        .join()
+        .expect("dedicated thread should not panic");
+
+        let captured: Vec<String> = events_ret.lock().unwrap().clone();
+        let all = captured.concat();
+
+        assert!(
+            all.contains("GET"),
+            "log output must include HTTP method, got: {all}"
+        );
+        assert!(
+            all.contains("/api/test"),
+            "log output must include request path, got: {all}"
+        );
+        assert!(
+            all.contains("404"),
+            "log output must include status code 404, got: {all}"
+        );
+        assert!(
+            all.contains("latency_ms"),
+            "log output must include latency in ms, got: {all}"
+        );
     }
 }
 

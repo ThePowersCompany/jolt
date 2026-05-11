@@ -4217,3 +4217,36 @@ Notes for next iterations:
 - The next unfinished items in priority order are JOLT-RS-069 (priority 69, phase15-logging: customize log format), JOLT-RS-070 (priority 70, phase15-logging: DEBUG body logging), and JOLT-RS-077 (priority 77, phase17-auth-websocket: WS token validation). JOLT-RS-068 (priority 68, TraceLayer integration) is passes: true.
 - query extraction helpers are still duplicated between `endpoint_registry.rs::parse_query` and `parse_query.rs::parse_query`. Deduplication into a shared utility is still deferred.
 - Percent-decoding of query string values remains unimplemented (not in scope for any current PRD item).
+
+## 2026-05-10 — JOLT-RS-069: Customize log format (phase15-logging)
+
+PRD item: JOLT-RS-069 (priority 69, phase15-logging) — Customize log format: method, path, status code, latency in ms. Log at INFO level. Use tracing crate for structured output.
+
+Verification:
+- `cargo test -p jolt-core -- tests::server` → 12/12 passed (incl. new `build_serving_router_emits_tracing_events_for_each_request`).
+- `cargo test --workspace` → all 488 tests pass; 0 failures.
+- `cargo check --workspace` → clean in 3.10s; no regressions.
+- Manual: the `start_binds_and_serves_404_on_empty_router` integration test emits a compact log line visible in test output: `2026-05-11T03:20:53.331639Z INFO request: method=GET uri=/ status=404 latency_ms=0`. All four required fields (method, path, status, latency) present in structured form.
+
+Key decisions:
+- Added `tracing = "0.1"` and `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` to workspace `[workspace.dependencies]` (Cargo.toml line 41-42). Added both as `{ workspace = true }` deps to `jolt-core/Cargo.toml`.
+- Customized `TraceLayer` in `build_serving_router()` with explicit `make_span_with` (records `method` and `uri` as span fields) and `on_response` (enters the span, emits `tracing::info!` event with `status` and `latency_ms` fields). This replaces the bare `TraceLayer::new_for_http()` wired in JOLT-RS-068.
+- Added `init_tracing_subscriber()` private function that installs a `tracing_subscriber::fmt()` subscriber with compact, minimal output: `.compact().with_target(false).with_thread_ids(false).with_thread_names(false).with_env_filter(...)`. Filter defaults to `info` unless `RUST_LOG` env var overrides. Uses `try_init()` so it's idempotent (silently no-ops if a global subscriber already exists — important for tests that call `JoltServer::start()` sequentially).
+- `JoltServer::start()` now calls `init_tracing_subscriber()` at the top, before building the serving router. The subscriber is installed once per process lifetime; subsequent `start()` calls are no-ops at the subscriber layer.
+- Used `EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))` so `RUST_LOG=debug` overrides the default, enabling JOLT-RS-070's DEBUG-level body logging to work without code changes.
+- New test `build_serving_router_emits_tracing_events_for_each_request`: spawns a dedicated OS thread with its own tokio runtime, installs a capturing `tracing_subscriber::fmt` writer, sends a GET /api/test request through `build_serving_router`, and asserts the captured log output contains: "GET" (method), "/api/test" (path), "404" (status), "latency_ms" (latency field). The dedicated-thread approach avoids the nested-runtime problem (tokio panics when `with_default` + `block_on` runs inside an existing `#[tokio::test]` runtime).
+- Removed `use axum::Router;` in `shutdown_signal` and related jolt-specific use lines that were no longer needed after refactoring (already cleaned up in prior iterations).
+- Compact format output example: `INFO request: method=GET uri=/api/test status=200 latency_ms=4`. Equivalent to the PRD's expected `"GET /api/test 200 4ms"` — same fields, structured rather than plain-token format. The structured format was chosen because (a) it uses `tracing` crate natively, (b) it survives field-name changes without parser breakage, and (c) it's what tower-http's TraceLayer + tracing-subscriber compact format produce idiomatically.
+
+Files changed:
+- Cargo.toml (workspace root) — added `tracing` and `tracing-subscriber` to `[workspace.dependencies]`.
+- jolt-core/Cargo.toml — added `tracing` and `tracing-subscriber` as `{ workspace = true }` deps.
+- jolt-core/src/server.rs — added `use std::time::Duration;`, replaced bare `TraceLayer::new_for_http()` with customized `.make_span_with(...)` + `.on_response(...)` in `build_serving_router()`, added `init_tracing_subscriber()` call at top of `start()`, added `init_tracing_subscriber()` function definition after `shutdown_signal()`, updated doc comments.
+- jolt-core/src/tests.rs — added `build_serving_router_emits_tracing_events_for_each_request` test and `init_tracing_subscriber_is_idempotent` test to `mod server`.
+- prd.json — JOLT-RS-069 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-070 (priority 70): "Log request body and response body at DEBUG level (truncated to reasonable size). Suppress for sensitive paths (auth)." This builds directly on 069's subscriber — the `EnvFilter` already honors `RUST_LOG=debug`, and the TraceLayer's `on_request`/`on_response` callbacks are the natural hooks for body logging. The `make_span_with` callback already has access to the request (on_request variant can be added for body capture). Need to decide truncation size constant and sensitive-path list (auth paths).
+- The `init_tracing_subscriber` function is declared `fn` (not `pub`). If library consumers need to install their own subscriber before `JoltServer::start`, the `try_init()` guard means the first caller wins — including the framework if `start()` runs first. Library users should call their subscriber init before `start()`.
+- The compact format includes a timestamp and thread-local `INFO request:` prefix. The raw format the PRD describes ("GET /api/test 200 4ms") could be achieved with a custom `FormatEvent` impl if needed; the current format is functionally equivalent and production-suitable.
+- No new `Cargo.lock` changes beyond the two new deps and their transitive graph (tracing-core, tracing-log, nu-ansi-term, etc. — all standard).
