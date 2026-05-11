@@ -2,6 +2,8 @@ use slab::Slab;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -53,12 +55,14 @@ pub trait Task {
 
 pub struct TaskScheduler {
     tasks: Slab<Box<dyn Task + Send>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl TaskScheduler {
     pub fn new() -> Self {
         Self {
             tasks: Slab::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -87,14 +91,30 @@ impl TaskScheduler {
         self.tasks.is_empty()
     }
 
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
     pub fn start(self) {
+        let shutdown = Arc::clone(&self.shutdown);
+
+        {
+            let shutdown = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                shutdown.store(true, Ordering::SeqCst);
+                tracing::info!("ctrl_c received, shutdown flag set");
+            });
+        }
+
         for (_, mut task) in self.tasks {
+            let shutdown = Arc::clone(&shutdown);
             tokio::spawn(async move {
                 const BACKOFF_BASE: Duration = Duration::from_secs(1);
                 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
                 let mut backoff = BACKOFF_BASE;
-                loop {
+                while !shutdown.load(Ordering::SeqCst) {
                     match task.run().await {
                         Ok(()) => {
                             backoff = BACKOFF_BASE;
@@ -112,6 +132,8 @@ impl TaskScheduler {
                         }
                     }
                 }
+
+                tracing::info!(name = task.name(), "task loop exited via shutdown");
             });
         }
     }

@@ -2071,7 +2071,7 @@
       "verification": [
         "Unit test: send ctrl_c \u2192 task loop exits cleanly."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-146",

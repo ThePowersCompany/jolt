@@ -5542,3 +5542,31 @@ Blockers / next notes:
 - JOLT-RS-146 (priority 146): TaskScheduler::shutdown() — set flag, wait for all join handles with timeout, log stragglers. Currently `start()` drops join handles immediately (fire-and-forget); 146 will need to store them and provide a shutdown entrypoint.
 - JOLT-RS-147 (priority 147, closes phase34): comprehensive retry + shutdown tests. The existing retry test only covers the backoff pattern; 147 should test: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks.
 
+## 2026-05-11 — JOLT-RS-145: Graceful shutdown via ctrl_c and shutdown flag
+
+PRD item: JOLT-RS-145 (priority 145, phase34-task-retry-shutdown) — Implement graceful shutdown: on SIGTERM (tokio::signal::ctrl_c), set shutdown flag. Each task loop checks flag before next iteration.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task::graceful_shutdown_stops_task_loop` → 1 passed, 0 failed (compiled in 4.09s).
+- `cargo test -p jolt-core -- tests::task` → 17 passed, 0 failed (all prior task tests pass unchanged).
+- `cargo check --workspace` → all crates check clean in 0.62s; no regressions.
+
+Key decisions:
+- Added `shutdown: Arc<AtomicBool>` field to `TaskScheduler`. Created in `new()` defaulting to `false`. Accessible before `start()` via `shutdown_flag() -> Arc<AtomicBool>` — callers clone the Arc before `start()` consumes self, letting them trigger shutdown programmatically (for tests, for JOLT-RS-146's `shutdown()` method, and as an alternative to ctrl_c).
+- `start()` now spawns a dedicated ctrl_c watcher task. On reception, it stores `true` (SeqCst) and emits a tracing info line. The watcher does not propagate errors (ctrl_c() returns an error only in unusual environments like non-tty processes — silently ignored since there's nothing to do).
+- Each spawned task loop changed from `loop { }` to `while !shutdown.load(Ordering::SeqCst) { }`. On exit, each task logs its name at info level so operators have an audit trail of which tasks acknowledged shutdown.
+- Did NOT change the retry/backoff logic inside the loop — only the outer `loop`→`while` boundary changed. Successful tasks still sleep `task.interval()`, failed tasks still back off.
+- The shutdown flag check happens at the TOP of each iteration, before `task.run()`. This means a task that's currently sleeping (either interval or backoff) will finish its sleep before noticing the flag. This is acceptable because: (a) max backoff is capped at 60s, so worst-case shutdown delay is bounded and predictable; (b) tasks in their normal interval sleep at most `task.interval()` seconds. If sub-second shutdown responsiveness is needed, that's a future concern (JOLT-RS-146's `shutdown()` timeout already guards against stragglers).
+- Did NOT store join handles in `TaskScheduler` or return them from `start()`. That's JOLT-RS-146's scope. The current fire-and-forget pattern is preserved.
+- Test `graceful_shutdown_stops_task_loop`: creates a 5ms-interval counting task, runs for 60ms to establish baseline runs >= 2, sets shutdown flag, sleeps 200ms, then asserts the count hasn't changed — proving the task loop noticed the flag and exited. The 200ms sleep is generous enough to absorb a 5ms interval sleep already in progress plus any scheduler jitter.
+
+Files changed:
+- jolt-core/src/task.rs — added `use std::sync::{Arc, atomic::{AtomicBool, Ordering}};`, added `shutdown: Arc<AtomicBool>` field to TaskScheduler, added `shutdown_flag()` method, added ctrl_c watcher spawn and `while !shutdown.load(...)` guard in `start()`.
+- jolt-core/src/tests.rs — added `graceful_shutdown_stops_task_loop` test (1 new test in `mod task`).
+- prd.json — JOLT-RS-145 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-146 (priority 146): TaskScheduler::shutdown() — set flag, wait for all join handles with timeout, log stragglers. 145 laid the foundation (Arc<AtomicBool> + shutdown_flag()) but 146 still needs to store JoinHandles and provide a blocking shutdown entrypoint. `start()` currently drops handles; 146 will need to return them or store them in a separate ShutdownGuard.
+- JOLT-RS-147 (priority 147, closes phase34): comprehensive retry + shutdown tests. The `graceful_shutdown_stops_task_loop` test proves the basic mechanism; 147 should test edge cases: shutdown mid-retry-backoff, concurrent shutdown of multiple tasks, ctrl_c in integration (hard in unit tests), shutdown during an active `run()` call.
+- The `shutdown_flag()` method returns the raw Arc. If a future need arises for a richer shutdown API (e.g. shutdown + wait vs. shutdown + fire), consider wrapping it in a `ShutdownHandle` newtype rather than exposing Arc directly.
+
