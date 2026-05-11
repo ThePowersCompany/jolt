@@ -4779,3 +4779,41 @@ Files changed:
 Notes for next iterations:
 - JOLT-RS-117 (priority 117, closes phase27): closing test bundle — all-fields-Some, all-Null, mix, empty struct, table_name attribute. The integration tests already cover many of these cases (optional_some, optional_null, optional_not_provided, where_clause_uses_id_column). 117 can add an all‑Null test (SET col = NULL for every field) and an all‑NotProvided test (SET clause is empty → early return path).
 - The `#[allow(dead_code)]` on `PatchField::inner_type` remains. It will be consumed when type‑specific SQL encodings are needed (e.g., expressing Vec<T> as a postgres array literal vs. a JSON column).
+
+## 2026-05-11 — JOLT-RS-117: Closing PatchQuery test bundle (closes phase27)
+
+PRD item: JOLT-RS-117 (priority 117, phase27-patchquery-codegen) — Write PatchQuery tests: all fields Some, all Null, mix, empty struct (no fields → error or no-op), table_name attribute works.
+
+Verification:
+- `cargo test -p jolt-macros -- patch_query::tests` → 46 passed, 0 failed (5 new tests).
+- `cargo test -p jolt-core --test patch_query_derive` → 17 passed, 0 failed (5 new tests).
+- `cargo check --workspace` → clean in 1.06s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..116 — npm/Bun commands don't apply to this Rust workspace; cargo is the verification tool. PRD verification command specifies `cargo test -p jolt-macros -- tests::patch_query` but the actual test path is `patch_query::tests` (tests are inline `mod tests` inside `patch_query.rs`, not a top-level `tests::patch_query`). Both the macro unit tests and jolt-core integration tests pass clean.
+
+Key decisions:
+- All 5 new integration tests (jolt-core/tests/patch_query_derive.rs) exercise the actual derived `to_patch_query` method at runtime on real structs, verifying SQL string content and parameter vectors:
+  * `to_patch_query_all_fields_some` — `AllOptionalPatch` with 4 `Optional<String>` fields all `Some`; asserts all 4 column names appear with `$1`–`$4` placeholders, no NULL, `$5` for WHERE id, 5 params total.
+  * `to_patch_query_all_fields_null` — same struct, all fields `Null`; asserts each column appears as `col = NULL`, only `$1` for WHERE id param, params.len() == 1.
+  * `to_patch_query_mixed_some_null_not_provided` — `MixedStatePatch` with 4 `Optional<String>` fields set to Some("Alpha"), Null, NotProvided, Some("2kg"); verifies name = $1, color = NULL, size absent from SQL, weight = $2, WHERE = $3, 3 params.
+  * `to_patch_query_empty_struct_with_table_returns_noop` — `EmptyWithTablePatch` unit struct with `#[patch("logs")]`; asserts SQL contains "no fields to update" early-return message, params.len() == 0 (id_value never pushed when sets.is_empty()).
+  * `to_patch_query_table_name_round_trips_in_sql` — `CustomersPatch` with `#[patch("customers")]`; asserts `UPDATE customers` in SQL, `$1`–`$3` placeholders, 3 params, no string interpolation.
+
+- All 5 new unit tests (jolt-macros/src/patch_query.rs) inspect the generated TokenStream for structural correctness:
+  * `expand_to_patch_query_all_optional_emits_null_format_string` — all-Optional struct; verifies `"{} = NULL"` and `"{} = ${}"` format strings in codegen, plus all three `Optional ::` variant arms.
+  * `expand_to_patch_query_mixed_optional_emits_both_plain_and_match_arms` — mixed Optional + plain struct; verifies both `Optional :: Some` match arms AND `$N` format strings coexist; counts at least 2 optional field match generators.
+  * `expand_to_patch_query_empty_struct_with_table_emits_early_return` — unit struct with `#[patch("logs")]`; verifies `fn to_patch_query` is emitted, `is_empty` check present, `"logs"` table name in generated code.
+  * `expand_to_patch_query_table_name_matches_attribute_value` — `#[patch("customers")]`; verifies `"customers"` appears in generated code and `UPDATE customers` format string.
+
+- Did NOT change any production code — only added tests. Phase27 is now closed.
+
+Files changed:
+- jolt-core/tests/patch_query_derive.rs — added 4 test structs (`AllOptionalPatch`, `MixedStatePatch`, `EmptyWithTablePatch`, `CustomersPatch`) and 5 integration tests; updated module-level doc ladder to include JOLT-RS-117.
+- jolt-macros/src/patch_query.rs — added 5 unit tests in the `mod tests` block; updated module-level doc ladder.
+- prd.json — JOLT-RS-117 passes: true.
+
+Notes for next iterations:
+- phase27-patchquery-codegen is now CLOSED. All 8 items (110/111/112/113/114/115/116/117) are passes: true.
+- JOLT-RS-118 (priority 118, opens phase28-ws-trait): define `WebSocketHandler` trait with default no-op impls for `on_open`, `on_message`, `on_close`, `on_ready`, `on_shutdown`. This is the first WebSocket surface in the workspace.
+- The `#[allow(dead_code)]` on `PatchField::inner_type` survives through phase27 close. It will be consumed when type‑specific SQL encodings are needed.
+- JOLT-RS-121 (WebSocket unit tests, priority 121) has `passes: false` — it's the next item after this one's dependencies.

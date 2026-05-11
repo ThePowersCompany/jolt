@@ -1260,4 +1260,127 @@ mod tests {
             "generated SQL must reference table name, got: {out}"
         );
     }
+
+    // ── JOLT-RS-117: closing test bundle ──
+
+    #[test]
+    fn expand_to_patch_query_all_optional_emits_null_format_string() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct AllOptPatch {
+                    title: Optional<String>,
+                    desc: Optional<String>,
+                    tags: Optional<String>,
+                }
+                "#,
+            ),
+            "media",
+        );
+        let out = expand_patch_query(input).to_string();
+
+        assert!(
+            out.contains("\"{} = NULL\""),
+            "Null arm must emit '{{}} = NULL' format string, got: {out}"
+        );
+        assert!(
+            out.contains("\"{} = ${}\""),
+            "Some arm must emit '{{}} = ${{}}' format string, got: {out}"
+        );
+        assert!(
+            out.contains("Optional :: Some"),
+            "must generate match for Optional::Some, got: {out}"
+        );
+        assert!(
+            out.contains("Optional :: Null"),
+            "must generate match for Optional::Null, got: {out}"
+        );
+        assert!(
+            out.contains("Optional :: NotProvided"),
+            "must generate match for Optional::NotProvided, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_mixed_optional_emits_both_plain_and_match_arms() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct MixedOptPatch {
+                    name: Optional<String>,
+                    views: u64,
+                    color: Optional<String>,
+                }
+                "#,
+            ),
+            "items",
+        );
+        let out = expand_patch_query(input).to_string();
+
+        assert!(
+            out.contains("Optional :: Some"),
+            "optional field must have match arms, got: {out}"
+        );
+        assert!(
+            out.contains("\"{} = ${}\""),
+            "both Optional::Some and plain field must use $N notation, got: {out}"
+        );
+        assert!(
+            out.contains("\"{} = NULL\""),
+            "Null arm must emit NULL format string, got: {out}"
+        );
+        let count_optional_match = out.matches("Optional ::").count();
+        assert!(
+            count_optional_match >= 2,
+            "at least 2 optional field match generators expected, got {} in: {out}",
+            count_optional_match
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_empty_struct_with_table_emits_early_return() {
+        let input = with_patch_attr(
+            parse_derive("struct EmptyTable;"),
+            "logs",
+        );
+        let out = expand_patch_query(input).to_string();
+
+        assert!(
+            out.contains("fn to_patch_query"),
+            "empty struct with table must emit to_patch_query, got: {out}"
+        );
+        assert!(
+            out.contains("is_empty"),
+            "empty struct must check sets.is_empty(), got: {out}"
+        );
+        assert!(
+            out.contains("UPDATE") && out.contains("logs"),
+            "generated code must reference table name 'logs', got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_table_name_matches_attribute_value() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct CustomerPatch {
+                    email: Optional<String>,
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "customers",
+        );
+        let out = expand_patch_query(input).to_string();
+
+        assert!(
+            out.contains("\"customers\""),
+            "table name 'customers' from #[patch(\"customers\")] must appear in generated code, got: {out}"
+        );
+        assert!(
+            out.contains("UPDATE") && out.contains("customers"),
+            "generated format string must interpolate the table name correctly, got: {out}"
+        );
+    }
 }

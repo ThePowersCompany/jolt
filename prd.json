@@ -1679,7 +1679,7 @@
       "verification": [
         "cargo test -p jolt-macros -- tests::patch_query passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-118",

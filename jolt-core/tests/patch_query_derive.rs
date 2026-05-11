@@ -1,4 +1,4 @@
-//! JOLT-RS-110 / JOLT-RS-111 / JOLT-RS-112 / JOLT-RS-114 PRD-mandated
+//! JOLT-RS-110 / JOLT-RS-111 / JOLT-RS-112 / JOLT-RS-114 / JOLT-RS-117
 //! integration tests.
 //!
 //! Verifies that `#[derive(PatchQuery)]` compiles on a struct with
@@ -6,6 +6,10 @@
 //! attribute is parsed and emitted (111), `Optional<T>` fields are
 //! detected and counted (112), and the generated `to_patch_query` method
 //! compiles and type-checks (114).
+//!
+//! JOLT-RS-117 (closing test bundle): all-fields-Some, all-Null, mixed
+//! Some+Null+NotProvided, empty struct no-op, and table_name attribute gap
+//! coverage.
 //!
 //! This is an integration test (not a unit test) because the derive macro can
 //! only be exercised through cargo's compile pipeline. The proc-macro crate's
@@ -70,6 +74,48 @@ struct AccountPatch {
     display_name: Optional<String>,
     bio: String,
     follower_count: u64,
+}
+
+// ── JOLT-RS-117: closing test bundle structs ──
+
+/// All four fields are Optional. Used for all-Some and all-Null tests.
+#[derive(PatchQuery)]
+#[patch("media")]
+#[allow(dead_code)]
+struct AllOptionalPatch {
+    title: Optional<String>,
+    description: Optional<String>,
+    tags: Optional<String>,
+    url: Optional<String>,
+}
+
+/// Four Optional fields. Used for the mixed Some+Null+NotProvided test
+/// where each field takes a different tri-state variant in one call.
+#[derive(PatchQuery)]
+#[patch("items")]
+#[allow(dead_code)]
+struct MixedStatePatch {
+    name: Optional<String>,
+    color: Optional<String>,
+    size: Optional<String>,
+    weight: Optional<String>,
+}
+
+/// Unit struct WITH a table name. The empty-struct no-op test exercises
+/// the early-return path when no fields can contribute to the SET clause.
+#[derive(PatchQuery)]
+#[patch("logs")]
+#[allow(dead_code)]
+struct EmptyWithTablePatch;
+
+/// A struct with a table name, used to lock in the gap that the runtime
+/// SQL round-trips the parsed attribute correctly when fields are present.
+#[derive(PatchQuery)]
+#[patch("customers")]
+#[allow(dead_code)]
+struct CustomersPatch {
+    email: Optional<String>,
+    name: Optional<String>,
 }
 
 #[test]
@@ -196,5 +242,133 @@ fn to_patch_query_never_interpolates_values_into_sql() {
     assert!(
         !sql.contains("Alice"),
         "SQL must not contain direct string value, got: {sql}"
+    );
+}
+
+// ── JOLT-RS-117: closing test bundle ──
+
+#[test]
+fn to_patch_query_all_fields_some() {
+    let patch = AllOptionalPatch {
+        title: Optional::Some("Title".to_string()),
+        description: Optional::Some("Description".to_string()),
+        tags: Optional::Some("a,b".to_string()),
+        url: Optional::Some("https://example.com".to_string()),
+    };
+    let (sql, params) = patch.to_patch_query("id", &99u64);
+
+    for col in &["title", "description", "tags", "url"] {
+        assert!(
+            sql.contains(col),
+            "all-Some field {} must appear in SET clause, got: {sql}",
+            col
+        );
+    }
+    assert!(sql.contains("$1"), "first param should be $1, got: {sql}");
+    assert!(sql.contains("$2"), "second param should be $2, got: {sql}");
+    assert!(sql.contains("$3"), "third param should be $3, got: {sql}");
+    assert!(sql.contains("$4"), "fourth param should be $4, got: {sql}");
+    assert!(sql.contains("$5"), "WHERE clause should be $5, got: {sql}");
+    assert!(!sql.contains("NULL"), "all-Some: no NULL columns expected, got: {sql}");
+    assert_eq!(params.len(), 5, "expected 5 params (4 SET + 1 WHERE), got: {sql}");
+}
+
+#[test]
+fn to_patch_query_all_fields_null() {
+    let patch = AllOptionalPatch {
+        title: Optional::Null,
+        description: Optional::Null,
+        tags: Optional::Null,
+        url: Optional::Null,
+    };
+    let (sql, params) = patch.to_patch_query("id", &1u64);
+
+    for col in &["title", "description", "tags", "url"] {
+        assert!(
+            sql.contains(&format!("{col} = NULL")),
+            "all-Null field {} must produce SET col = NULL, got: {sql}",
+            col
+        );
+    }
+    assert!(
+        sql.contains("$1"),
+        "WHERE id param must be $1 (no SET params for all-Null), got: {sql}"
+    );
+    assert!(
+        !sql.contains("$2"),
+        "no $2 expected when all fields are Null, got: {sql}"
+    );
+    assert_eq!(params.len(), 1, "only the id_value param (no SET params for all-Null), got: {sql}");
+}
+
+#[test]
+fn to_patch_query_mixed_some_null_not_provided() {
+    // name=Some("Alpha"), color=Null, size=NotProvided, weight=Some("2kg")
+    let patch = MixedStatePatch {
+        name: Optional::Some("Alpha".to_string()),
+        color: Optional::Null,
+        size: Optional::NotProvided,
+        weight: Optional::Some("2kg".to_string()),
+    };
+    let (sql, params) = patch.to_patch_query("item_id", &42u64);
+
+    assert!(
+        sql.contains("name = $1"),
+        "Some field must produce col = $N, got: {sql}"
+    );
+    assert!(
+        sql.contains("color = NULL"),
+        "Null field must produce col = NULL, got: {sql}"
+    );
+    assert!(
+        !sql.contains("size"),
+        "NotProvided field must be absent from SET clause, got: {sql}"
+    );
+    assert!(
+        sql.contains("weight = $2"),
+        "second Some field must produce col = $2, got: {sql}"
+    );
+    assert!(
+        sql.contains("$3"),
+        "WHERE clause must be $3 (after 2 Some params), got: {sql}"
+    );
+    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+}
+
+#[test]
+fn to_patch_query_empty_struct_with_table_returns_noop() {
+    let patch = EmptyWithTablePatch;
+    let (sql, params) = patch.to_patch_query("id", &7u64);
+
+    assert!(
+        sql.contains("no fields to update"),
+        "empty-struct patch must return no-fields message, got: {sql}"
+    );
+    assert_eq!(
+        params.len(), 0,
+        "empty struct with no SET fields must have zero params (id_value was never pushed), got: {sql}"
+    );
+}
+
+#[test]
+fn to_patch_query_table_name_round_trips_in_sql() {
+    let patch = CustomersPatch {
+        email: Optional::Some("alice@example.com".to_string()),
+        name: Optional::Some("Alice".to_string()),
+    };
+    let (sql, params) = patch.to_patch_query("customer_id", &1u64);
+
+    assert!(
+        sql.contains("UPDATE customers"),
+        "SQL must reference the #[patch(\"customers\")] table name, got: {sql}"
+    );
+    assert!(sql.contains("$1"), "email must be $1, got: {sql}");
+    assert!(sql.contains("$2"), "name must be $2, got: {sql}");
+    assert!(sql.contains("$3"), "WHERE clause must be $3, got: {sql}");
+    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+
+    assert!(
+        !sql.contains("customers@example.com") && !sql.contains("Alice"),
+        "string values must NOT be interpolated into SQL, got: {sql}"
     );
 }
