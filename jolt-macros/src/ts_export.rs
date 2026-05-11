@@ -52,6 +52,7 @@ pub(crate) struct TsExportField {
     pub(crate) ts_type: Option<String>,
     pub(crate) ts_name: Option<String>,
     pub(crate) is_flatten: bool,
+    pub(crate) doc: Option<String>,
 }
 
 /// Map a Rust type to its TypeScript equivalent.
@@ -187,6 +188,34 @@ fn parse_ts_flatten_from_attrs(attrs: &[syn::Attribute]) -> bool {
     false
 }
 
+/// Extract doc comments from field-level `/// ...` attributes.
+///
+/// Collects all `#[doc = "..."]` attributes (the standard representation of `///`
+/// doc comments in Rust's attribute model). Each line is trimmed and joined with a
+/// single space. Returns `None` when no doc attributes are present.
+///
+/// Multiple `///` lines become separate `#[doc = "..."]` entries in the
+/// attribute list. This function joins them into a single JSDoc-ready string.
+fn parse_doc_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
+    let lines: Vec<String> = attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .filter_map(|a| {
+            if let Meta::NameValue(nv) = &a.meta {
+                if let syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                    return Some(s.value().trim().to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join(" "))
+    }
+}
+
 fn parse_struct_fields(
     data: &DataStruct,
     owner: &Ident,
@@ -202,12 +231,14 @@ fn parse_struct_fields(
                 let ts_type = rust_type_to_ts(&field.ty);
                 let ts_name = parse_ts_rename_from_attrs(&field.attrs);
                 let is_flatten = parse_ts_flatten_from_attrs(&field.attrs);
+                let doc = parse_doc_from_attrs(&field.attrs);
                 out.push(TsExportField {
                     name: field_ident,
                     rust_type: field.ty.clone(),
                     ts_type,
                     ts_name,
                     is_flatten,
+                    doc,
                 });
             }
             Ok(out)
@@ -248,6 +279,7 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
     let mut field_name_markers = Vec::with_capacity(parsed.fields.len());
     let mut field_flatten_markers = Vec::with_capacity(parsed.fields.len());
+    let mut field_doc_markers = Vec::with_capacity(parsed.fields.len());
     for (i, f) in parsed.fields.iter().enumerate() {
         let type_const_name = quote::format_ident!("__JOLT_TS_EXPORT_type_{i}");
         match &f.ts_type {
@@ -287,6 +319,22 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             #[doc(hidden)]
             pub const #flatten_const_name: bool = #is_flatten;
         });
+
+        let doc_const_name = quote::format_ident!("__JOLT_TS_EXPORT_doc_{i}");
+        match &f.doc {
+            Some(doc_text) => {
+                field_doc_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #doc_const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#doc_text);
+                });
+            }
+            None => {
+                field_doc_markers.push(quote! {
+                    #[doc(hidden)]
+                    pub const #doc_const_name: ::core::option::Option<&'static str> = ::core::option::Option::None;
+                });
+            }
+        }
     }
 
     quote! {
@@ -303,6 +351,8 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             #(#field_name_markers)*
 
             #(#field_flatten_markers)*
+
+            #(#field_doc_markers)*
         }
     }
 }
@@ -831,6 +881,135 @@ mod tests {
         assert!(
             out.contains("__JOLT_TS_EXPORT_type_0") && out.contains("None"),
             "type marker must still be None for unknown type, got: {out}"
+        );
+    }
+
+    // ── JOLT-RS-171: /// doc comment → JSDoc tests ──
+
+    #[test]
+    fn doc_detected_on_field() {
+        let input = parse_derive(
+            r#"
+            struct DocExport {
+                /// The user's name
+                name: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("The user's name")"#),
+            "field 0 with /// doc must emit Some(\"The user's name\"), got: {out}"
+        );
+    }
+
+    #[test]
+    fn no_doc_emits_none_marker() {
+        let input = parse_derive(
+            r#"
+            struct NoDoc {
+                title: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains("None"),
+            "field without /// doc must emit None for doc marker, got: {out}"
+        );
+    }
+
+    #[test]
+    fn multiline_doc_joined_with_spaces() {
+        let input = parse_derive(
+            r#"
+            struct MultiDoc {
+                /// First line
+                /// Second line
+                name: String,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("First line Second line")"#),
+            "multi-line /// doc must be joined with spaces, got: {out}"
+        );
+    }
+
+    #[test]
+    fn mixed_doc_and_non_doc_fields() {
+        let input = parse_derive(
+            r#"
+            struct MixedDoc {
+                /// The user's name
+                name: String,
+                age: u32,
+                /// Whether the user is active
+                active: bool,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("The user's name")"#),
+            "field 0 must emit Some(\"The user's name\"), got: {out}"
+        );
+        // field 1 (no doc) must be None between doc_0 and doc_2
+        let after_doc0 = out.split("__JOLT_TS_EXPORT_doc_0").nth(1).unwrap_or("");
+        let before_doc2 = after_doc0.split("__JOLT_TS_EXPORT_doc_2").next().unwrap_or("");
+        assert!(
+            before_doc2.contains("None"),
+            "field 1 (no doc) must have None doc marker between doc_0 and doc_2, got chunk: {before_doc2}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_2") && out.contains(r#"Some ("Whether the user is active")"#),
+            "field 2 must emit Some(\"Whether the user is active\"), got: {out}"
+        );
+    }
+
+    #[test]
+    fn doc_works_with_rename() {
+        let input = parse_derive(
+            r#"
+            struct DocRename {
+                /// The unique identifier
+                #[ts(rename = "userId")]
+                id: u32,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("The unique identifier")"#),
+            "doc must coexist with rename, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_name_0") && out.contains(r#"Some ("userId")"#),
+            "rename must coexist with doc, got: {out}"
+        );
+    }
+
+    #[test]
+    fn doc_works_with_flatten() {
+        let input = parse_derive(
+            r#"
+            struct DocFlatten {
+                /// The address details
+                #[ts(flatten)]
+                addr: Address,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_doc_0") && out.contains(r#"Some ("The address details")"#),
+            "doc must coexist with flatten, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_flatten_0") && out.contains("true"),
+            "flatten must coexist with doc, got: {out}"
         );
     }
 }

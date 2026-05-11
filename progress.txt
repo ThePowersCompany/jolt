@@ -6213,3 +6213,32 @@ Files changed:
 Notes for next iterations:
 - JOLT-RS-171 (priority 171): JSDoc comment generation from /// doc comments. Requires reading `field.attrs` for doc attributes, extracting the string, and storing as `doc: Option<String>` on `TsExportField`.
 - JOLT-RS-172 (priority 172): closing attribute test bundle. Should include the multi-item `#[ts(flatten, rename = "...")]` combo test once the attribute parser is upgraded to handle comma-separated items.
+
+## 2026-05-11 — JOLT-RS-171: doc comment → JSDoc extraction
+
+PRD item: JOLT-RS-171 (priority 171, phase40-tsexport-attributes) — Convert /// doc comments on fields to JSDoc /** ... */ comments above TS properties.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 230 passed, 0 failed (224 prior + 6 new ts_export doc tests).
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- Added `doc: Option<String>` field to `TsExportField`. Defaults `None` when no `///` doc comments exist on the field.
+- Added `parse_doc_from_attrs(attrs: &[syn::Attribute]) -> Option<String>` that collects all `#[doc = "..."]` attributes (syn's standard representation of `///` comments), trims each line, and joins with a single space. Multiple `///` lines become separate `#[doc = "..."]` entries so joining is needed to reconstruct the full doc.
+- Used `attr.path().is_ident("doc")` to filter, then matched `Meta::NameValue` to extract the string literal (same `Lit::Str` pattern as rename parsing). Empty doc strings are preserved (no special-casing of `///` with no text).
+- Emits per-field `__JOLT_TS_EXPORT_doc_N: Option<&'static str>` marker consts — `Some("doc text")` when a doc comment is present, `None` otherwise.
+- Did NOT add the `/** ... */` wrapping or comment emission into the marker — that's the call-site/JOLT-RS-168 concern. The marker carries the raw doc text; the TS codegen layer wraps it in JSDoc syntax.
+- 6 new tests in `ts_export::tests`:
+  * `doc_detected_on_field` — `/// The user's name` on `name: String` → `Some("The user's name")` in marker.
+  * `no_doc_emits_none_marker` — field without `///` → `None` marker.
+  * `multiline_doc_joined_with_spaces` — `/// First line` + `/// Second line` → `Some("First line Second line")`.
+  * `mixed_doc_and_non_doc_fields` — three fields (doc, no-doc, doc) with correct interleaving of Some/None markers.
+  * `doc_works_with_rename` — `/// The unique identifier` + `#[ts(rename = "userId")]` coexist correctly.
+  * `doc_works_with_flatten` — `/// The address details` + `#[ts(flatten)]` coexist correctly.
+
+Files changed:
+- jolt-macros/src/ts_export.rs — added `doc` field to `TsExportField`, `parse_doc_from_attrs` helper, wired into `parse_struct_fields`, added `field_doc_markers` emission in `expand_ts_export`, 6 new tests.
+- prd.json — JOLT-RS-171 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-172 (priority 172): closing attribute test bundle. Should add multi-item attribute parsing (`#[ts(flatten, rename = "...")]`) and doc + rename + flatten combo tests. The current single-item `parse_args()` parser only handles one `Meta` per `#[ts(...)]`; upgrading to `Punctuated::parse_terminated` will allow comma-separated items.
