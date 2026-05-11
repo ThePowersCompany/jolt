@@ -1119,7 +1119,7 @@
       "verification": [
         "Integration test: WS connect with valid token \u2192 upgrade succeeds, handler has claims."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-078",

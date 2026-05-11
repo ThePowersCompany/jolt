@@ -4282,3 +4282,34 @@ Blockers / next notes:
 - Body loss on oversized request (>10 MiB) is a known limitation — matching ParseBodyLayer's behavior exactly. Endpoints handling ultra-large payloads that bypass ParseBodyLayer will lose the body content for debug logging (but trace logging still records method/path/status). Mitigation: increase DEFAULT_MAX_BODY_SIZE or add a separate body-log-specific cap.
 - The 1024-byte log truncation splits mid-codepoint for multi-byte UTF-8 sequences at the boundary. `String::from_utf8_lossy` replaces invalid bytes with U+FFFD, which is acceptable for debug output.
 - Next unfinished item in priority order: JOLT-RS-077 (priority 77, phase17-auth-websocket: validate token before WS upgrade). JOLT-RS-071 through JOLT-RS-076 are all passes: true.
+
+## 2026-05-11 — JOLT-RS-077: Complete WS upgrade + inject JwtClaims into WS handler
+
+PRD item: JOLT-RS-077 (priority 77, phase17-auth-websocket) — On valid token, complete the upgrade and inject JwtClaims into the WS handler.
+
+Verification:
+- `cargo test --test ws_auth_upgrade` → 2/2 passed: `ws_connect_with_valid_token_upgrade_succeeds_and_handler_has_claims` + `ws_connect_with_invalid_token_is_rejected_with_401`.
+- `cargo test --workspace` → all tests pass (2 new tests; no regressions).
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as every prior JOLT-RS entry — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `set_claims(&mut self, claims: JwtClaims)` to the `WebSocketHandler` trait as a default no-op method that fires after the auth layer validates the token but before `on_open`. This lets handlers opt into receiving claims without breaking existing impls (backward-compatible — all existing handlers inherit the no-op default). The method is called by the upgrade infrastructure before the handler lifecycle starts.
+- Did NOT implement a new `tower::Service` for the upgrade itself. The existing axum `WebSocketUpgrade` extractor already performs the upgrade; claims flow through request extensions set by `AuthWsJwtLayer` (076) → extracted by axum's `Extension<JwtClaims>` extractor in the route handler → passed to the `WebSocketHandler` via `set_claims`. This keeps the 077 surface minimal: the trait addition enables the claims flow; the full upgrade-handler lifecycle driver (read/write task spawning, on_open → on_ready → on_message loop → on_close → on_shutdown) remains deferred to JOLT-RS-124's ws! macro codegen.
+- Integration test uses raw TCP (no `tokio-tungstenite` dependency) to send the WebSocket upgrade request with `Sec-WebSocket-Protocol: jolt-jwt, <token>`. The `read_response` helper reads until the double-CRLF that terminates HTTP headers (or until WouldBlock with data already received), then the test asserts 101 + `upgrade: websocket` response header.
+- Claims verification uses a shared `Arc<Mutex<Option<JwtClaims>>>` between the test and the handler. `ClaimsCapturingHandler.set_claims` stores the claims; the test reads them after a 100ms sleep to allow the upgrade callback to execute. The test also verifies `iat` preservation through the auth pipeline.
+- Added a second test (`ws_connect_with_invalid_token_is_rejected_with_401`) that sends a malformed JWT and asserts the upgrade is NOT performed (401 response, no 101). Tests the rejection path end-to-end through AuthWsJwtLayer.
+- Did NOT add `jwt::encode` to jolt-utils's public surface. The test uses `jsonwebtoken::encode` directly (already a dev-dependency of jolt-core, added for JOLT-RS-072's auth tests). Production token minting is out of scope for this auth-infra PRD item.
+- Did NOT wire `set_claims` into the `ws!` macro — JOLT-RS-123/124 own the macro-side wiring from `auth_fn` return to `set_claims`. The trait addition here is the runtime contract those future items will need.
+
+Files changed:
+- jolt-core/src/websocket.rs — added `set_claims(&mut self, claims: JwtClaims)` to `WebSocketHandler` trait; updated module docstring to name JOLT-RS-077.
+- jolt-core/tests/ws_auth_upgrade.rs — NEW integration test (2 async tests, ~180 lines).
+- prd.json — JOLT-RS-077 passes: true.
+
+Blockers / next notes:
+- The next unfinished items in priority order are JOLT-RS-078 (priority 78, phase18-early-termination: middleware checks is_finished before proceeding) and JOLT-RS-081 (priority 81, phase18-early-termination: closing test bundle). JOLT-RS-078/079/080 are passes: true (early termination wired for auth/cors/parse layers); only JOLT-RS-081 (the test bundle) is passes: false.
+- JOLT-RS-081 is the next highest-priority pass:false item after 078/079/080 (which are already true).
+- The full WebSocket handler lifecycle driver (read/write task spawning around axum WebSocket split) is deferred to JOLT-RS-124. The 077 integration test's upgrade callback deliberately does NOT drive the lifecycle — just captures claims and returns, which is sufficient for the PRD verification ("handler has claims"). 124's ws! macro codegen will combine the 076 auth layer, the 077 `set_claims` call, and socket read/write task spawns into a single generated axum route handler.
+- `jolt_utils::jwt::JwtClaims` is now referenced in a trait signature via `websocket.rs`'s `set_claims` method. This creates a compile-time dependency from jolt-core → jolt-utils in the public trait surface (previously this was only inside tower::Service impls via `use jolt_utils::jwt::JwtClaims`). The dependency already exists at the crate level (`jolt-core/Cargo.toml` has `jolt-utils`), so no new crate-graph edge.

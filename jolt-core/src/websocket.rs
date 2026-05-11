@@ -349,6 +349,12 @@ impl From<WsMessage> for AxumMessage {
 /// ```
 #[allow(async_fn_in_trait)]
 pub trait WebSocketHandler {
+    /// Called once after the auth layer validates the token but before
+    /// [`on_open`](Self::on_open) fires. Carries the JWT claims extracted
+    /// and decoded during the pre-upgrade auth flow (JOLT-RS-076/077).
+    /// Default no-op: handlers that don't use claims simply ignore this.
+    fn set_claims(&mut self, _claims: jolt_utils::jwt::JwtClaims) {}
+
     /// Called once immediately after the WebSocket upgrade completes, before
     /// any messages are read. Use this hook to register subscriptions or
     /// stash per-connection state (claims, user id, etc.).
