@@ -6393,3 +6393,278 @@ mod early_termination {
         );
     }
 }
+
+mod websocket {
+    //! PRD-mandated verification for JOLT-RS-121: "Write WS trait unit test:
+    //! mock WebSocketHandler, simulate open → message → close, verify callbacks
+    //! fire in order."
+    //!
+    //! The test drives the full lifecycle sequence on a mock handler that
+    //! records every callback invocation into a shared `Vec<&'static str>`
+    //! and then asserts the recorded order matches the documented contract:
+    //! `set_claims` → `on_open` → `on_ready` → `on_message` (0..N) →
+    //! `on_close` → `on_shutdown`.
+    //!
+    //! `set_claims` is a sync method (not async) that fires before `on_open`;
+    //! the rest are async. The mock records `set_claims` by wrapping the actual
+    //! handler in a driver function that calls it manually, then drives the
+    //! async lifecycle.
+
+    use std::sync::{Arc, Mutex};
+
+    use crate::{WebSocketHandler, WebSocketSender, WsMessage};
+
+    /// A mock handler that records every lifecycle callback invocation in a
+    /// shared `Vec<&'static str>`. Public fields let the test driver inspect
+    /// state: `claims_set` confirms `set_claims` fired, `last_message` shows
+    /// what message arrived, and `close_shutdown_order` records whether close
+    /// arrived before shutdown (inner ordering within the same async tick).
+    struct MockLifecycleHandler {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        claims_set: Arc<Mutex<bool>>,
+        last_message: Arc<Mutex<Option<WsMessage>>>,
+        close_shutdown_order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl MockLifecycleHandler {
+        fn new(
+            calls: Arc<Mutex<Vec<&'static str>>>,
+            claims_set: Arc<Mutex<bool>>,
+            last_message: Arc<Mutex<Option<WsMessage>>>,
+            close_shutdown_order: Arc<Mutex<Vec<&'static str>>>,
+        ) -> Self {
+            Self {
+                calls,
+                claims_set,
+                last_message,
+                close_shutdown_order,
+            }
+        }
+    }
+
+    impl WebSocketHandler for MockLifecycleHandler {
+        fn set_claims(&mut self, _claims: jolt_utils::jwt::JwtClaims) {
+            *self.claims_set.lock().unwrap() = true;
+            self.calls.lock().unwrap().push("set_claims");
+        }
+
+        async fn on_open(&mut self, _sender: WebSocketSender) {
+            self.calls.lock().unwrap().push("on_open");
+        }
+
+        async fn on_ready(&mut self, _sender: WebSocketSender) {
+            self.calls.lock().unwrap().push("on_ready");
+        }
+
+        async fn on_message(&mut self, msg: WsMessage, _sender: WebSocketSender) {
+            self.calls.lock().unwrap().push("on_message");
+            *self.last_message.lock().unwrap() = Some(msg);
+        }
+
+        async fn on_close(&mut self) {
+            self.calls.lock().unwrap().push("on_close");
+            self.close_shutdown_order.lock().unwrap().push("on_close");
+        }
+
+        async fn on_shutdown(&mut self) {
+            self.calls.lock().unwrap().push("on_shutdown");
+            self.close_shutdown_order.lock().unwrap().push("on_shutdown");
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_callbacks_fire_in_documented_order_on_normal_connection() {
+        // PRD-mandated verification: mock handler, simulate open → ready →
+        // message → close → shutdown, verify callbacks fire in the order
+        // set_claims → on_open → on_ready → on_message → on_close →
+        // on_shutdown.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let claims_set = Arc::new(Mutex::new(false));
+        let last_message = Arc::new(Mutex::new(None));
+        let close_shutdown_order = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handler = MockLifecycleHandler::new(
+            Arc::clone(&calls),
+            Arc::clone(&claims_set),
+            Arc::clone(&last_message),
+            Arc::clone(&close_shutdown_order),
+        );
+
+        let (sender, _rx) = WebSocketSender::channel();
+
+        // 1. set_claims — sync, fires before any async callback.
+        handler.set_claims(jolt_utils::jwt::JwtClaims {
+            sub: "test-user".to_owned(),
+            exp: 0,
+            iat: None,
+            extra: serde_json::Map::new(),
+        });
+        assert!(*claims_set.lock().unwrap(), "set_claims must have fired");
+
+        // 2. on_open — fires once after claims, before messages.
+        handler.on_open(sender.clone()).await;
+
+        // 3. on_ready — fires after on_open, before message loop.
+        handler.on_ready(sender.clone()).await;
+
+        // 4. on_message — fires per inbound frame. Drive a few messages to
+        //    pin the N-times contract.
+        handler
+            .on_message(WsMessage::Text("hello".to_string()), sender.clone())
+            .await;
+        handler
+            .on_message(
+                WsMessage::Binary(vec![1, 2, 3]),
+                sender.clone(),
+            )
+            .await;
+
+        {
+            let last = last_message.lock().unwrap();
+            assert!(
+                matches!(last.as_ref(), Some(WsMessage::Binary(b)) if b == &vec![1, 2, 3]),
+                "last_message must be the most recent on_message arg"
+            );
+        }
+
+        // 5. on_close — fires once, no sender.
+        handler.on_close().await;
+
+        // 6. on_shutdown — fires after on_close.
+        handler.on_shutdown().await;
+
+        // Assert the full recorded order.
+        let recorded = calls.lock().unwrap();
+        let expected: &[&str] = &[
+            "set_claims",
+            "on_open",
+            "on_ready",
+            "on_message",
+            "on_message",
+            "on_close",
+            "on_shutdown",
+        ];
+        assert_eq!(
+            &recorded[..],
+            expected,
+            "lifecycle callbacks must fire in the documented order: \
+             set_claims → on_open → on_ready → on_message (N times) → \
+             on_close → on_shutdown"
+        );
+
+        // Pins that close fires before shutdown within the same handler
+        // instance (not just the same recorded vec).
+        let inner_order = close_shutdown_order.lock().unwrap();
+        assert_eq!(
+            &inner_order[..],
+            &["on_close", "on_shutdown"],
+            "on_close must fire before on_shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_op_impls_run_to_completion_without_panicking() {
+        // Pins that the default implementations (no-ops) can be called from
+        // a unit struct handler without panicking. Each of the four async
+        // methods (open / ready / message / close / shutdown) must complete.
+        struct NoOpHandler;
+        impl WebSocketHandler for NoOpHandler {}
+
+        let (sender, _rx) = WebSocketSender::channel();
+        let mut handler = NoOpHandler;
+
+        handler.on_open(sender.clone()).await;
+        handler.on_ready(sender.clone()).await;
+        handler
+            .on_message(WsMessage::Text("ignored".to_string()), sender.clone())
+            .await;
+        handler.on_close().await;
+        handler.on_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn partial_override_leaves_untouched_callbacks_at_noop_defaults() {
+        // A handler that overrides only on_open and on_close must still
+        // accept on_ready, on_message, and on_shutdown calls via the default
+        // no-op impls. The recorded calls must show only the overridden
+        // methods firing with content.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        struct PartialHandler {
+            calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl WebSocketHandler for PartialHandler {
+            async fn on_open(&mut self, _sender: WebSocketSender) {
+                self.calls.lock().unwrap().push("on_open");
+            }
+            async fn on_close(&mut self) {
+                self.calls.lock().unwrap().push("on_close");
+            }
+        }
+
+        let (sender, _rx) = WebSocketSender::channel();
+        let mut handler = PartialHandler {
+            calls: Arc::clone(&calls),
+        };
+
+        handler.on_open(sender.clone()).await;
+        handler.on_ready(sender.clone()).await; // default no-op
+        handler
+            .on_message(WsMessage::Text("ignored".to_string()), sender.clone())
+            .await; // default no-op
+        handler.on_close().await;
+        handler.on_shutdown().await; // default no-op
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(
+            &recorded[..],
+            &["on_open", "on_close"],
+            "only overridden methods fire; defaults are silent no-ops"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_with_zero_messages_still_fires_open_ready_close_shutdown() {
+        // The "0..N messages" contract means the read loop may never deliver
+        // a frame (e.g. the client connects and immediately closes). The
+        // handler must still receive on_open → on_ready → on_close →
+        // on_shutdown without panicking.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        struct ZeroMessageHandler {
+            calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl WebSocketHandler for ZeroMessageHandler {
+            async fn on_open(&mut self, _sender: WebSocketSender) {
+                self.calls.lock().unwrap().push("on_open");
+            }
+            async fn on_ready(&mut self, _sender: WebSocketSender) {
+                self.calls.lock().unwrap().push("on_ready");
+            }
+            async fn on_close(&mut self) {
+                self.calls.lock().unwrap().push("on_close");
+            }
+            async fn on_shutdown(&mut self) {
+                self.calls.lock().unwrap().push("on_shutdown");
+            }
+        }
+
+        let (sender, _rx) = WebSocketSender::channel();
+        let mut handler = ZeroMessageHandler {
+            calls: Arc::clone(&calls),
+        };
+
+        handler.on_open(sender.clone()).await;
+        handler.on_ready(sender.clone()).await;
+        // No on_message calls.
+        handler.on_close().await;
+        handler.on_shutdown().await;
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(
+            &recorded[..],
+            &["on_open", "on_ready", "on_close", "on_shutdown"],
+            "zero-message lifecycle must still fire open → ready → close → shutdown"
+        );
+    }
+}

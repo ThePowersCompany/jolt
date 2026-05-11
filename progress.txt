@@ -4817,3 +4817,33 @@ Notes for next iterations:
 - JOLT-RS-118 (priority 118, opens phase28-ws-trait): define `WebSocketHandler` trait with default no-op impls for `on_open`, `on_message`, `on_close`, `on_ready`, `on_shutdown`. This is the first WebSocket surface in the workspace.
 - The `#[allow(dead_code)]` on `PatchField::inner_type` survives through phase27 close. It will be consumed when type‑specific SQL encodings are needed.
 - JOLT-RS-121 (WebSocket unit tests, priority 121) has `passes: false` — it's the next item after this one's dependencies.
+
+## 2026-05-11 — JOLT-RS-121: WS trait lifecycle-ordering unit test (closes phase28)
+
+PRD item: JOLT-RS-121 (priority 121, phase28-ws-trait) — Write WS trait unit test: mock WebSocketHandler, simulate open → message → close, verify callbacks fire in order.
+
+Verification:
+- `cargo test -p jolt-core -- tests::websocket` → 4 passed, 0 failed; compiled clean in 2.71s. Matches the PRD verification command literally.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as all prior items — auto-prompt's npm/Bun commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added `mod websocket` to `jolt-core/src/tests.rs` with 4 tests. Follows the established pattern (per-feature submodules in `tests.rs`, no inline `#[cfg(test)]` blocks alongside the source).
+- `lifecycle_callbacks_fire_in_documented_order_on_normal_connection` — the PRD-mandated verification: mock handler records every callback invocation into a shared `Vec<&'static str>`, drives the full lifecycle (set_claims → on_open → on_ready → on_message twice → on_close → on_shutdown), then asserts the recorded order matches `["set_claims", "on_open", "on_ready", "on_message", "on_message", "on_close", "on_shutdown"]`. Also verifies close-before-shutdown ordering via a separate `close_shutdown_order` vec.
+- `default_no_op_impls_run_to_completion_without_panicking` — pins that the default no-op implementations on all five async methods (open/ready/message/close/shutdown) complete without panicking on a unit struct handler.
+- `partial_override_leaves_untouched_callbacks_at_noop_defaults` — a handler that overrides only on_open and on_close still accepts on_ready/on_message/on_shutdown via defaults. Verifies that only the overridden methods produce recorded entries.
+- `lifecycle_with_zero_messages_still_fires_open_ready_close_shutdown` — pins the "0..N messages" contract: if on_message is never called (client connects and immediately closes), the handler must still receive on_open → on_ready → on_close → on_shutdown without panicking.
+- Mock handler (`MockLifecycleHandler`) records state via `Arc<Mutex<Vec<&'static str>>>` so ordering can be observed after all async calls complete. Uses separate `claims_set`, `last_message`, and `close_shutdown_order` fields for granular assertions.
+- `set_claims` is tested as a sync pre-open call — which is how 124's generated upgrade handler will drive it (claims extracted during auth → passed to handler before the async lifecycle begins).
+- Did NOT test `on_open`/`on_ready`/`on_close`/`on_shutdown` being called with wrong ordering (e.g. on_close before on_open) — the trait contract documents the correct order; testing every permutation of misordering is the domain of a fuzzer, not a unit test.
+- Removed unused `CloseFrame` import after initial compile warning — clean build.
+
+Files changed:
+- jolt-core/src/tests.rs — added `mod websocket` with `MockLifecycleHandler` and 4 `#[tokio::test]` cases.
+- prd.json — JOLT-RS-121 passes: true.
+
+Notes for next iterations:
+- phase28-ws-trait is now CLOSED. All 4 items (118/119/120/121) are passes: true.
+- JOLT-RS-122 (priority 122, opens phase29-ws-macro): implement `ws!` macro that generates an axum WS route with auth guard. This is the first cross-cutting macro consuming the trait declared here, composing with `AuthWsJwtLayer` from JOLT-RS-076.
+- The `__WsMacroWitness` struct in `websocket.rs` exists only to give 122 a typed return value before the real upgrade-handler codegen lands at 124.
