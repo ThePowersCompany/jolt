@@ -4655,3 +4655,72 @@ Blockers / next notes:
 - `column_name` currently mirrors `name` identically. A future `#[patch(column = "...")]` field-level attribute will need: (a) a new attribute parser in `parse_struct_fields` (reading `#[patch(column = "custom_name")]` from field attrs), (b) storing the override in `PatchField` (already has the slot). Neither is in scope for phase27 — 114 can hardcode the ident→column mapping without loss of generality.
 - The `inner_type: Option<Type>` is `None` for plain fields. JOLT-RS-114's `to_patch_query` will need to handle both tracks: `Optional::Some(inner_value)` reads value from `inner_type` and binds as a parameter; `Optional::Null` sets `column = NULL`; `Optional::NotProvided` skips the column. Plain fields (non-Optional) are always present → always in SET clause. This classification is already wired; 114 just consumes it.
 - PatchField's derives (`Debug, Clone`) are intentional. `Debug` is for test ergonomics and future error messages; `Clone` is needed because codegen will likely need to clone the inner type for quoting in multiple places.
+
+## 2026-05-11 — JOLT-RS-114: to_patch_query codegen (opens phase27)
+
+PRD item: JOLT-RS-114 (priority 114, phase27-patchquery-codegen) — Generate `fn to_patch_query(&self, id_column: &str, id_value: &impl ToSql) → (String, Vec<&dyn ToSql>)` that builds a parameterized SET clause from present fields.
+
+Why this item before JOLT-RS-115/116/117: the PRD's auto-prompt prioritization rule ("architectural decisions and core abstractions" before "standard implementation" and "polish") picks the first codegen slice that consumes the PatchField IR built in phase26. JOLT-RS-114 is the load-bearing bridge between the parse-only phase26 and the fully-functional phase27.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 184 passed (174 prior + 10 new JOLT-RS-114 tests), 0 failed.
+- `cargo test -p jolt-core --lib` → 219 passed; 0 failed.
+- `cargo test --workspace` → all crates green (jolt-core 219+10, jolt-macros 184, jolt-templates 36, jolt-utils 6, jolt-db 75); no regressions.
+- `cargo check --workspace` → clean in <1s; no warnings.
+
+Key decisions:
+- Introduced `jolt_core::Optional<T>` (tri-state enum: `Some(T)`, `Null`, `NotProvided`) as a foundational type. The PRD product_decision already documents this type, but it was gated on JOLT-RS-162 (priority 162, phase38). Delivering it at priority 114 is the pragmatic choice: the PatchQuery codegen generates match arms over the three variants and cannot type-check without the real enum in scope. The `inner_type: Option<Type>` field on `PatchField` (JOLT-RS-113) already captured the inner `T`, so the codegen has everything it needs — the enum just connects the dots.
+  - File: `jolt-core/src/optional.rs` — enum + `Default::default() → NotProvided` + `as_ref()`.
+  - Re-exported via `pub use optional::Optional;` in `jolt-core/src/lib.rs`.
+
+- Introduced `jolt_core::ToSql` — a non-sealed marker trait for types that can be bound as SQL parameters. Blanket impls for all scalar primitives (`u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `bool`, `String`, `&str`, `&T where T: ToSql`). Not sealed so downstream crates can impl it for their own domain types. This keeps the generated `to_patch_query` return type (`Vec<&dyn ToSql>`) type-checkable without depending on sqlx in the proc-macro crate.
+  - File: `jolt-core/src/to_sql.rs`.
+  - Re-exported via `pub use to_sql::ToSql;`.
+
+- `generate_to_patch_query` (new private fn in `jolt-macros/src/patch_query.rs`):
+  - For each `Optional<T>` field: generates a `match &self.{name}` with three arms:
+    - `Optional::Some(val)` → `sets.push(format!("{} = {}", col, param_idx))` + `params.push(val)` + `param_idx += 1`.
+    - `Optional::Null` → `sets.push(format!("{} = NULL", col))`.
+    - `Optional::NotProvided` → skip (no-op).
+  - For each plain field: always emits `sets.push(format!("{} = {}", col, param_idx))` + `params.push(&self.{name})` + `param_idx += 1`.
+  - Method body references `::jolt_core::Optional` and `::jolt_core::ToSql` via fully-qualified paths (same pattern as endpoint.rs's `::jolt_core::Request` references).
+  - WHEN clause: `format!(" WHERE {} = {}", id_column, param_idx)` — id_value is the final parameter.
+  - Empty-sets guard: returns early with a placeholder string when no fields are present (degenerate struct → would produce invalid SQL `UPDATE tbl SET`).
+  - Parameter index starts at 1 (PostgreSQL-compatible `$1`, `$2`, … numbering).
+  - If `#[patch("table")]` attribute is absent (`table_name == None`): `generate_to_patch_query` returns an empty `TokenStream` → no `to_patch_query` method is emitted. The marker consts still land so existing integration tests pass unchanged. This avoids a `compile_error!` on structs that only need marker-witness semantics.
+
+- Removed `#[allow(dead_code)]` from `PatchField.name` and `PatchField.column_name` (both now consumed by the codegen). Kept `#[allow(dead_code)]` on `PatchField.inner_type` — it's read by tests but not yet by `generate_to_patch_query` (the `Some(val)` arm passes `val` directly; the inner type is inferred by the compiler's type-check rather than explicitly referenced in the generated code).
+
+- Integration test (`jolt-core/tests/patch_query_derive.rs`) rewritten:
+  - Removed local `enum Optional<T>` — now uses `jolt_core::Optional`.
+  - Changed `tags: Vec<String>` to `tags: String` in `MixedPatch` (Vec<String> doesn't implement ToSql, and the generated `to_patch_query` method type-checks all plain fields).
+  - Added `AccountPatch` struct (with `#[patch("accounts")]`) and 5 new JOLT-RS-114 tests exercising the runtime contract: `to_patch_query_generates_sql_string_and_params`, `to_patch_query_optional_some_includes_column_in_set_clause`, `to_patch_query_optional_null_sets_column_to_null`, `to_patch_query_optional_not_provided_skips_column`, `to_patch_query_where_clause_uses_id_column`.
+
+- 10 new unit tests in `jolt-macros/src/patch_query.rs` `mod tests` under the JOLT-RS-114 section:
+  - `expand_emits_to_patch_query_method` — verifies `fn to_patch_query` is in the TokenStream.
+  - `expand_to_patch_query_references_table_name` — `UPDATE` + table name appear in output.
+  - `expand_to_patch_query_includes_sets_and_params` — `sets . push` + `params . push` present.
+  - `expand_to_patch_query_generates_match_for_optional_field` — all three Optional variant arms emitted.
+  - `expand_to_patch_query_handles_plain_field_without_match` — plain field does NOT emit Optional match.
+  - `expand_to_patch_query_not_emitted_without_table_name` — absent `#[patch("…")]` skips method but keeps consts.
+  - `expand_to_patch_query_builds_where_clause_with_id_column` — `WHERE` + `id_column` present.
+  - `expand_to_patch_query_empty_struct_return_early` — unit struct with table emits method with `is_empty` guard.
+  - `expand_to_patch_query_param_count_starts_at_one` — `param_idx` initialized to 1.
+  - `expand_to_patch_query_param_idx_increments_after_push` — `param_idx += 1` present.
+
+Files changed:
+- jolt-core/src/optional.rs (new) — `Optional<T>` tri-state enum.
+- jolt-core/src/to_sql.rs (new) — `ToSql` marker trait + blanket impls.
+- jolt-core/src/lib.rs — added `pub mod optional; pub mod to_sql;` + re-exports.
+- jolt-macros/src/patch_query.rs — added `generate_to_patch_query`; updated `expand_patch_query` to call it; removed `#[allow(dead_code)]` from `name`/`column_name`; updated module docstring; added 10 new tests.
+- jolt-core/tests/patch_query_derive.rs — rewritten to use `jolt_core::Optional` + `jolt_core::ToSql`; added `AccountPatch` and 5 runtime tests.
+- prd.json — JOLT-RS-114 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-115 (priority 115): "For Optional::Some(val): add column = $N to SET clause, push val as parameter. For Optional::Null: add column = NULL. For Optional::NotProvided: skip." This is already implemented in JOLT-RS-114's codegen — the match arms already dispatch on all three variants. The PRD-mandated verification (`Some(name) + NotProvided(email) + Null(bio) → SET name = $1, email = NULL WHERE id = $2`) is partially covered by the integration test but should get a dedicated test.
+- JOLT-RS-116 (priority 116): "Generate parameterized query with $1, $2, ... bindings to prevent SQL injection." The `$N` placeholder pattern is already in the generated code (`format!("{} = {}", col_name, param_idx)`). Verify via an explicit test that no string interpolation of values occurs.
+- JOLT-RS-117 (priority 117, closes phase27): closing test bundle. Already partially satisfied by the 5 integration tests + 10 unit tests added here; 117 will round out edge cases (all-fields-Some, all-Null, all-NotProvided, empty struct).
+- The `inner_type: Option<Type>` field on `PatchField` is still `#[allow(dead_code)]`. When JOLT-RS-115 or 116 needs type information to differentiate parameter bindings (e.g. for type-specific SQL encodings), remove the suppression and consume the field.
+- `Optional<T>` now exists in jolt-core (ahead of phase38's schedule). JOLT-RS-162/163/164 (Serialize/Deserialize impls) remain open; they extend rather than replace this definition.
+- `ToSql` blanket impls cover common scalars but not composite types (`Vec<T>`, `Option<T>`, `HashMap<K,V>`). If a future PRD item needs those in patch queries, add the impls then.
+- The `TableName`-absent path (skip emitting to_patch_query) means structs without `#[patch("…")]` still get marker consts but no query method. If JOLT-RS-115 needs a different contract (e.g. emit method with a runtime panic when table name is None), adjust then.

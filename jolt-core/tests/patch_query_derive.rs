@@ -1,9 +1,11 @@
-//! JOLT-RS-110 / JOLT-RS-111 / JOLT-RS-112 PRD-mandated integration tests.
+//! JOLT-RS-110 / JOLT-RS-111 / JOLT-RS-112 / JOLT-RS-114 PRD-mandated
+//! integration tests.
 //!
 //! Verifies that `#[derive(PatchQuery)]` compiles on a struct with
 //! `Optional<T>` fields (110), the struct-level `#[patch("table")]`
-//! attribute is parsed and emitted (111), and `Optional<T>` fields are
-//! detected and counted (112).
+//! attribute is parsed and emitted (111), `Optional<T>` fields are
+//! detected and counted (112), and the generated `to_patch_query` method
+//! compiles and type-checks (114).
 //!
 //! This is an integration test (not a unit test) because the derive macro can
 //! only be exercised through cargo's compile pipeline. The proc-macro crate's
@@ -16,39 +18,19 @@
 //!   type matches `Optional<T>`.
 //! - `__JOLT_PATCH_QUERY_TABLE_NAME` (111) — parsed `#[patch(...)]` value.
 //!
-//! `Optional<T>` is defined locally in this file because the framework's own
-//! `jolt_utils::Optional` tri-state type has not been introduced yet (its
-//! introduction is gated on JOLT-RS-055+ per the spec's `Optional<T>` note).
-//! At 110 the derive is purely syntactic — it captures field idents and
-//! types verbatim regardless of whether `Optional` resolves to the framework
-//! type or a user-defined enum, so a local declaration is sufficient to pin
-//! the PRD verification.
+//! Uses `jolt_core::Optional` (the real framework tri-state enum, introduced
+//! in JOLT-RS-114) and `jolt_core::ToSql` so the generated `to_patch_query`
+//! method type-checks against the real framework types.
 
-use jolt_core::PatchQuery;
-
-/// Tri-state stand-in for the framework's eventual `jolt_utils::Optional<T>`.
-/// At JOLT-RS-110 the derive doesn't inspect the type beyond capturing it
-/// verbatim, so the user-defined enum is interchangeable with the framework
-/// type for parse-witness purposes.
-#[allow(dead_code)]
-enum Optional<T> {
-    Some(T),
-    Null,
-    NotProvided,
-}
+use jolt_core::{Optional, PatchQuery};
 
 /// Unit-style patch target: zero fields. The derive must accept this and
-/// report a field count of 0. A patch with no updatable columns is degenerate
-/// but not malformed at the syntactic level — later slices will surface the
-/// SQL error at codegen / execute time.
+/// report a field count of 0.
 #[derive(PatchQuery)]
 struct EmptyPatch;
 
-/// The PRD-mandated surface: a struct with `Optional<T>` fields. Mixes string
-/// and numeric inner types to pin that the derive captures the type verbatim
-/// regardless of the inner `T` (a regression that hard-coded `Optional<String>`
-/// recognition would still pass on `name`/`email`/`bio` but would mis-handle
-/// `age: Optional<u32>`).
+/// The PRD-mandated surface: a struct with `Optional<T>` fields using
+/// `jolt_core::Optional`. All inner types implement `ToSql`.
 #[derive(PatchQuery)]
 #[allow(dead_code)]
 struct UserPatch {
@@ -58,18 +40,36 @@ struct UserPatch {
     bio: Optional<String>,
 }
 
-/// Mixed Optional and non-Optional fields. JOLT-RS-112 will classify the
-/// Optional fields as tri-state and leave plain fields alone, but at 110 every
-/// field is captured verbatim regardless of optional-ness. Pinning the
-/// mixed-field count here protects against a regression that filtered fields
-/// at parse time (e.g. dropping non-Optional fields prematurely).
+/// Mixed Optional and non-Optional fields. Plain fields must implement
+/// `ToSql` so the generated `to_patch_query` method compiles.
 #[derive(PatchQuery)]
 #[allow(dead_code)]
 struct MixedPatch {
     title: Optional<String>,
     view_count: u64,
-    tags: Vec<String>,
+    tags: String,
     body: Optional<String>,
+}
+
+// ── JOLT-RS-111: #[patch("table_name")] attribute ──
+
+#[derive(PatchQuery)]
+#[patch("users")]
+#[allow(dead_code)]
+struct UserTablePatch {
+    name: Optional<String>,
+    email: Optional<String>,
+}
+
+// ── JOLT-RS-114: to_patch_query method compiles ──
+
+#[derive(PatchQuery)]
+#[patch("accounts")]
+#[allow(dead_code)]
+struct AccountPatch {
+    display_name: Optional<String>,
+    bio: String,
+    follower_count: u64,
 }
 
 #[test]
@@ -80,28 +80,13 @@ fn empty_patch_derive_emits_zero_field_count() {
 #[test]
 fn user_patch_derive_counts_all_optional_fields() {
     assert_eq!(UserPatch::__JOLT_PATCH_QUERY_FIELD_COUNT, 4);
-    // All four fields are Optional<T> → optional count must match field count.
     assert_eq!(UserPatch::__JOLT_PATCH_QUERY_OPTIONAL_COUNT, 4);
 }
 
 #[test]
 fn mixed_patch_derive_counts_optional_and_plain_fields_together() {
     assert_eq!(MixedPatch::__JOLT_PATCH_QUERY_FIELD_COUNT, 4);
-    // Two Optional<T> + two plain fields = total 4, optional 2.
     assert_eq!(MixedPatch::__JOLT_PATCH_QUERY_OPTIONAL_COUNT, 2);
-}
-
-// ── JOLT-RS-111: #[patch("table_name")] attribute parsing ──
-
-/// The PRD-mandated surface: a struct with `#[patch("users")]` to verify the
-/// table-name attribute is parsed through the derive and emitted as an
-/// observable compile-time constant.
-#[derive(PatchQuery)]
-#[patch("users")]
-#[allow(dead_code)]
-struct UserTablePatch {
-    name: Optional<String>,
-    email: Optional<String>,
 }
 
 #[test]
@@ -112,4 +97,67 @@ fn table_patch_derive_emits_table_name() {
 #[test]
 fn empty_patch_missing_table_returns_none() {
     assert!(EmptyPatch::__JOLT_PATCH_QUERY_TABLE_NAME.is_none());
+}
+
+// ── JOLT-RS-114: to_patch_query compiles and returns correct shape ──
+
+#[test]
+fn to_patch_query_generates_sql_string_and_params() {
+    let patch = AccountPatch {
+        display_name: Optional::NotProvided,
+        bio: "Hello world".to_string(),
+        follower_count: 42,
+    };
+    let (sql, params) = patch.to_patch_query("id", &1u64);
+    assert!(sql.starts_with("UPDATE"), "SQL must be an UPDATE, got: {sql}");
+    assert!(sql.contains("accounts"), "SQL must reference table name, got: {sql}");
+    assert!(!params.is_empty(), "params must include at least the id_value");
+}
+
+#[test]
+fn to_patch_query_optional_some_includes_column_in_set_clause() {
+    let patch = AccountPatch {
+        display_name: Optional::Some("Alice".to_string()),
+        bio: "Engineer".to_string(),
+        follower_count: 0,
+    };
+    let (sql, params) = patch.to_patch_query("id", &99u64);
+    assert!(sql.contains("display_name"), "Some field must appear in SET clause, got: {sql}");
+    // All four params: display_name, bio, follower_count, id_value
+    assert_eq!(params.len(), 4, "expected 4 params (3 SET + 1 WHERE), got: {sql}");
+}
+
+#[test]
+fn to_patch_query_optional_null_sets_column_to_null() {
+    let patch = AccountPatch {
+        display_name: Optional::Null,
+        bio: "".to_string(),
+        follower_count: 0,
+    };
+    let (sql, _params) = patch.to_patch_query("id", &1u64);
+    assert!(sql.contains("display_name = NULL"), "Null field must produce SET col = NULL, got: {sql}");
+}
+
+#[test]
+fn to_patch_query_optional_not_provided_skips_column() {
+    let patch = AccountPatch {
+        display_name: Optional::NotProvided,
+        bio: "".to_string(),
+        follower_count: 0,
+    };
+    let (sql, params) = patch.to_patch_query("id", &1u64);
+    // Only bio, follower_count, id_value — display_name is skipped
+    assert!(!sql.contains("display_name"), "NotProvided field must be absent from SET, got: {sql}");
+    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+}
+
+#[test]
+fn to_patch_query_where_clause_uses_id_column() {
+    let patch = AccountPatch {
+        display_name: Optional::NotProvided,
+        bio: "x".to_string(),
+        follower_count: 1,
+    };
+    let (sql, _params) = patch.to_patch_query("user_id", &42u64);
+    assert!(sql.contains("WHERE user_id"), "WHERE clause must use id_column, got: {sql}");
 }

@@ -1,4 +1,4 @@
-//! `#[derive(PatchQuery)]` proc-macro derive — phase26 field parsing.
+//! `#[derive(PatchQuery)]` proc-macro derive — phase26 field parsing + phase27 codegen.
 //!
 //! Phase26 ladder:
 //! - JOLT-RS-110: parse the struct's named fields and their types into
@@ -10,20 +10,17 @@
 //!   extract the target table name.
 //! - JOLT-RS-112: detect `Optional<T>` fields via [`optional_inner_type`],
 //!   extract the inner `T`, emit `__JOLT_PATCH_QUERY_OPTIONAL_COUNT`.
-//! - JOLT-RS-113 (this iteration): graduate the per-field representation to
-//!   [`PatchField`] — the canonical internal representation carrying `name`,
-//!   `column_name`, `is_optional`, `inner_type`. Replaces the prior
-//!   `PatchQueryField` placeholder.
-//! - JOLT-RS-114..117: codegen `fn to_patch_query(&self, id_column: &str,
-//!   id_value: &impl ToSql) -> (String, Vec<&dyn ToSql>)` and the
-//!   `Some(_) → SET col = $N` / `Null → SET col = NULL` /
-//!   `NotProvided → skip` dispatch.
+//! - JOLT-RS-113: graduate the per-field representation to [`PatchField`] —
+//!   the canonical internal representation carrying `name`, `column_name`,
+//!   `is_optional`, `inner_type`.
 //!
-//! The parse entry point is split out from `lib.rs` so it can be unit-tested
-//! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
-//! (proc-macro entry points themselves cannot be invoked outside the
-//! compiler). Mirrors the same split established by
-//! [`crate::auto_middleware::parse_auto_middleware_input`] (JOLT-RS-046).
+//! Phase27 ladder:
+//! - JOLT-RS-114 (this iteration): generate `fn to_patch_query(&self,
+//!   id_column: &str, id_value: &impl ToSql) -> (String, Vec<&dyn ToSql>)`
+//!   that walks each field and builds the SET clause via [`generate_to_patch_query`].
+//! - JOLT-RS-115..116: refine the parameterized query with `$N` bindings
+//!   and `$1, $2, ...` placeholder numbering.
+//! - JOLT-RS-117: closing test bundle for phase27.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -101,9 +98,7 @@ pub(crate) struct PatchQueryInput {
 ///   `Optional<T>`; `None` for plain fields.
 #[derive(Debug, Clone)]
 pub(crate) struct PatchField {
-    #[allow(dead_code)]
     pub(crate) name: Ident,
-    #[allow(dead_code)]
     pub(crate) column_name: String,
     pub(crate) is_optional: bool,
     #[allow(dead_code)]
@@ -224,12 +219,11 @@ fn parse_struct_fields(
 
 /// Top-level driver for `#[derive(PatchQuery)]`.
 ///
-/// Parses via [`parse_patch_query_input`] and emits a hidden marker impl
-/// carrying `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` and
-/// `__JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize` so the integration test in
-/// `jolt-core/tests/patch_query_derive.rs` can witness that parsing observed
-/// the right field count and optional-field classification. Later slices
-/// (113-117) extend the emission with the `to_patch_query` method itself.
+/// Parses via [`parse_patch_query_input`] and emits:
+/// 1. Hidden marker consts (`__JOLT_PATCH_QUERY_FIELD_COUNT`,
+///    `__JOLT_PATCH_QUERY_OPTIONAL_COUNT`, `__JOLT_PATCH_QUERY_TABLE_NAME`).
+/// 2. (JOLT-RS-114+) The `fn to_patch_query(&self, id_column, id_value) ->
+///    (String, Vec<&dyn ToSql>)` method that builds a parameterized SET clause.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. Mirrors
@@ -255,6 +249,9 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
             }
         }
     };
+
+    let to_patch_query_method = generate_to_patch_query(&parsed);
+
     quote! {
         #[automatically_derived]
         impl #ident {
@@ -263,6 +260,91 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
             #[doc(hidden)]
             pub const __JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize = #optional_count;
             #table_name_const
+
+            #to_patch_query_method
+        }
+    }
+}
+
+/// Generate the `fn to_patch_query(…) -> (String, Vec<&dyn ToSql>)` method
+/// for JOLT-RS-114.
+///
+/// For each field in the struct:
+/// - If `Optional<T>`: generate a `match &self.{name}` with three arms:
+///   `Some(val)` → push `"column = $N"` + `val` as param,
+///   `Null` → push `"column = NULL"`,
+///   `NotProvided` → skip.
+/// - If plain (non-Optional): always include the field in the SET clause.
+///
+/// The WHERE clause uses `id_column` and `id_value` as the final parameter.
+fn generate_to_patch_query(input: &PatchQueryInput) -> TokenStream {
+    let table_name = match &input.table_name {
+        Some(t) => t.as_str(),
+        None => {
+            // No #[patch("table")] attribute → skip emitting to_patch_query.
+            // The marker consts (__JOLT_PATCH_QUERY_TABLE_NAME = None) still
+            // land so the integration test can observe the absence.
+            return TokenStream::new();
+        }
+    };
+
+    let mut field_arms: Vec<TokenStream> = Vec::with_capacity(input.fields.len());
+
+    for field in &input.fields {
+        let field_ident = &field.name;
+        let col_name = &field.column_name;
+
+        if field.is_optional {
+            field_arms.push(quote! {
+                match &self.#field_ident {
+                    ::jolt_core::Optional::Some(val) => {
+                        sets.push(format!("{} = {}", #col_name, param_idx));
+                        params.push(val);
+                        param_idx += 1usize;
+                    }
+                    ::jolt_core::Optional::Null => {
+                        sets.push(format!("{} = NULL", #col_name));
+                    }
+                    ::jolt_core::Optional::NotProvided => {}
+                }
+            });
+        } else {
+            field_arms.push(quote! {
+                {
+                    sets.push(format!("{} = {}", #col_name, param_idx));
+                    params.push(&self.#field_ident);
+                    param_idx += 1usize;
+                }
+            });
+        }
+    }
+
+    quote! {
+        pub fn to_patch_query<'j>(
+            &'j self,
+            id_column: &str,
+            id_value: &'j impl ::jolt_core::ToSql,
+        ) -> (String, Vec<&'j dyn ::jolt_core::ToSql>) {
+            let mut sets: Vec<String> = Vec::new();
+            let mut params: Vec<&'j dyn ::jolt_core::ToSql> = Vec::new();
+            let mut param_idx: usize = 1usize;
+
+            #(#field_arms)*
+
+            if sets.is_empty() {
+                return (
+                    String::from(
+                        "UPDATE  SET  — no fields to update"
+                    ),
+                    params,
+                );
+            }
+
+            let where_clause = format!(" WHERE {} = {}", id_column, param_idx);
+            params.push(id_value);
+
+            let sql = format!("UPDATE {} SET {}{}", #table_name, sets.join(", "), where_clause);
+            (sql, params)
         }
     }
 }
@@ -921,5 +1003,227 @@ mod tests {
         assert_eq!(f[4].column_name, "avatar_url");
         assert!(f[4].is_optional);
         assert!(f[4].inner_type.is_some());
+    }
+
+    // ── JOLT-RS-114: to_patch_query method codegen ──
+
+    #[test]
+    fn expand_emits_to_patch_query_method() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                    email: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("fn to_patch_query"),
+            "emission must contain the to_patch_query method, got: {out}"
+        );
+        assert!(
+            out.contains("id_column") && out.contains("id_value"),
+            "method must have id_column and id_value params, got: {out}"
+        );
+        assert!(
+            out.contains("dyn :: jolt_core :: ToSql") || out.contains("dyn ::jolt_core::ToSql"),
+            "return type must reference ::jolt_core::ToSql, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_references_table_name() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("UPDATE") && out.contains("users"),
+            "generated SQL must reference the table name \"users\", got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_includes_sets_and_params() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                    bio: String,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("sets . push"),
+            "generated method must push SET clause fragments, got: {out}"
+        );
+        assert!(
+            out.contains("params . push"),
+            "generated method must push parameters, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_generates_match_for_optional_field() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("Optional :: Some"),
+            "optional field must match on Optional::Some, got: {out}"
+        );
+        assert!(
+            out.contains("Optional :: Null"),
+            "optional field must match on Optional::Null, got: {out}"
+        );
+        assert!(
+            out.contains("Optional :: NotProvided"),
+            "optional field must match on Optional::NotProvided, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_handles_plain_field_without_match() {
+        // A plain (non-Optional) field should NOT generate a match block — it
+        // is always included in the SET clause.
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    bio: String,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            !out.contains("Optional :: Some"),
+            "plain field must not generate Optional::Some match, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_not_emitted_without_table_name() {
+        let input = parse_derive(
+            r#"
+            struct NoTable {
+                name: Optional<String>,
+            }
+            "#,
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            !out.contains("fn to_patch_query"),
+            "missing #[patch(\"...\")] must not emit to_patch_query, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_PATCH_QUERY_TABLE_NAME"),
+            "marker consts must still be emitted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_builds_where_clause_with_id_column() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("WHERE"),
+            "generated SQL must contain WHERE clause, got: {out}"
+        );
+        assert!(
+            out.contains("id_column"),
+            "WHERE clause must reference id_column, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_empty_struct_return_early() {
+        // An empty struct (no fields) has no SET clauses. The method should
+        // return early with a placeholder string.
+        let input = with_patch_attr(
+            parse_derive("struct EmptyPatch;"),
+            "empty_table",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("fn to_patch_query"),
+            "empty struct must still emit to_patch_query, got: {out}"
+        );
+        assert!(
+            out.contains("is_empty"),
+            "empty struct must check for empty sets, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_param_count_starts_at_one() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("param_idx : usize = 1usize") || out.contains("param_idx: usize = 1usize"),
+            "param_idx must start at 1 for $1-based PostgreSQL bindings, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_to_patch_query_param_idx_increments_after_push() {
+        let input = with_patch_attr(
+            parse_derive(
+                r#"
+                struct UserPatch {
+                    name: Optional<String>,
+                    email: Optional<String>,
+                }
+                "#,
+            ),
+            "users",
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("param_idx += 1usize"),
+            "param_idx must increment after each param push, got: {out}"
+        );
     }
 }

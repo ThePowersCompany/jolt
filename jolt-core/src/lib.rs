@@ -10,6 +10,7 @@ pub mod cors;
 pub mod endpoint;
 pub mod endpoint_registry;
 pub mod method;
+pub mod optional;
 pub mod parse_body;
 pub mod parse_query;
 pub mod registered_endpoint;
@@ -19,6 +20,7 @@ pub mod response;
 pub mod router;
 pub mod server;
 pub mod status;
+pub mod to_sql;
 pub mod websocket;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
@@ -45,6 +47,8 @@ pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
 pub use method::{Method, ParseMethodError};
+pub use optional::Optional;
+pub use to_sql::ToSql;
 pub use parse_body::{ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService};
 pub use parse_query::{
     bad_request_for_query_error, extract as extract_query, extract_bool as extract_query_bool,
