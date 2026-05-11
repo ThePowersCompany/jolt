@@ -4847,3 +4847,42 @@ Notes for next iterations:
 - phase28-ws-trait is now CLOSED. All 4 items (118/119/120/121) are passes: true.
 - JOLT-RS-122 (priority 122, opens phase29-ws-macro): implement `ws!` macro that generates an axum WS route with auth guard. This is the first cross-cutting macro consuming the trait declared here, composing with `AuthWsJwtLayer` from JOLT-RS-076.
 - The `__WsMacroWitness` struct in `websocket.rs` exists only to give 122 a typed return value before the real upgrade-handler codegen lands at 124.
+
+## 2026-05-11 — JOLT-RS-123: Tighten ws! auth_fn signature check + auth routing
+
+PRD item: JOLT-RS-123 (priority 123, phase29-ws-macro) — Tighten the `auth_fn` compile-time check to `fn(&str) -> Result<JwtClaims, AuthError>` and generate a `check_auth(token)` method that wraps auth_fn → claims → handler.on_open dispatch, returning 401 on error and 200 on success.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 193 passed (189 prior + 4 new JOLT-RS-123 tests), 0 failed.
+- `cargo test -p jolt-core --test ws_macro` → 8 passed (4 prior JOLT-RS-122 + 4 new JOLT-RS-123), 0 failed.
+- `cargo test --workspace` → all crates green; 0 failures.
+- `cargo check --workspace` → clean in 0.61s; no warnings.
+
+Note on harness instructions: same as all prior items — auto-prompt's `npm run type-check` / Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Introduced `jolt_core::AuthError` as a simple newtype wrapping a `String` message, with `Debug`, `Clone`, `Display`, `Error`, and `From<&str>`/`From<String>`. Lives in `jolt-core/src/auth_error.rs`, re-exported at the crate root via `pub use auth_error::AuthError`.
+- The `ws!` expansion now emits TWO compile-time checks in const blocks:
+  1. Handler type check: `fn __jolt_ws_assert_handler<__T: ::jolt_core::WebSocketHandler + Default>() {}` — adds the `Default` bound required by the generated `check_auth` method which constructs the handler via `<T>::default()`.
+  2. Auth-fn signature check: `fn __jolt_ws_assert_auth_fn<__F: Fn(&str) -> Result<JwtClaims, AuthError>>(__f: __F) {}` — pins the exact function signature. A mismatch surfaces as a `the trait bound ... is not satisfied` diagnostic at the `ws!` call site.
+- The `ws!` expansion now returns an anonymous struct `__JoltWsExpanded { witness: __WsMacroWitness }` with an impl carrying `pub async fn check_auth(self, token: &str) -> Response`. This struct is scoped to the block expression, so multiple `ws!` invocations in the same scope don't conflict (each block gets its own type). Rust's type inference allows accessing `.witness` and `.check_auth()` on the returned value.
+- `check_auth` on success: calls `auth_fn(token)`, on `Ok(claims)` constructs the handler via `Default::default()`, calls `handler.set_claims(claims)`, creates a `WebSocketSender::channel()` pair, calls `handler.on_open(sender).await`, returns `200 OK`. On `Err(err)`: returns `401 Unauthorized` with `text/plain; charset=utf-8` body carrying `err.to_string()`.
+- Did NOT change `__WsMacroWitness` — the witness remains nested inside `__JoltWsExpanded` for backward-compatible path/subprotocol assertions.
+- Did NOT implement the full axum route registration — that's JOLT-RS-124's scope. `check_auth` exists purely for testing at 123.
+- Updated the `ws_macro.rs` integration test: all four existing JOLT-RS-122 tests updated to destructure through `.witness.path` / `.witness.subprotocol` instead of directly typing as `__WsMacroWitness`; `EchoHandler` and `Adapter` now derive `Default`; `validate_token` / `auth_module::validate` return `Result<JwtClaims, AuthError>` matching the tightened signature.
+- Added 4 new JOLT-RS-123 integration tests: valid token → 200 (with handler.on_open called), claims stashed via set_claims before on_open, invalid token → 401, and 401 body contains the error message.
+- Added 4 new unit tests in `ws.rs` verifying the expanded TokenStream: `expand_emits_auth_fn_signature_check` (JwtClaims + AuthError present), `expand_emits_check_auth_method` (set_claims + on_open + UNAUTHORIZED), `expand_emits_handler_default_bound_check` (Default bound), and `expand_still_contains_backward_compatible_witness_struct` (backward-compat assertion).
+
+Files changed:
+- jolt-core/src/auth_error.rs (new) — AuthError type with message, Display, Error, From impls.
+- jolt-core/src/lib.rs — added `pub mod auth_error;` and `pub use auth_error::AuthError;`.
+- jolt-macros/src/ws.rs — updated `expand_ws_macro` to emit tightened signature checks + `__JoltWsExpanded` struct with `check_auth`; added 4 new unit tests; updated module docstring ladder.
+- jolt-core/tests/ws_macro.rs — updated handlers to derive Default; updated auth fns to return `Result<JwtClaims, AuthError>`; updated existing 4 tests to use type-inferred destructuring; added 4 new JOLT-RS-123 runtime tests.
+- prd.json — JOLT-RS-123 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-124 (priority 124): "Generate the WS upgrade handler: extract subprotocol from request, validate token, upgrade, create handler instance, drive lifecycle." This replaces the `__JoltWsExpanded` anonymous struct with a real axum route handler that composes with `AuthWsJwtLayer` to intercept the `Sec-WebSocket-Protocol` header, validate the token, perform the WebSocket upgrade, and drive the full `on_open → on_ready → on_message (loop) → on_close → on_shutdown` lifecycle.
+- JOLT-RS-125 (priority 125, closes phase29): full connect / send / receive integration test against a running axum server.
+- The `Default` bound on the handler type is load-bearing for the generated `check_auth` method. JOLT-RS-124 may remove this bound when it switches to the real upgrade handler (which owns the handler instance rather than constructing it internally).
+- `AuthError` is intentionally a `String`-wrapping newtype rather than an enum variant set. Concrete error variants (expired, bad signature, etc.) belong to `jolt_utils::jwt::JwtDecodeError`; `AuthError` is the opaque wrapper for user-provided auth functions that may have their own error categorization. Users map their errors → `AuthError::new(...)` in their auth function.
+- The `check_auth` method creates a temporary `WebSocketSender::channel()` pair and discards the receiver — the method exercises `on_open` for the signature test but doesn't forward messages. This is acceptable for a compile-time verification surface; the real sender → axum sink wiring lands at 124.

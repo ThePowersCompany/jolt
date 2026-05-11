@@ -1,5 +1,6 @@
 #![doc = "jolt-core: HTTP, WebSocket, SSE, tasks, and pub/sub primitives for the Jolt framework."]
 
+pub mod auth_error;
 pub mod auth_bearer;
 pub mod auth_jwt;
 pub mod auth_websocket;
@@ -24,6 +25,7 @@ pub mod to_sql;
 pub mod websocket;
 
 pub use auth_bearer::{AuthBearerLayer, AuthBearerService, BearerToken};
+pub use auth_error::AuthError;
 pub use auth_jwt::{AuthJwtLayer, AuthJwtService};
 pub use body_log::BodyLogLayer;
 // JOLT-RS-076 surface: the WS-JWT auth precheck layer composing the 075

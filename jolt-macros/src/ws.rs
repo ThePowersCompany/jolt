@@ -185,22 +185,62 @@ pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
             // Compile-time trait-bound check on the handler type. Lives inside
             // a `const _: fn() = || { ... };` so the closure body is type-
             // checked at compile time but never invoked at runtime. A handler
-            // type that doesn't implement `WebSocketHandler` surfaces here as
-            // a `the trait bound ... is not satisfied` diagnostic at the
+            // type that doesn't implement `WebSocketHandler + Default` surfaces
+            // here as a `the trait bound ... is not satisfied` diagnostic at the
             // call site of `ws!`.
             const _: fn() = || {
-                fn __jolt_ws_assert_handler<__T: ::jolt_core::WebSocketHandler>() {}
+                fn __jolt_ws_assert_handler<__T: ::jolt_core::WebSocketHandler + Default>() {}
                 __jolt_ws_assert_handler::<#handler_type>();
             };
-            // Resolve the auth_fn path as a value at the call site. JOLT-RS-122
-            // type-checks only that the path resolves; JOLT-RS-123 will
-            // tighten this to `fn(&str) -> Result<JwtClaims, _>`.
-            let _ = #auth_fn;
-            // Witness struct carrying the two string-literal arguments. 124
-            // replaces this with the real axum WS route handler.
-            ::jolt_core::__WsMacroWitness {
-                path: #path,
-                subprotocol: #subprotocol,
+            // Tightened JOLT-RS-123 signature check: auth_fn must be a callable
+            // matching `fn(&str) -> Result<JwtClaims, AuthError>`. Uses a const
+            // block so the check runs at compile time with zero runtime cost.
+            // If auth_fn's signature doesn't match exactly, the compiler
+            // surfaces a type-mismatch diagnostic at the ws! call site.
+            const _: fn() = || {
+                fn __jolt_ws_assert_auth_fn<__F: Fn(&str) -> Result<::jolt_core::JwtClaims, ::jolt_core::AuthError>>(__f: __F) {
+                    let _ = __f;
+                }
+                __jolt_ws_assert_auth_fn(#auth_fn);
+            };
+            // Anonymous struct carrying both the witness fields for
+            // backward-compatible path/subprotocol assertions AND a testable
+            // auth-check method that exercises the auth_fn → claims →
+            // handler.on_open dispatch path JOLT-RS-123 requires.
+            struct __JoltWsExpanded {
+                witness: ::jolt_core::__WsMacroWitness,
+            }
+            impl __JoltWsExpanded {
+                pub async fn check_auth(self, token: &str) -> ::axum::response::Response {
+                    match #auth_fn(token) {
+                        Err(err) => {
+                            ::axum::response::Response::builder()
+                                .status(::axum::http::StatusCode::UNAUTHORIZED)
+                                .header(
+                                    ::axum::http::header::CONTENT_TYPE,
+                                    ::axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+                                )
+                                .body(::axum::body::Body::from(err.to_string()))
+                                .expect("401 response builder always succeeds with static headers")
+                        }
+                        Ok(claims) => {
+                            let mut handler = <#handler_type>::default();
+                            handler.set_claims(claims);
+                            let (sender, _rx) = ::jolt_core::WebSocketSender::channel();
+                            handler.on_open(sender).await;
+                            ::axum::response::Response::builder()
+                                .status(::axum::http::StatusCode::OK)
+                                .body(::axum::body::Body::empty())
+                                .expect("200 response builder always succeeds with empty body")
+                        }
+                    }
+                }
+            }
+            __JoltWsExpanded {
+                witness: ::jolt_core::__WsMacroWitness {
+                    path: #path,
+                    subprotocol: #subprotocol,
+                },
             }
         }
     }
@@ -392,6 +432,79 @@ mod tests {
         assert!(
             !out.contains("__WsMacroWitness"),
             "no partial codegen on parse failure, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_auth_fn_signature_check() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
+        assert!(
+            out.contains("__jolt_ws_assert_auth_fn"),
+            "emission must include the auth_fn signature check, got: {out}"
+        );
+        assert!(
+            out.contains("JwtClaims"),
+            "auth_fn check must reference JwtClaims, got: {out}"
+        );
+        assert!(
+            out.contains("AuthError"),
+            "auth_fn check must reference AuthError, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_check_auth_method() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
+        assert!(
+            out.contains("check_auth"),
+            "emission must include the check_auth method, got: {out}"
+        );
+        assert!(
+            out.contains("set_claims"),
+            "check_auth must call handler.set_claims, got: {out}"
+        );
+        assert!(
+            out.contains("on_open"),
+            "check_auth must call handler.on_open, got: {out}"
+        );
+        assert!(
+            out.contains("StatusCode :: UNAUTHORIZED")
+                || out.contains("StatusCode::UNAUTHORIZED"),
+            "check_auth must return 401 on auth failure, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_handler_default_bound_check() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
+        assert!(
+            out.contains("Default"),
+            "handler trait check must include Default bound, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_still_contains_backward_compatible_witness_struct() {
+        let tokens = TokenStream::from_str(
+            r#""/chat", ChatHandler, subprotocol = "chat-v1", auth_fn = validate_token"#,
+        )
+        .expect("test input parses as TokenStream");
+        let out = expand_ws_macro(tokens).to_string();
+        assert!(
+            out.contains("__WsMacroWitness"),
+            "expansion must still construct the witness struct for backward compat, got: {out}"
         );
     }
 }
