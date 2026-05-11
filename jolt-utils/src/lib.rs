@@ -7,3 +7,6 @@
 //! subsequent PRD items.
 
 pub mod jwt;
+
+#[cfg(test)]
+mod tests;
