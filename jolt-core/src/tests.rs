@@ -6824,11 +6824,47 @@ mod sse {
     impl SseHandler for TickHandler {
         fn on_ready(&mut self) -> SseStream {
             let c = self.count;
-            let s = futures_util::stream::iter((0..c).map(move |i| SseEvent {
-                data: format!("tick-{}", i),
-            }));
+            let s = futures_util::stream::iter(
+                (0..c).map(move |i| SseEvent::new("tick", &format!("tick-{}", i))),
+            );
             Box::pin(s)
         }
+    }
+
+    #[test]
+    fn new_sets_name_and_data_with_no_id_or_retry() {
+        let event = SseEvent::new("message", "hello");
+        assert_eq!(event.name.as_deref(), Some("message"));
+        assert_eq!(event.data, "hello");
+        assert!(event.id.is_none());
+        assert!(event.retry.is_none());
+    }
+
+    #[test]
+    fn into_axum_event_does_not_panic_with_name_and_data() {
+        let _event: axum::response::sse::Event = SseEvent::new("message", "hello").into();
+    }
+
+    #[test]
+    fn into_axum_event_does_not_panic_with_all_fields_set() {
+        let e = SseEvent {
+            name: Some("msg".into()),
+            data: "body".into(),
+            id: Some("42".into()),
+            retry: Some(3000),
+        };
+        let _event: axum::response::sse::Event = e.into();
+    }
+
+    #[test]
+    fn into_axum_event_does_not_panic_with_no_optional_fields() {
+        let e = SseEvent {
+            name: None,
+            data: "bare data".into(),
+            id: None,
+            retry: None,
+        };
+        let _event: axum::response::sse::Event = e.into();
     }
 
     #[test]

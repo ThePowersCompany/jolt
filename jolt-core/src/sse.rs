@@ -13,16 +13,68 @@
 //!   timeouts.
 
 use std::pin::Pin;
+use std::time::Duration;
 
+use axum::response::sse::Event as AxumSseEvent;
 use futures_util::stream::{empty, Stream};
 
-/// A single SSE event. In-flight stub created at JOLT-RS-135 so the
-/// [`SseHandler`] trait's `on_ready` return type can reference it.
-/// JOLT-RS-136 adds the optional `name`, `id`, `retry` fields and the
-/// `From<SseEvent> for axum::response::sse::Event` mapping.
+/// A single SSE event.
+///
+/// Fields mirror the SSE specification (whatwg § 9.2):
+///
+/// | Field   | SSE wire    | Type            |
+/// |---------|-------------|-----------------|
+/// | `name`  | `event:`    | `Option<String>`|
+/// | `data`  | `data:`     | `String`        |
+/// | `id`    | `id:`       | `Option<String>`|
+/// | `retry` | `retry:`    | `Option<u64>`   |
+///
+/// # Conversion to axum SSE
+///
+/// `From<SseEvent> for `[`AxumSseEvent`]` maps each field:
+/// - `data` → `.data(self.data)`
+/// - `name` (if `Some`) → `.event(name)`
+/// - `id` (if `Some`) → `.id(id)`
+/// - `retry` (if `Some`) → `.retry(Duration::from_millis(self.retry))`
 pub struct SseEvent {
+    /// Event type name (`event:` line). If `None`, the `event:` line is omitted.
+    pub name: Option<String>,
     /// The event payload text. Required for every SSE event.
     pub data: String,
+    /// Event identifier (`id:` line). If `None`, the `id:` line is omitted.
+    pub id: Option<String>,
+    /// Reconnection time hint in milliseconds (`retry:` line). If `None`,
+    /// the `retry:` line is omitted.
+    pub retry: Option<u64>,
+}
+
+impl SseEvent {
+    /// Convenience constructor for the common case: an SSE event with a
+    /// named event type and payload data, with no `id` or `retry` hints.
+    pub fn new(name: &str, data: &str) -> Self {
+        Self {
+            name: Some(name.to_owned()),
+            data: data.to_owned(),
+            id: None,
+            retry: None,
+        }
+    }
+}
+
+impl From<SseEvent> for AxumSseEvent {
+    fn from(e: SseEvent) -> Self {
+        let mut event = AxumSseEvent::default().data(e.data);
+        if let Some(name) = e.name {
+            event = event.event(name);
+        }
+        if let Some(id) = e.id {
+            event = event.id(id);
+        }
+        if let Some(retry_ms) = e.retry {
+            event = event.retry(Duration::from_millis(retry_ms));
+        }
+        event
+    }
 }
 
 /// Boxed, pinned stream of [`SseEvent`] — the return type of
@@ -45,9 +97,7 @@ pub type SseStream = Pin<Box<dyn Stream<Item = SseEvent> + Send>>;
 ///         let stream = tokio_stream::wrappers::IntervalStream::new(
 ///             tokio::time::interval(Duration::from_secs(1)),
 ///         )
-///         .map(|_| SseEvent {
-///             data: chrono::Utc::now().to_string(),
-///         });
+///         .map(|_| SseEvent::new("tick", &chrono::Utc::now().to_string()));
 ///         Box::pin(stream)
 ///     }
 /// }

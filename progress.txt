@@ -5259,3 +5259,35 @@ Blockers / next notes:
 - `on_ready` default returns an empty stream. The 137 adapter should detect the empty-stream edge case (e.g., immediate `None` on first poll) and log a warning or return a 204-like response — defer that to 137's implementation.
 - No new workspace dependencies. `futures-util` (for `Stream` trait and `stream::empty()`) and `tokio-stream` are already deps of jolt-core.
 - The `SseEvent` stub deliberately omits `#[derive(Debug, Clone)]` — JOLT-RS-136 will decide the derive surface when adding the axum mapping.
+
+## 2026-05-11 — JOLT-RS-136: SseEvent optional fields + axum SSE Event mapping
+
+PRD item: JOLT-RS-136 (priority 136, phase32-sse) — Define SseEvent struct with name (Option<String>), data (String), id (Option<String>), retry (Option<u64>). Map to axum::response::sse::Event.
+
+Verification:
+- `cargo test -p jolt-core -- tests::sse` → 10/10 passed (6 prior SseHandler trait tests + 4 new SseEvent tests).
+- `cargo test -p jolt-core --lib` → 249 passed, 0 failed.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Key decisions:
+- `SseEvent::new(name: &str, data: &str) -> Self` constructor sets name + data, leaves id/retry as None. Matches the PRD verification verbatim.
+- `From<SseEvent> for axum::response::sse::Event`: builds via builder-pattern chaining — `.data()`, optional `.event()`, `.id()`, `.retry(Duration::from_millis(...))`. Uses `Duration::from_millis(self.retry)` to convert the u64 retry field into the Duration that axum expects.
+- Did NOT derive `Debug` or `Clone` for `SseEvent`. The stub didn't have them (JOLT-RS-135 notes explicitly deferred), and no consumer needs them yet. Easy to add later.
+- axum's `Event` struct has no getter methods — its `event()`, `data()`, `id()`, `retry()` are all builder-style setters that take a value and return `Event`. This means assertion-against-axum-Event-field tests cannot read back values. The 4 new tests instead assert the Jolt-side fields and verify the `From` impl doesn't panic across all variants (all-optional-set, no-optional-set, new()-constructed).
+- Updated the two existing `SseEvent { data: ... }` struct-literal usages to use `SseEvent::new(...)` — the doc example in sse.rs (clock handler) and the `TickHandler` test fixture in tests.rs. The struct-literal-with-missing-fields pattern was compiler-OK when there was only one field; adding three new fields made it a compile error, so the `::new()` constructor is the natural remediation.
+
+Tests added (4 in `tests::sse`):
+- `new_sets_name_and_data_with_no_id_or_retry` — asserts the constructor populates name + data and leaves id/retry None (the contract). This is the PRD-mandated verification.
+- `into_axum_event_does_not_panic_with_name_and_data` — `SseEvent::new("message", "hello").into()` compiles and runs without panic (covers the standard path).
+- `into_axum_event_does_not_panic_with_all_fields_set` — struct-literal with every field populated into the From impl (covers the full-builder-branch path).
+- `into_axum_event_does_not_panic_with_no_optional_fields` — None name/id/retry into the From impl (covers the no-builder-branch path, verifying that axum's SSE Event handles missing event/id/retry gracefully).
+
+Files changed:
+- jolt-core/src/sse.rs — replaced the 1-field stub with 4-field struct + `new()` constructor + `From<SseEvent> for axum::response::sse::Event`. Updated doc comments and the `ClockHandler` doc example.
+- jolt-core/src/tests.rs — updated `TickHandler` fixture to use `SseEvent::new(...)` instead of struct-literal; added 4 new SseEvent tests in `mod sse`.
+- prd.json — JOLT-RS-136 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-137 (priority 137): SSE endpoint adapter that creates `axum::response::Sse` from `handler.on_ready()` stream. The `SseHandler` trait and `SseEvent`→axum Event mapping are now both solid; 137 is pure adapter code.
+- JOLT-RS-138 (priority 138): keep-alive at 15s to prevent proxy timeouts.
+- The `#[derive(Debug)]` omission on `SseEvent` is deliberate per this item's call. If a future test or logging path needs it, add it then — no re-derive penalty.
