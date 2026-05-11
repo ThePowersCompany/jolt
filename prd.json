@@ -2015,7 +2015,7 @@
       "verification": [
         "Unit test: register task with 100ms interval \u2192 run() called multiple times within 500ms."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-142",
