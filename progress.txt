@@ -4578,3 +4578,42 @@ Blockers / next notes:
 - JOLT-RS-113 (priority 113): builds `Vec<PatchField>` internal representation from the now-classified fields. These three slices (111/112/113) are tightly coupled and form the phase26 parsing stack.
 - The `table_name: Option<String>` field on `PatchQueryInput` is consumed by JOLT-RS-114+ codegen (the `to_patch_query` method needs the table name to generate `UPDATE <table> SET ...`).
 - All integration tests continue to work through the same `#[derive(PatchQuery)]` → compile-time const pattern. When 112 adds field classification, the integration test will need a runtime-observable marker (similar to `__JOLT_PATCH_QUERY_FIELD_COUNT`) or a check on the classification flag count.
+
+## 2026-05-11 — JOLT-RS-112: Detect Optional<T> fields (extract inner T, mark field as tri-state)
+
+PRD item: JOLT-RS-112 (priority 112, phase26-patchquery-parsing) — Detect `Optional<T>` fields: check if type path resolves to `Optional`, extract inner `T`, mark field as tri-state via `is_optional: bool` and `inner_type: Option<Type>` on `PatchQueryField`.
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 169/169 passed (up from 159; 10 new JOLT-RS-112 tests).
+- `cargo test -p jolt-core --test patch_query_derive` → 5/5 passed (integrates 112's `__JOLT_PATCH_QUERY_OPTIONAL_COUNT` with 110/111 markers).
+- `cargo check --workspace` → clean; no regressions in any sibling crate.
+- `cargo test --workspace` → all crates pass, 0 failures.
+
+Note on harness instructions: same as prior entries — auto-prompt's `npm run type-check` / Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- `pub(crate) fn optional_inner_type(ty: &Type) -> Option<&Type>` is the core detection helper. It peels a `Type::Path` and checks that the outermost path segment is identically `Optional` with exactly one angle-bracketed generic type argument. Returns a reference to the inner `T` if it matches; `None` otherwise. Detection is name-based (by ident), not path-resolved — the derive operates on syntax, not semantics. If a user names their own type `Optional` with different semantics, the compiler's type-system catches the mismatch later.
+- `PatchQueryField` gains two new fields: `is_optional: bool` (true when `optional_inner_type(&field.ty).is_some()`) and `inner_type: Option<Type>` (the cloned inner type when present, `None` otherwise). The existing `ident` and `ty` fields are preserved verbatim with `#[allow(dead_code)]` — they will be consumed by JOLT-RS-113's `PatchField` IR.
+- The helper deliberately rejects: bare `Optional` (no generic args), `Result<T, E>` (two generic args — `Optional` has exactly one), non-path types (references, arrays, tuples), and any type whose path doesn't end in `Optional` (including `Vec<T>`).
+- `expand_patch_query` now emits a third hidden marker: `__JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize` counting fields where `is_optional` is true. This makes the classification observable from integration tests without requiring the full `to_patch_query` method (which lands at 114+).
+- 10 new unit tests under `mod tests`:
+  * `detects_optional_string_field` — `Optional<String>` → is_optional=true, inner_type renders as `String`.
+  * `detects_optional_u32_field` — `Optional<u32>` → inner_type renders as `u32` (pin that detection works across different inner types).
+  * `plain_field_is_not_optional` — `u64` and `String` fields → is_optional=false, inner_type=None.
+  * `vec_field_is_not_optional` — `Vec<String>` → is_optional=false (pin that ident matters, not just angle-bracket shape).
+  * `mixed_optional_and_plain_fields_are_classified_correctly` — a 4-field struct with two Optional + two plain → each is classified correctly by index.
+  * `expand_emits_optional_count_marker` — 3-field all-Optional struct → marker const carries `3`.
+  * `expand_emits_zero_optional_count_for_plain_struct` — all-plain struct → marker carries `0`.
+  * `optional_inner_type_returns_none_for_non_path_types` — `&str` is not Optional.
+  * `optional_inner_type_returns_none_for_no_arg_optional` — bare `Optional` (no generic) is not Optional<T>.
+  * `optional_inner_type_returns_none_for_two_arg_type` — `Result<String, ()>` must not be mistaken for Optional.
+
+Files changed:
+- jolt-macros/src/patch_query.rs — added `optional_inner_type()` helper; added `is_optional: bool` + `inner_type: Option<Type>` to `PatchQueryField`; updated `parse_struct_fields` to classify each field; added `__JOLT_PATCH_QUERY_OPTIONAL_COUNT` emission to `expand_patch_query`; added 10 new unit tests; updated module-level docstring.
+- jolt-core/tests/patch_query_derive.rs — added `__JOLT_PATCH_QUERY_OPTIONAL_COUNT` assertions to `user_patch_derive_counts_all_optional_fields` (count=4) and `mixed_patch_derive_counts_optional_and_plain_fields_together` (count=2); updated module docstring to cover 110+111+112.
+- prd.json — JOLT-RS-112 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-113 (priority 113, phase26): "Build an internal representation: Vec<PatchField> with name, column_name, is_optional, inner_type." This folds `PatchQueryInput` + `PatchQueryField` into the `PatchField` IR that JOLT-RS-114+ codegen consumes. The `ident`, `ty`, `is_optional`, and `inner_type` fields (currently dead_code-annotated) are the raw material; 113 adds `column_name` (with future `#[patch(column = "...")]` override slot) and structures the vec.
+- JOLT-RS-114 (priority 114, phase27): the first codegen slice — `fn to_patch_query(...) → (String, Vec<&dyn ToSql>)`. Unblocked by 113.
+- The `is_optional` classification binary is now verified at both the unit-test level (169 tests in jolt-macros) and integration-test level (5 tests in jolt-core). If 113 changes the classification surface (e.g. from `bool` to a `PatchFieldKind` enum), both test layers protect against silent regressions.

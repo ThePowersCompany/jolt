@@ -1,20 +1,20 @@
-//! JOLT-RS-110 / JOLT-RS-111 PRD-mandated integration tests.
+//! JOLT-RS-110 / JOLT-RS-111 / JOLT-RS-112 PRD-mandated integration tests.
 //!
 //! Verifies that `#[derive(PatchQuery)]` compiles on a struct with
-//! `Optional<T>` fields (110) and that the struct-level `#[patch("table")]`
-//! attribute is parsed and emitted (111).
+//! `Optional<T>` fields (110), the struct-level `#[patch("table")]`
+//! attribute is parsed and emitted (111), and `Optional<T>` fields are
+//! detected and counted (112).
 //!
 //! This is an integration test (not a unit test) because the derive macro can
 //! only be exercised through cargo's compile pipeline. The proc-macro crate's
 //! own unit tests parse-check the emitted token stream but cannot expand and
 //! type-check the derive against a real `DeriveInput` from a downstream crate.
 //!
-//! The hidden `__JOLT_PATCH_QUERY_FIELD_COUNT` const emitted by the 110 derive
-//! and the `__JOLT_PATCH_QUERY_TABLE_NAME` const emitted by 111 are the
-//! observable witnesses that parsing succeeded. Later phase26/27 items
-//! (112-117) replace the marker consts with the real `to_patch_query` method;
-//! the consts stay alongside the new surfaces until a runtime-witness test
-//! from a later slice makes them redundant.
+//! The hidden consts emitted by the derive are the observable witnesses:
+//! - `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` (110) — total named field count.
+//! - `__JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize` (112) — count of fields whose
+//!   type matches `Optional<T>`.
+//! - `__JOLT_PATCH_QUERY_TABLE_NAME` (111) — parsed `#[patch(...)]` value.
 //!
 //! `Optional<T>` is defined locally in this file because the framework's own
 //! `jolt_utils::Optional` tri-state type has not been introduced yet (its
@@ -79,20 +79,16 @@ fn empty_patch_derive_emits_zero_field_count() {
 
 #[test]
 fn user_patch_derive_counts_all_optional_fields() {
-    // Four `Optional<T>` fields → derive must report exactly four. A
-    // regression that filtered fields by inner-type (e.g. only kept
-    // `Optional<String>` and dropped `Optional<u32>`) would surface as a
-    // wrong count here.
     assert_eq!(UserPatch::__JOLT_PATCH_QUERY_FIELD_COUNT, 4);
+    // All four fields are Optional<T> → optional count must match field count.
+    assert_eq!(UserPatch::__JOLT_PATCH_QUERY_OPTIONAL_COUNT, 4);
 }
 
 #[test]
 fn mixed_patch_derive_counts_optional_and_plain_fields_together() {
-    // Two `Optional<T>` + one `u64` + one `Vec<String>` = 4 total. 110
-    // captures every named field; the Optional-vs-plain distinction is 112's
-    // concern. A regression that pre-filtered by optional-ness would report 2
-    // (Optional-only) or 0 here.
     assert_eq!(MixedPatch::__JOLT_PATCH_QUERY_FIELD_COUNT, 4);
+    // Two Optional<T> + two plain fields = total 4, optional 2.
+    assert_eq!(MixedPatch::__JOLT_PATCH_QUERY_OPTIONAL_COUNT, 2);
 }
 
 // ── JOLT-RS-111: #[patch("table_name")] attribute parsing ──

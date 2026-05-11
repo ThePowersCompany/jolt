@@ -1607,9 +1607,9 @@
         "Detect Optional<T> fields: check if type path resolves to Optional. Extract inner T. Mark field as tri-state."
       ],
       "verification": [
-        "Unit test: field typed Optional<String> \u2192 detected as Optional with inner String."
+        "Unit test: field typed Optional<String> → detected as Optional with inner String."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-113",

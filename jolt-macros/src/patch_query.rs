@@ -1,15 +1,19 @@
 //! `#[derive(PatchQuery)]` proc-macro derive — phase26 field parsing.
 //!
 //! Phase26 ladder:
-//! - JOLT-RS-110 (this iteration): parse the struct's named fields and their
-//!   types into [`PatchQueryInput`] + [`PatchQueryField`]. The derive emits a
-//!   minimal hidden marker (`__JOLT_PATCH_QUERY_FIELD_COUNT: usize`) so an
+//! - JOLT-RS-110: parse the struct's named fields and their types into
+//!   [`PatchQueryInput`] + [`PatchQueryField`]. The derive emits a minimal
+//!   hidden marker (`__JOLT_PATCH_QUERY_FIELD_COUNT: usize`) so an
 //!   integration test can verify the derive compiled and parsed the field
 //!   count without depending on later codegen.
 //! - JOLT-RS-111: parse the struct-level `#[patch("users")]` attribute to
 //!   extract the target table name.
-//! - JOLT-RS-112: detect `Optional<T>` fields, extract inner `T`, mark
-//!   field as tri-state.
+//! - JOLT-RS-112 (this iteration): detect `Optional<T>` fields via
+//!   [`optional_inner_type`], extract the inner `T`, and mark each field
+//!   with [`PatchQueryField::is_optional`] + [`PatchQueryField::inner_type`].
+//!   The derive emits an additional `__JOLT_PATCH_QUERY_OPTIONAL_COUNT:
+//!   usize` hidden marker so the integration test can observe the
+//!   classification.
 //! - JOLT-RS-113: build the [`Vec<PatchField>`] internal representation
 //!   carrying `name`, `column_name`, `is_optional`, `inner_type`.
 //! - JOLT-RS-114..117: codegen `fn to_patch_query(&self, id_column: &str,
@@ -25,16 +29,61 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse2, Data, DataStruct, DeriveInput, Fields, Ident, LitStr, Meta, Type};
+use syn::{
+    parse2, Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, LitStr, Meta,
+    PathArguments, Type,
+};
+
+/// Check whether `ty` is `Optional<T>` and, if so, return a reference to the
+/// inner `T`.
+///
+/// JOLT-RS-112: a field typed `Optional<String>` has `is_optional = true` and
+/// `inner_type = Some(Type::Path("String"))`. A field typed `u32`, `Vec<T>`,
+/// or `MyType` has `is_optional = false` and `inner_type = None`.
+///
+/// Detection inspects the type-path structure: the outermost path segment must
+/// be identically `Optional` and must carry exactly one angle-bracketed
+/// generic type argument. Named-`where`-clause generics (e.g.
+/// `Optional<T> where T: Clone`) are not angle-bracketed and will not match —
+/// the user's struct-level `where` clauses live outside the field type's
+/// grammar.
+///
+/// `Optional` is matched by identity alone — no path resolution (no attempt
+/// to confirm `Optional` resolves to a concrete definition). This is a
+/// deliberate choice: the derive operates on syntax, not semantics; the
+/// compiler will later type-check that the user's `Optional` actually exists
+/// and carries the expected variants. If a user names their own type
+/// `Optional` with different semantics, the compiler's type-system catches
+/// the mismatch, not the derive parser.
+pub(crate) fn optional_inner_type(ty: &Type) -> Option<&Type> {
+    if let Type::Path(type_path) = ty {
+        let segments = &type_path.path.segments;
+        if let Some(last) = segments.last() {
+            if last.ident == "Optional" {
+                if let PathArguments::AngleBracketed(args) = &last.arguments {
+                    let generic_args = &args.args;
+                    if generic_args.len() == 1 {
+                        if let GenericArgument::Type(inner) = &generic_args[0] {
+                            return Some(inner);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Parsed shape of a `#[derive(PatchQuery)]` input.
 ///
 /// JOLT-RS-110 captures the struct identifier and per-field metadata (name +
 /// type, verbatim). JOLT-RS-111 adds the struct-level `#[patch("table_name")]`
-/// attribute extraction into [`table_name`]. Later phase26 slices extend
-/// [`PatchQueryField`] with optional-detection state (112) and column-name
-/// overrides; this slice keeps the shape minimal so 111-117 have a single place
-/// to add fields without breaking the parse entry point.
+/// attribute extraction into [`table_name`]. JOLT-RS-112 adds
+/// [`PatchQueryField::is_optional`] + [`PatchQueryField::inner_type`]
+/// classification to each field via [`optional_inner_type`]. Later phase26
+/// slices extend [`PatchQueryField`] with column-name overrides; this shape
+/// keeps the representation minimal until 113 graduates to the `PatchField`
+/// IR.
 #[derive(Debug)]
 pub(crate) struct PatchQueryInput {
     pub(crate) ident: Ident,
@@ -42,23 +91,23 @@ pub(crate) struct PatchQueryInput {
     pub(crate) table_name: Option<String>,
 }
 
-/// One field on a `#[derive(PatchQuery)]` struct. Captured verbatim from
-/// `syn::Field` — the ident is the column name source (until JOLT-RS-113 lands
-/// `#[patch(column = "...")]` overrides) and the type is what later slices
-/// inspect to spot `Optional<T>` (112) and the inner `T` (113).
+/// One field on a `#[derive(PatchQuery)]` struct.
 ///
-/// `#[allow(dead_code)]` on `ident` and `ty` is a JOLT-RS-111/112 cross-link:
-/// the lib-side `expand_patch_query` only reads `parsed.fields.len()` at 110,
-/// so the per-field metadata is consumed solely by the `#[cfg(test)]` parse
-/// witnesses today. 112 will inspect `ty` to detect `Optional<T>` and 114+
-/// will splice `ident` into the generated `SET <ident> = $N` clause — at
-/// which point this allow gets dropped.
+/// JOLT-RS-110 captures the ident and type verbatim from `syn::Field`. JOLT-RS-112
+/// extends with [`is_optional`] and [`inner_type`] classification via
+/// [`optional_inner_type`]: if the field's type is `Optional<T>`,
+/// `is_optional` is `true` and `inner_type` holds `T`; otherwise `false` and
+/// `None`. JOLT-RS-113 will fold this into the `PatchField` internal
+/// representation.
 #[derive(Debug, Clone)]
 pub(crate) struct PatchQueryField {
     #[allow(dead_code)]
     pub(crate) ident: Ident,
     #[allow(dead_code)]
     pub(crate) ty: Type,
+    pub(crate) is_optional: bool,
+    #[allow(dead_code)]
+    pub(crate) inner_type: Option<Type>,
 }
 
 /// Parse a `DeriveInput` into [`PatchQueryInput`].
@@ -152,9 +201,13 @@ fn parse_struct_fields(
                     .ident
                     .clone()
                     .expect("Fields::Named guarantees every field has an ident");
+                let is_optional = optional_inner_type(&field.ty).is_some();
+                let inner_type = optional_inner_type(&field.ty).cloned();
                 out.push(PatchQueryField {
                     ident: field_ident,
                     ty: field.ty.clone(),
+                    is_optional,
+                    inner_type,
                 });
             }
             Ok(out)
@@ -171,11 +224,11 @@ fn parse_struct_fields(
 /// Top-level driver for `#[derive(PatchQuery)]`.
 ///
 /// Parses via [`parse_patch_query_input`] and emits a hidden marker impl
-/// carrying `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` so the integration test in
+/// carrying `__JOLT_PATCH_QUERY_FIELD_COUNT: usize` and
+/// `__JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize` so the integration test in
 /// `jolt-core/tests/patch_query_derive.rs` can witness that parsing observed
-/// the right field count. Later slices (111-117) extend the emission with the
-/// `#[patch("table")]` attribute, optional-detection state, and the
-/// `to_patch_query` method itself.
+/// the right field count and optional-field classification. Later slices
+/// (113-117) extend the emission with the `to_patch_query` method itself.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. Mirrors
@@ -188,6 +241,7 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
     };
     let ident = &parsed.ident;
     let field_count = parsed.fields.len();
+    let optional_count = parsed.fields.iter().filter(|f| f.is_optional).count();
     let table_name_const = match &parsed.table_name {
         Some(t) => quote! {
             #[doc(hidden)]
@@ -205,6 +259,8 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
         impl #ident {
             #[doc(hidden)]
             pub const __JOLT_PATCH_QUERY_FIELD_COUNT: usize = #field_count;
+            #[doc(hidden)]
+            pub const __JOLT_PATCH_QUERY_OPTIONAL_COUNT: usize = #optional_count;
             #table_name_const
         }
     }
@@ -551,6 +607,185 @@ mod tests {
         assert!(
             out.contains("Option::None") || out.contains("core :: option :: Option :: None"),
             "absent table must emit Option::None, got: {out}"
+        );
+    }
+
+    // ── JOLT-RS-112: Optional<T> detection ──
+
+    #[test]
+    fn detects_optional_string_field() {
+        let input = parse_derive(
+            r#"
+            struct UserPatch {
+                name: Optional<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 1);
+        let f = &parsed.fields[0];
+        assert!(f.is_optional, "Optional<String> must be detected as optional");
+        assert!(f.inner_type.is_some(), "inner_type must be Some(String)");
+        let inner = f.inner_type.as_ref().unwrap();
+        let rendered = quote! { #inner }.to_string();
+        assert!(
+            rendered == "String",
+            "inner type must be String, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn detects_optional_u32_field() {
+        let input = parse_derive(
+            r#"
+            struct NumPatch {
+                count: Optional<u32>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        let f = &parsed.fields[0];
+        assert!(f.is_optional, "Optional<u32> must be detected as optional");
+        let inner = f.inner_type.as_ref().unwrap();
+        let rendered = quote! { #inner }.to_string();
+        assert!(
+            rendered == "u32",
+            "inner type must be u32, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plain_field_is_not_optional() {
+        let input = parse_derive(
+            r#"
+            struct PlainPatch {
+                view_count: u64,
+                title: String,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 2);
+        for f in &parsed.fields {
+            assert!(
+                !f.is_optional,
+                "field {} must not be detected as optional",
+                f.ident
+            );
+            assert!(
+                f.inner_type.is_none(),
+                "plain field {} must have inner_type=None",
+                f.ident
+            );
+        }
+    }
+
+    #[test]
+    fn vec_field_is_not_optional() {
+        // Vec<String> looks like a generic type with one arg, so the detection
+        // must NOT treat it as Optional — it checks the ident, not just the
+        // angle-bracket shape.
+        let input = parse_derive(
+            r#"
+            struct ListPatch {
+                tags: Vec<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        let f = &parsed.fields[0];
+        assert!(!f.is_optional, "Vec<String> must not be detected as optional");
+        assert!(f.inner_type.is_none(), "Vec<String> must have inner_type=None");
+    }
+
+    #[test]
+    fn mixed_optional_and_plain_fields_are_classified_correctly() {
+        let input = parse_derive(
+            r#"
+            struct MixedPatch {
+                name: Optional<String>,
+                count: u32,
+                tags: Vec<String>,
+                bio: Optional<String>,
+            }
+            "#,
+        );
+        let parsed = parse_patch_query_input(input).expect("parses");
+        assert_eq!(parsed.fields.len(), 4);
+        assert!(parsed.fields[0].is_optional);
+        assert!(!parsed.fields[1].is_optional);
+        assert!(!parsed.fields[2].is_optional);
+        assert!(parsed.fields[3].is_optional);
+        assert!(parsed.fields[0].inner_type.is_some());
+        assert!(parsed.fields[1].inner_type.is_none());
+        assert!(parsed.fields[2].inner_type.is_none());
+        assert!(parsed.fields[3].inner_type.is_some());
+    }
+
+    #[test]
+    fn expand_emits_optional_count_marker() {
+        let input = parse_derive(
+            r#"
+            struct UserPatch {
+                name: Optional<String>,
+                email: Optional<String>,
+                bio: Optional<String>,
+            }
+            "#,
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains("__JOLT_PATCH_QUERY_OPTIONAL_COUNT"),
+            "emission must declare the optional-count const, got: {out}"
+        );
+        assert!(
+            out.contains(": usize = 3") || out.contains("3usize"),
+            "optional-count const must carry 3, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_zero_optional_count_for_plain_struct() {
+        let input = parse_derive(
+            r#"
+            struct PlainPatch {
+                count: u32,
+                name: String,
+            }
+            "#,
+        );
+        let out = expand_patch_query(input).to_string();
+        assert!(
+            out.contains(": usize = 0") || out.contains("0usize"),
+            "optional-count const must be 0 for all-plain struct, got: {out}"
+        );
+    }
+
+    #[test]
+    fn optional_inner_type_returns_none_for_non_path_types() {
+        use syn::Type;
+        let ty: Type = syn::parse_quote! { &str };
+        assert!(optional_inner_type(&ty).is_none(), "&str is not Optional");
+    }
+
+    #[test]
+    fn optional_inner_type_returns_none_for_no_arg_optional() {
+        // Bare `Optional` without angle-bracketed args — not Optional<T>.
+        let ty: Type = syn::parse_quote! { Optional };
+        assert!(
+            optional_inner_type(&ty).is_none(),
+            "bare Optional (no generic arg) is not Optional<T>"
+        );
+    }
+
+    #[test]
+    fn optional_inner_type_returns_none_for_two_arg_type() {
+        // `Result<T, E>` has two angle-bracket args — must not be mistaken for
+        // Optional<T> (which has exactly one).
+        let ty: Type = syn::parse_quote! { Result<String, ()> };
+        assert!(
+            optional_inner_type(&ty).is_none(),
+            "Result<_, _> must not be mistaken for Optional<T>"
         );
     }
 }
