@@ -2099,7 +2099,7 @@
       "verification": [
         "cargo test -p jolt-core -- tests::task_retry passes."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-148",

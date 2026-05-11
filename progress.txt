@@ -5601,3 +5601,30 @@ Blockers / next notes:
 - `start()` draining the slab means calling `start()` twice is a no-op on the second call (empty slab). If a future call site needs "add tasks after start", the right move is to add a separate `spawn(task)` that bypasses the slab drain and pushes a handle directly — not to undo the drain.
 - The `shutdown()` method takes `&mut self`. If a future needs to call `shutdown()` from a shared context (e.g. multiple codepaths want to trigger shutdown), wrap the handles + shutdown flag in an `Arc<Mutex<...>>` or use a separate `ShutdownHandle` that calls shutdown via a stored sender. Deferred until a second consumer materializes.
 
+
+## 2026-05-11 — JOLT-RS-147: task_retry test bundle (closes phase34)
+
+PRD item: JOLT-RS-147 (priority 147, phase34-task-retry-shutdown) — Write retry + shutdown tests: retry backoff timing, shutdown mid-retry, concurrent shutdown of multiple tasks. Closes phase34.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task_retry` → 2/2 passed (shutdown_during_retry_backoff_freezes_task_count, concurrent_shutdown_stops_multiple_tasks).
+- `cargo test -p jolt-core --lib` → 273/273 passed (2 new tests in `mod task_retry`), 0 failed.
+- `cargo check --workspace` → clean; no regressions.
+
+Note on harness instructions: same as prior items — auto-prompt's npm/Bun-Hono commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Created a new `mod task_retry` module (sibling to `mod task`) in `jolt-core/src/tests.rs`. The PRD verification filter `cargo test -p jolt-core -- tests::task_retry` mandates a dedicated module with that name so future PRD items that add coverage under `tests::task` can be independently filtered from the retry/shutdown-specific bundle.
+- Backoff timing coverage: `retry_backoff_increases_on_failure_resets_on_success` (in `mod task`, from JOLT-RS-144) already covers the backoff-increase-and-reset contract with timestamp-delta assertions. 147 does not duplicate that test.
+- `shutdown_during_retry_backoff_freezes_task_count`: an `AlwaysFail` task with 1ms interval starts, runs at least once, then the shutdown flag is set via `shutdown_flag().store(true)` while the task is sleeping in its 1s backoff. After a 3s sleep (generous buffer past the ~1s backoff wake), the run count is asserted frozen — proving the task loop notices the flag on wake and exits, not running again.
+- `concurrent_shutdown_stops_multiple_tasks`: two `AlwaysFail` tasks registered, start ensures both run, then `scheduler.shutdown(Duration::from_secs(5))` is called. Both counters are asserted frozen after shutdown — proving the multi-handle drain in `shutdown()` works correctly and no deadlock occurs.
+- Did NOT add a shutdown-through-cli-shell test (ctrl_c simulation via signal delivery in a unit test is non-portable and unreliable). The existing `graceful_shutdown_stops_task_loop` (145) and `shutdown_stops_all_tasks_within_timeout` (146) already cover the shutdown-flag mechanism. The ctrl_c watcher path is untestable in pure unit tests and acceptable in the existing form (tested by manual integration).
+- The `AlwaysFail` task struct (1ms interval, always returns Err) is reused across both tests — defined once at module scope to avoid fixture duplication. Mirrors the pattern `mod task` already uses for `CleanupTask` / `CountingTask`.
+
+Files changed:
+- jolt-core/src/tests.rs — added `mod task_retry` with `AlwaysFail` fixture + 2 tests (`shutdown_during_retry_backoff_freezes_task_count`, `concurrent_shutdown_stops_multiple_tasks`).
+- prd.json — JOLT-RS-147 passes: true.
+
+Blockers / next notes:
+- phase34-task-retry-shutdown is now CLOSED. All 9 items (139–147) are passes: true.
+- JOLT-RS-148 (priority 148, phase35-jwt-utils): "Define JwtClaims struct: sub (Option<String>), exp (Option<u64>), ..." — this is the next PRD item by priority order. Note the current workspace has jolt-utils with a stub `jwt.rs` module, and jolt-core's `auth_jwt.rs` layer already imports `jsonwebtoken` for test-side token minting. 148 is a pure-additive surface — `jolt-utils/src/jwt.rs` carries the typed `JwtClaims`/`JwtConfig` that the auth layer currently inlines from jolt-utils's test module. If the existing `JwtClaims` from the earlier phase's work is already in jolt-utils/src/jwt.rs, 148 may already be partially satisfied by forward-work; need to verify the current state of `jolt-utils/src/jwt.rs`.

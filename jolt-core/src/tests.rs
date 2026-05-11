@@ -7615,3 +7615,94 @@ mod task {
         );
     }
 }
+
+mod task_retry {
+    use crate::{Task, TaskFuture, TaskScheduler};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct AlwaysFail {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Task for AlwaysFail {
+        fn name(&self) -> &str {
+            "always-fail"
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+
+        fn run(&mut self) -> TaskFuture<'_> {
+            let count = Arc::clone(&self.count);
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err(crate::TaskError::new("deliberate failure"))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_retry_backoff_freezes_task_count() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        let mut scheduler = TaskScheduler::new();
+        let shutdown = scheduler.shutdown_flag();
+        scheduler.register(AlwaysFail {
+            count: Arc::clone(&run_count),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let runs_before = run_count.load(Ordering::SeqCst);
+        assert!(runs_before >= 1, "task must have run at least once before shutdown; got {runs_before}");
+
+        shutdown.store(true, Ordering::SeqCst);
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let runs_after = run_count.load(Ordering::SeqCst);
+
+        assert_eq!(
+            runs_before, runs_after,
+            "task count must freeze after shutdown flag set during backoff; before={runs_before}, after={runs_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_stops_multiple_tasks() {
+        let count_a = Arc::new(AtomicUsize::new(0));
+        let count_b = Arc::new(AtomicUsize::new(0));
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(AlwaysFail {
+            count: Arc::clone(&count_a),
+        });
+        scheduler.register(AlwaysFail {
+            count: Arc::clone(&count_b),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let a_before = count_a.load(Ordering::SeqCst);
+        let b_before = count_b.load(Ordering::SeqCst);
+        assert!(a_before >= 1, "task A must have run at least once; got {a_before}");
+        assert!(b_before >= 1, "task B must have run at least once; got {b_before}");
+
+        scheduler.shutdown(Duration::from_secs(5)).await;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let a_after = count_a.load(Ordering::SeqCst);
+        let b_after = count_b.load(Ordering::SeqCst);
+
+        assert_eq!(
+            a_before, a_after,
+            "task A count must freeze after shutdown; before={a_before}, after={a_after}"
+        );
+        assert_eq!(
+            b_before, b_after,
+            "task B count must freeze after shutdown; before={b_before}, after={b_after}"
+        );
+    }
+}
