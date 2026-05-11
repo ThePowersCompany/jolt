@@ -1707,7 +1707,7 @@
       "verification": [
         "Unit test: sender.send_text(\"hi\") calls underlying WS send."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-120",
