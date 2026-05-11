@@ -4083,3 +4083,32 @@ Notes for next iterations:
 - JOLT-RS-045 (priority 45, endpoint-macro-codegen integration test) is the next phase09 holdout.
 - JOLT-RS-054 (priority 54, auto-middleware derive test) is the next phase11 holdout.
 - When (if ever) path-param extraction is added to the Endpoint trait, the N/A comment block in `mod endpoint_registry` marks the spot where wildcard-matching tests should land.
+
+## 2026-05-10 — JOLT-RS-045: endpoint macro integration test
+
+PRD item: JOLT-RS-045 (priority 45, phase09-endpoint-macro-codegen) — Write integration test: define endpoint struct with #[endpoint("/ping")], #[get] fn ping() → server returns 200 at GET /ping.
+
+Verification:
+- `cargo test --test endpoint_integration` → 1 passed, 0 failed; finished in 0.00s.
+- `cargo check --workspace` → all 5 crates check clean in 0.32s; no regressions.
+- `cargo test --workspace` → 479 passed total (was 478; +1 new); 0 failed.
+- `cargo clippy --workspace --all-targets` → 0 new warnings (2 pre-existing baseline: new_without_default on RequestExt and JoltServer).
+
+Note on harness instructions: same as every prior JOLT-RS-NNN entry — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Created `jolt-core/tests/endpoint_integration.rs` as an integration test binary (separate crate from jolt-core). This is required because proc-macros can only be exercised through cargo's compile pipeline — jolt-macros' own unit tests token-parse but can't actually expand and link. The test binary IS the downstream crate that exercises `#[endpoint]`.
+- Defined a single endpoint struct `PingEndpoint` with `#[endpoint("/ping")]` + `#[get] fn ping(&self) -> Response<&'static str>` returning `Response::new(StatusCode::Ok, "pong")`. Minimal surface — one type, one method, one assertion path.
+- Test shape mirrors `inventory_registration.rs`'s `into_router_serves_inventory_registered_get_endpoint`: `JoltServer::new().into_router()`, `oneshot` a GET /ping request, assert 200 status + "pong" body bytes. This exercises the full end-to-end path: macro expansion → inventory::submit! → JoltServer::collect_inventory_endpoints() → EndpointRegistry::sort() → build_router() → axum dispatch → handler wrapper → Response → axum bridge.
+- Did NOT add POST/DELETE/PUT variants — PRD step names only `#[get] fn ping()`. The existing `inventory_registration.rs` already covers multi-verb routing (GET + POST on /probe), so adding more verb variants here would duplicate coverage.
+- Did NOT add a second endpoint type. Multi-type registration is proven by `inventory_registration.rs`'s `Probe` + `Secondary` pair. This test keeps the focus on the single-item verification the PRD mandates.
+- `PingEndpoint` derives `Default` (empty struct) to satisfy the handler wrapper's need to construct a `&self` receiver. Same pattern as `Probe` in `inventory_registration.rs`.
+
+Files changed:
+- jolt-core/tests/endpoint_integration.rs — NEW. ~35 lines.
+- prd.json — JOLT-RS-045 passes: true.
+
+Notes for next iterations:
+- phase09-endpoint-macro-codegen is now nearly CLOSED. Items 042-045 are all passes: true. The phase is complete (the remaining items 038-041 in phase08 were already pass:true).
+- JOLT-RS-054 (priority 54, auto-middleware derive test) is the next highest-priority pass:false item.
+- JOLT-RS-062 (priority 62, body parsing unit test bundle) and JOLT-RS-067 (priority 67, query parsing unit test bundle) are close-behind phase closers.
