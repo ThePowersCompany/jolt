@@ -2464,7 +2464,7 @@
       "verification": [
         "Unit test: simple enum \u2192 TS string union."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-174",

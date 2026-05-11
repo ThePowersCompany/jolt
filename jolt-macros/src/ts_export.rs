@@ -28,10 +28,14 @@ use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Me
 /// JOLT-RS-165 captures the struct identifier and per-field Rust name + type.
 /// Later items add per-field attributes (rename, flatten, doc) and the
 /// TypeScript type-mapping engine (166-168).
+///
+/// JOLT-RS-173: `variants` carries simple enum variant names when the derive
+/// is applied to a no-data enum. Empty for structs and rejected enum shapes.
 #[derive(Debug)]
 pub(crate) struct TsExportInput {
     pub(crate) ident: Ident,
     pub(crate) fields: Vec<TsExportField>,
+    pub(crate) variants: Vec<String>,
 }
 
 /// Internal representation of one field on a `#[derive(TsExport)]` struct.
@@ -107,14 +111,16 @@ pub(crate) fn rust_type_to_ts(ty: &Type) -> Option<String> {
 
 /// Parse a `DeriveInput` into [`TsExportInput`].
 ///
-/// Acceptance rules (mirror [`crate::patch_query::parse_patch_query_input`]'s
-/// decision set from JOLT-RS-110):
-/// - Must be a `struct`. Enums and unions are rejected with a span pointing
-///   at the offending keyword.
-/// - Named-fields struct → captured field-by-field.
-/// - Unit struct → accepted with an empty field list.
-/// - Tuple struct → rejected (TS property names come from field idents; a
-///   positional struct has no names to export).
+/// Acceptance rules:
+/// - **struct** (named fields) → captured field-by-field.
+/// - **unit struct** → accepted with an empty field list.
+/// - **tuple struct** → rejected (TS property names come from field idents).
+/// - **simple enum** (no data on any variant) → accepted; `variants` populated,
+///   `fields` empty (JOLT-RS-173).
+/// - **data-carrying enum** (at least one variant with fields) → rejected with
+///   a span on the first data-carrying variant.  JOLT-RS-174 will add support
+///   for tagged unions.
+/// - **union** → rejected.
 pub(crate) fn parse_ts_export_input(
     input: DeriveInput,
 ) -> syn::Result<TsExportInput> {
@@ -122,17 +128,51 @@ pub(crate) fn parse_ts_export_input(
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
-            Ok(TsExportInput { ident, fields })
+            Ok(TsExportInput {
+                ident,
+                fields,
+                variants: Vec::new(),
+            })
         }
-        Data::Enum(e) => Err(syn::Error::new_spanned(
-            e.enum_token,
-            "#[derive(TsExport)] can only be applied to structs, not enums",
-        )),
+        Data::Enum(e) => {
+            let (variants, reject) = parse_enum_variants(&e);
+            if let Some(err) = reject {
+                return Err(err);
+            }
+            Ok(TsExportInput {
+                ident,
+                fields: Vec::new(),
+                variants,
+            })
+        }
         Data::Union(u) => Err(syn::Error::new_spanned(
             u.union_token,
             "#[derive(TsExport)] can only be applied to structs, not unions",
         )),
     }
+}
+
+/// Walk enum variants collecting names for simple (no-data) enums.
+///
+/// Returns `(variant_names, maybe_rejection)`.  When `maybe_rejection` is
+/// `Some(…)` the caller must surface the compile error because the enum
+/// includes at least one data-carrying variant (JOLT-RS-174 territory).
+fn parse_enum_variants(e: &syn::DataEnum) -> (Vec<String>, Option<syn::Error>) {
+    let mut names = Vec::with_capacity(e.variants.len());
+    for variant in &e.variants {
+        if !variant.fields.is_empty() {
+            return (
+                Vec::new(),
+                Some(syn::Error::new_spanned(
+                    &variant.fields,
+                    "#[derive(TsExport)] on enums currently only supports simple \
+                     (no-data) variants; this variant carries fields",
+                )),
+            );
+        }
+        names.push(variant.ident.to_string());
+    }
+    (names, None)
 }
 
 /// Parsed `#[ts(...)]` field-level attribute values.
@@ -257,25 +297,30 @@ fn parse_struct_fields(
 /// Top-level driver for `#[derive(TsExport)]`.
 ///
 /// Parses via [`parse_ts_export_input`] and emits:
-/// 1. Hidden marker `__JOLT_TS_EXPORT_FIELD_COUNT: usize` (JOLT-RS-165) so an
-///    integration test can observe the derive ran and parsed the correct field
-///    count.
-/// 2. Hidden marker `__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize` (JOLT-RS-166)
-///    for the number of fields with a recognised TypeScript type mapping.
-/// 3. One hidden marker `__JOLT_TS_EXPORT_type_<N>` per field (JOLT-RS-166)
-///    emitting an `Option<&'static str>` — `Some("ts_type")` for mapped fields,
-///    `None` for unrecognised types.
+///
+/// *Structs (phase39+)*:
+/// 1. `__JOLT_TS_EXPORT_IS_ENUM: bool = false`
+/// 2. `__JOLT_TS_EXPORT_FIELD_COUNT: usize` (JOLT-RS-165)
+/// 3. `__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize` (JOLT-RS-166)
+/// 4. Per-field type / name / flatten / doc markers.
+///
+/// *Simple enums (phase41)*:
+/// 1. `__JOLT_TS_EXPORT_IS_ENUM: bool = true` (JOLT-RS-173)
+/// 2. `__JOLT_TS_EXPORT_VARIANT_COUNT: usize`
+/// 3. `__JOLT_TS_EXPORT_VARIANT_<N>: Option<&'static str>` per variant.
 ///
 /// On parse failure the emission is a single `compile_error!` token — no
-/// partial codegen. Mirrors [`crate::auto_middleware::expand_auto_middleware`]'s
-/// contract from JOLT-RS-046.
+/// partial codegen.
 pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     let parsed = match parse_ts_export_input(input) {
         Ok(p) => p,
         Err(err) => return err.to_compile_error(),
     };
     let ident = &parsed.ident;
+
+    let is_enum = !parsed.variants.is_empty();
     let field_count = parsed.fields.len();
+    let variant_count = parsed.variants.len();
     let mapped_count = parsed.fields.iter().filter(|f| f.ts_type.is_some()).count();
 
     let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
@@ -339,14 +384,29 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
         }
     }
 
+    let mut variant_markers = Vec::with_capacity(parsed.variants.len());
+    for (i, v) in parsed.variants.iter().enumerate() {
+        let variant_const_name = quote::format_ident!("__JOLT_TS_EXPORT_VARIANT_{i}");
+        variant_markers.push(quote! {
+            #[doc(hidden)]
+            pub const #variant_const_name: ::core::option::Option<&'static str> = ::core::option::Option::Some(#v);
+        });
+    }
+
     quote! {
         #[automatically_derived]
         impl #ident {
+            #[doc(hidden)]
+            pub const __JOLT_TS_EXPORT_IS_ENUM: bool = #is_enum;
+
             #[doc(hidden)]
             pub const __JOLT_TS_EXPORT_FIELD_COUNT: usize = #field_count;
 
             #[doc(hidden)]
             pub const __JOLT_TS_EXPORT_MAPPED_FIELD_COUNT: usize = #mapped_count;
+
+            #[doc(hidden)]
+            pub const __JOLT_TS_EXPORT_VARIANT_COUNT: usize = #variant_count;
 
             #(#field_type_markers)*
 
@@ -355,6 +415,8 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
             #(#field_flatten_markers)*
 
             #(#field_doc_markers)*
+
+            #(#variant_markers)*
         }
     }
 }
@@ -448,18 +510,54 @@ mod tests {
     }
 
     #[test]
-    fn rejects_enum() {
-        let input = parse_derive("enum Bad { A, B }");
-        let err = parse_ts_export_input(input).expect_err("enum must be rejected");
+    fn accepts_simple_enum() {
+        let input = parse_derive("enum Status { Active, Inactive }");
+        let parsed = parse_ts_export_input(input).expect("simple enum must be accepted");
+        assert_eq!(parsed.ident, "Status");
+        assert!(parsed.fields.is_empty());
+        assert_eq!(parsed.variants, vec!["Active", "Inactive"]);
+    }
+
+    #[test]
+    fn rejects_data_carrying_enum() {
+        let input = parse_derive(
+            r#"
+            enum Event {
+                Login { user: String },
+                Logout,
+            }
+            "#,
+        );
+        let err = parse_ts_export_input(input).expect_err("data-carrying enum must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("structs"),
-            "diagnostic must mention structs, got: {msg}"
+            msg.contains("fields"),
+            "diagnostic must mention fields, got: {msg}"
         );
-        assert!(
-            msg.contains("enum"),
-            "diagnostic must mention enum, got: {msg}"
+    }
+
+    #[test]
+    fn enum_with_all_unit_variants_is_accepted() {
+        let input = parse_derive("enum Color { Red, Green, Blue }");
+        let parsed = parse_ts_export_input(input).expect("enum with unit variants must be accepted");
+        assert_eq!(parsed.variants.len(), 3);
+        assert_eq!(parsed.variants, vec!["Red", "Green", "Blue"]);
+    }
+
+    #[test]
+    fn enum_with_mixed_variants_rejected_on_first_data_field() {
+        let input = parse_derive(
+            r#"
+            enum Mixed {
+                A,
+                B { x: i32 },
+                C,
+            }
+            "#,
         );
+        let err = parse_ts_export_input(input).expect_err("mixed enum must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("fields"), "error must mention fields, got: {msg}");
     }
 
     #[test]
@@ -517,15 +615,37 @@ mod tests {
     }
 
     #[test]
-    fn expand_emits_compile_error_on_enum() {
-        let input = parse_derive("enum Bad { A, B }");
+    fn expand_emits_is_enum_and_variant_markers_for_simple_enum() {
+        let input = parse_derive("enum Status { Active, Inactive }");
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_IS_ENUM") && out.contains("true"),
+            "simple enum must emit IS_ENUM = true, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_VARIANT_COUNT : usize = 2"),
+            "simple enum must emit VARIANT_COUNT = 2, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_VARIANT_0") && out.contains(r#"Some ("Active")"#),
+            "variant 0 must emit Some(\"Active\"), got: {out}"
+        );
+        assert!(
+            out.contains("__JOLT_TS_EXPORT_VARIANT_1") && out.contains(r#"Some ("Inactive")"#),
+            "variant 1 must emit Some(\"Inactive\"), got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_compile_error_on_data_carrying_enum() {
+        let input = parse_derive("enum Bad { A { x: i32 }, B }");
         let out = expand_ts_export(input).to_string();
         assert!(
             out.contains("compile_error"),
             "parse failure must emit compile_error!, got: {out}"
         );
         assert!(
-            !out.contains("__JOLT_TS_EXPORT_FIELD_COUNT"),
+            !out.contains("__JOLT_TS_EXPORT_VARIANT_COUNT"),
             "no partial codegen on parse failure, got: {out}"
         );
     }

@@ -6272,4 +6272,40 @@ Notes for next iterations:
 - JOLT-RS-173 (priority 173, phase41-tsexport-enums): "Handle simple Rust enum → TS string union type." The `parse_ts_export_input` currently rejects enums with a compile error. This needs to accept enums (both simple and data-variant) and generate TS definitions for them. The existing `rust_type_to_ts` + attribute parsing infrastructure can be reused; the new work is enum-specific parsing and codegen.
 - The `Punctuated`-based parser unlocks future multi-item `#[ts(...)]` forms — any new ts attribute (e.g. `#[ts(optional)]`, `#[ts(skip)]`) can be added as another arm in the `match meta` block within `parse_ts_field_attrs`.
 - phase40-tsexport-attributes is now CLOSED. All four items (169/170/171/172) are passes: true.
+
+## 2026-05-11 — JOLT-RS-173: simple enum → TS string union type (opens phase41)
+
+PRD item: JOLT-RS-173 (priority 173, phase41-tsexport-enums) — Handle simple Rust enum (no data): generate TS type as union of string literals. e.g., enum Status { Active, Inactive } → type Status = "Active" | "Inactive".
+
+Verification:
+- `cargo test -p jolt-macros --lib` → 239 passed, 0 failed (same count as JOLT-RS-172 baseline); no regressions.
+- `cargo check --workspace` → all 5 crates check clean; no regressions.
+
+Key decisions:
+- Added `variants: Vec<String>` field to `TsExportInput`. For structs the list is empty (`Vec::new()`); for simple enums it carries the variant names in declaration order. Kept as a flat field rather than a separate `TsExportEnum` type to avoid changing the parse/expand signatures — the derive is the same entry point for both structs and enums; only the data storage shape differs.
+- Added `parse_enum_variants(e: &syn::DataEnum) -> (Vec<String>, Option<syn::Error>)` helper. Iterates variants, collects idents for unit (no-data) variants, bails with a compile error on the first data-carrying variant. The error span points at the variant's fields (not the enum token), which is precise enough for the user to spot the offending variant. Mixed enums (both unit and data variants) still error; JOLT-RS-174 will remove this gate when tagged-union support lands.
+- `parse_ts_export_input` now accepts `Data::Enum`: calls `parse_enum_variants`, and on success returns `TsExportInput { ident, fields: Vec::new(), variants }`. The old "only structs" error is gone; simple enums are a supported input shape. Unions are still rejected.
+- `expand_ts_export` emits two new marker consts for every derive:
+  * `__JOLT_TS_EXPORT_IS_ENUM: bool` — `true` for enums, `false` for structs. The typegen binary can branch on this to choose between emitting `type X = "A" | "B"` vs `export interface X { ... }`.
+  * `__JOLT_TS_EXPORT_VARIANT_COUNT: usize` — number of variant names (0 for structs).
+  * `__JOLT_TS_EXPORT_VARIANT_<N>: Option<&'static str>` — one per variant, always `Some("variant_name")` for simple enums. The `Option` wrapper mirrors the field-level markers and gives the typegen binary a uniform access pattern.
+- All existing struct-side markers (`__JOLT_TS_EXPORT_FIELD_COUNT`, `__JOLT_TS_EXPORT_MAPPED_FIELD_COUNT`, per-field type/name/flatten/doc) are still emitted — for structs the variant count is 0 and IS_ENUM is false; for enums the field count is 0 and mapped count is 0.
+- The `rejects_enum` test was REPLACED with two positive tests + two negative tests:
+  * `accepts_simple_enum` — `enum Status { Active, Inactive }` → parses, `variants = ["Active", "Inactive"]`.
+  * `rejects_data_carrying_enum` — `enum Event { Login { user: String }, Logout }` → compile error mentioning "fields".
+  * `enum_with_all_unit_variants_is_accepted` — three-unit-variant enum accepted.
+  * `enum_with_mixed_variants_rejected_on_first_data_field` — unit-then-data-then-unit enum errors on the data variant.
+- The `expand_emits_compile_error_on_enum` test was replaced with `expand_emits_is_enum_and_variant_markers_for_simple_enum` (asserts IS_ENUM=true, VARIANT_COUNT=2, VARIANT_0=Some("Active"), VARIANT_1=Some("Inactive")) and `expand_emits_compile_error_on_data_carrying_enum` (asserts error for data-carrying enum).
+- Did NOT add a union-vs-enum error message update — the union error still says "only structs" because updating it to "structs or simple enums" is scope creep and the next user who tries deriving on a union will get a correct diagnostic anyway.
+
+Files changed:
+- jolt-macros/src/ts_export.rs — added `variants: Vec<String>` to `TsExportInput`; added `parse_enum_variants` helper; updated `parse_ts_export_input` to handle `Data::Enum` (simple enums accepted, data-carrying rejected); updated `expand_ts_export` to emit IS_ENUM / VARIANT_COUNT / VARIANT_N markers; replaced `rejects_enum` test with 4 new parsing tests; replaced `expand_emits_compile_error_on_enum` with 2 new emission tests.
+- prd.json — JOLT-RS-173 passes: true.
+
+Notes for next iterations:
+- JOLT-RS-174 (priority 174): data-carrying enums → TS tagged/discriminated unions. Key design decision: what's the discriminator field name? The PRD uses `kind`, which is conventional in TS (mimics serde's internally-tagged format). Implementation: replace the `parse_enum_variants` bail-out on data fields with per-variant struct-parsing (same `parse_struct_fields` machinery) and emit per-variant per-field type/name markers keyed by a (variant_idx, field_idx) pair. The `__JOLT_TS_EXPORT_VARIANT_<N>_FIELD_COUNT: usize` marker pattern from struct support generalizes naturally.
+- JOLT-RS-175 (priority 175): `#[ts_export]` function attribute (not derive) — separate proc-macro attribute, not within this file.
+- JOLT-RS-176 (priority 176): closing enum test bundle. Should test: simple enum 3+ variants, data variants with nested types, flatten in enum variant fields, `Option<EnumName>` in struct context. Wait until 174 lands so test coverage is well-scoped.
+- The `IS_ENUM` boolean marker keeps the struct+enum path unified under one derive. If JOLT-RS-174 embeds field info per variant, the typegen binary's schema walk can treat `IS_ENUM=true` as "walk variant markers" and `IS_ENUM=false` as "walk field markers" without two separate derive entry points.
+- The Union error message says "only structs" — technically stale now that simple enums are accepted. A future polish item could update it to "structs or simple enums", but it's a cosmetic nit that doesn't block any PRD deliverable.
 - The `.only_parse_args()` oversight in JOLT-RS-169: the `parse_ts_rename_from_attrs`'s `parse_args()` call was the bottleneck preventing combined attributes. With the `Punctuated`-based unified parser, `#[ts(flatten, rename = "...")]` compiles and resolves both values correctly — confirmed by the two reversed-order tests.
