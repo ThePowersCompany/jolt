@@ -1,0 +1,27 @@
+2026-05-11 PRD #9 — Unified error type: JoltRError trait with Into<Response>
+
+Completed:
+- Added joltr-core/src/error.rs with `JoltRError` trait (status(), message(), default to_response()) and `ErrorBody { error: String, status: u16 }` JSON body (impl JsonBody).
+- Registered module in joltr-core/src/lib.rs and re-exported `ErrorBody`, `JoltRError` at crate root.
+- Added joltr-core/tests/error.rs with 4 tests: status/body field mapping, axum JSON bridge + Content-Type, 500 mapping, and a custom to_response override attaching WWW-Authenticate.
+
+Verification:
+- cargo check --workspace → clean.
+- cargo test -p joltr-core --test error → 4 passed.
+- cargo test -p joltr-core --test endpoint_integration --test inventory_registration → all passed (sanity sweep on the existing surface most likely to be affected by the new lib.rs re-exports).
+
+Key decisions:
+- Chose default-method `to_response(&self) -> Response<ErrorBody>` over a blanket `From<E: JoltRError> for axum::response::Response`. Rationale: a blanket impl risks coherence conflicts with axum's own IntoResponse blanket impls and with the existing `From<Response<T>> for axum::response::Response` bridge, and `to_response()` composes cleanly with that bridge anyway. The endpoint macro (PRD #10) can emit `Err(e) => e.to_response().into()` without further glue.
+- `ErrorBody` implements `JsonBody` so the existing `Response<T>` → `axum::response::Response` JSON path is reused — no new serialization code.
+- Trait method takes `&self` (not `self`) so a single error value can be inspected by error_handler hooks before conversion, and so `to_response` can be called from `Display`-only matches without consuming the error.
+- Did not require `std::error::Error` / `Display` on the trait — keeps the trait usable for enum-only error types without forcing a `thiserror` dep at the joltr-core layer.
+
+Files changed:
+- joltr-core/src/error.rs (new)
+- joltr-core/src/lib.rs (mod + re-export)
+- joltr-core/tests/error.rs (new)
+- prd.json (item 9 → passes: true)
+
+Next notes:
+- PRD #10 (default error handler in `#[endpoint]` macro) is unblocked. The macro should detect `Result<Response<T>, E>` return types and emit `match` arms that call `err.to_response()` and forward via the existing IntoResponse bridge.
+- Optional follow-up: provide a `#[derive(JoltRError)]` (joltr-macros) for enum errors with `#[joltr_error(status = 404, message = "...")]` per-variant attrs. Not in scope here.

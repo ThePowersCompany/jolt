@@ -1,0 +1,152 @@
+{
+  "tasks": [
+    {
+      "id": "1",
+      "title": "Redirect helper",
+      "phase": "Phase 6",
+      "description": "Add Response::redirect(location, status) constructor and a Redirect type that converts into a Response with Location header. Support 301/302/303/307/308 status codes.",
+      "files": ["joltr-core/src/response.rs"],
+      "tests": ["joltr-core/tests/redirect.rs"],
+      "passes": false
+    },
+    {
+      "id": "2",
+      "title": "SetCookie parsing from Set-Cookie header",
+      "phase": "Phase 6",
+      "description": "Implement SetCookie::parse(header_value) that parses the Set-Cookie response header format: name=value; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax|Strict|None; Max-Age=N; Expires=<date>.",
+      "files": ["joltr-core/src/cookie.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": false
+    },
+    {
+      "id": "3",
+      "title": "SetCookie builder and to_header",
+      "phase": "Phase 6",
+      "description": "Add SetCookie::new(name, value) builder with .path(), .domain(), .secure(), .http_only(), .same_site(), .max_age(), .expires() chainable methods. Implement Display for SetCookie that renders the Set-Cookie header value string.",
+      "files": ["joltr-core/src/cookie.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": false
+    },
+    {
+      "id": "4",
+      "title": "Cookie request header parsing",
+      "phase": "Phase 6",
+      "description": "Implement Cookie::parse_all(header_value) that parses the Cookie request header (semicolon-separated name=value pairs) into Vec<Cookie>. Add Request::cookies() convenience method that parses from the Cookie header.",
+      "files": ["joltr-core/src/cookie.rs", "joltr-core/src/request.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": false
+    },
+    {
+      "id": "5",
+      "title": "Response set_cookie and remove_cookie helpers",
+      "phase": "Phase 6",
+      "description": "Add Response::set_cookie(set_cookie) that appends a Set-Cookie header. Add Response::remove_cookie(name) that sets a Set-Cookie with Max-Age=0 and Expires in the past.",
+      "files": ["joltr-core/src/response.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": false
+    },
+    {
+      "id": "6",
+      "title": "Static file serving layer",
+      "phase": "Phase 6",
+      "description": "Implement FileServeLayer / FileServeService using tower-http ServeDir/ServeFile. Serve files from a configurable root directory. Map to a route prefix (e.g. /static/*). Return 404 for missing files.",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": false
+    },
+    {
+      "id": "7",
+      "title": "File serving: cache headers and ETag",
+      "phase": "Phase 6",
+      "description": "Add Cache-Control, ETag, and Last-Modified headers to served files. Support If-None-Match → 304 Not Modified conditional response.",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": false
+    },
+    {
+      "id": "8",
+      "title": "File serving: gzip and Range support",
+      "phase": "Phase 6",
+      "description": "Support Accept-Encoding: gzip for pre-compressed files (.gz). Support Range header with 206 Partial Content responses for byte-range requests. Guard against path traversal (../).",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": false
+    },
+    {
+      "id": "9",
+      "title": "Unified error type: JoltRError trait with Into<Response>",
+      "phase": "Phase 6",
+      "description": "Define a JoltRError trait (or re-export) that converts typed endpoint errors into JSON error responses with status code and message. Endpoint return type Result<Response<T>, E> where E: JoltRError → 4xx/5xx JSON response with { error: string, status: number }.",
+      "files": ["joltr-core/src/error.rs"],
+      "tests": ["joltr-core/tests/error.rs"],
+      "passes": true
+    },
+    {
+      "id": "10",
+      "title": "Default error handler in #[endpoint] macro",
+      "phase": "Phase 6",
+      "description": "In the #[endpoint] codegen, when the handler returns Result<Response<T>, E>, wrap the call in a match that converts Err(E) via Into<Response>. Support a #[error_handler(fn)] attribute on individual methods for custom error formatting.",
+      "files": ["joltr-macros/src/endpoint.rs"],
+      "tests": ["joltr-macros/tests/endpoint_error.rs"],
+      "passes": false
+    },
+    {
+      "id": "11",
+      "title": "TsExport: joltr-types binary crate",
+      "phase": "Phase 5",
+      "description": "Create joltr-types binary crate in workspace. It collects all #[derive(TsExport)] structs via linkme/inventory at link time, renders TypeScript interfaces/enums/unions, and writes types.d.ts to the workspace root.",
+      "files": ["joltr-types/Cargo.toml", "joltr-types/src/main.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": false
+    },
+    {
+      "id": "12",
+      "title": "TsExport: inventory registry and type rendering",
+      "phase": "Phase 5",
+      "description": "Implement a TsTypeDef struct (name, fields, generics, docs, kind: Interface|Enum|Union) stored in an inventory. Implement TypeScript rendering: export interface, export type (union), enum (const object + type). Handle Optional<T> → T | null, JsonArray<T> → T[], Vec<T> → T[], Option<T> → T | null.",
+      "files": ["joltr-types/src/lib.rs", "joltr-macros/src/ts_export.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": false
+    },
+    {
+      "id": "13",
+      "title": "Example app: scaffold examples/basic crate",
+      "phase": "Phase 6",
+      "description": "Create examples/basic/ with Cargo.toml depending on joltr-core, joltr-db, joltr-templates, joltr-utils. Add a main.rs that starts a JoltRServer with CORS config and tracing.",
+      "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs"],
+      "passes": false
+    },
+    {
+      "id": "14",
+      "title": "Example app: health, echo, and parameterized endpoint",
+      "phase": "Phase 6",
+      "description": "Add GET /api/health (JSON { status: ok }), POST /api/echo (returns request body as JSON), GET /api/items/:id (query param filter). Demonstrate #[endpoint], body parsing, query params, path segments.",
+      "files": ["examples/basic/src/endpoints.rs"],
+      "passes": false
+    },
+    {
+      "id": "15",
+      "title": "Example app: WebSocket chat endpoint",
+      "phase": "Phase 6",
+      "description": "Add ws! /ws/chat with WebSocketHandler trait impl. Demonstrate on_open, on_message (broadcast via PubSub), on_close. Use AuthWsJwtLayer for token auth.",
+      "files": ["examples/basic/src/chat.rs"],
+      "passes": false
+    },
+    {
+      "id": "16",
+      "title": "Example app: background task and DB migration",
+      "phase": "Phase 6",
+      "description": "Add a Task that logs stats every 30s. Add a migrations/ directory with one SQL migration file. Wire JoltRDb with migrate() call on startup.",
+      "files": ["examples/basic/src/tasks.rs", "examples/basic/migrations/0001_init.sql"],
+      "passes": false
+    },
+    {
+      "id": "17",
+      "title": "Example app: template rendering endpoint",
+      "phase": "Phase 6",
+      "description": "Add GET / that renders a Handlebars template with dynamic data. Add a templates/ directory with an index.hbs file. Demonstrate TemplateEngine usage.",
+      "files": ["examples/basic/src/endpoints.rs", "examples/basic/templates/index.hbs"],
+      "passes": false
+    }
+  ]
+}
