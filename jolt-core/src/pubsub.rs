@@ -5,7 +5,12 @@ use tokio::sync::broadcast;
 pub const PUBSUB_BROADCAST_CAPACITY: usize = 256;
 
 /// A message carried over a pub/sub channel.
-pub struct PubSubMessage;
+#[derive(Clone, Debug)]
+pub struct PubSubMessage {
+    pub channel: String,
+    pub payload: String,
+    pub sender_id: Option<String>,
+}
 
 /// In-memory publish/subscribe hub backed by tokio broadcast channels.
 ///

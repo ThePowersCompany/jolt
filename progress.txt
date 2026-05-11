@@ -4983,3 +4983,29 @@ Blockers / next notes:
 - JOLT-RS-128 (priority 128): PubSub::publish() — needs the channel field. The `dead_code` warning on `channels` resolves at that point.
 - JOLT-RS-129 (priority 129): PubSub::subscribe() — needs broadcast::Sender::subscribe() which creates the receiver.
 - PubSubMessage will need `#[derive(Clone)]` — tokio::sync::broadcast::channel::<T>(capacity) requires `T: Clone` because the broadcast delivers a clone to each receiver. This is a hard requirement, not a design choice.
+
+## 2026-05-11 — JOLT-RS-127: PubSubMessage struct with named fields
+
+PRD item: JOLT-RS-127 (priority 127, phase30-pubsub-core) — Replace the PubSubMessage unit struct with a named-field struct: channel (String), payload (String), sender_id (Option<String>).
+
+Verification:
+- `cargo check -p jolt-core` → clean (one expected `dead_code` warning on `PubSub.channels` — consumed by JOLT-RS-128/129).
+- `cargo test -p jolt-core --lib` → 223 passed, 0 failed (unchanged from JOLT-RS-126 baseline; this step adds no tests).
+- `cargo check --workspace` → all crates check clean; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..126 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Derived `Clone` (required by tokio::sync::broadcast::channel::<T> — broadcast delivers a clone to each receiver; not optional) and `Debug` (test ergonomics for JOLT-RS-130).
+- Fields are `pub` per the existing crate convention (Request, Response, Cookie all expose pub fields). Callers construct via struct literal syntax.
+- Did NOT add a `new()` constructor — not in the PRD scope; struct-literal construction is sufficient and matches the minimal-slice discipline.
+- Did NOT add `Serialize` / `Deserialize` derives — serde on pub/sub messages is an application concern (not all messages need JSON serialization). If JOLT-RS-131/132 (WS pubsub integration) turns out to require serialization, derive then.
+
+Files changed:
+- jolt-core/src/pubsub.rs — replaced `pub struct PubSubMessage;` with `pub struct PubSubMessage { pub channel: String, pub payload: String, pub sender_id: Option<String> }` with `#[derive(Clone, Debug)]`.
+- prd.json — JOLT-RS-127 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-128 (priority 128, phase30): `PubSub::publish(&self, channel: &str, msg: PubSubMessage)` — get or create channel's broadcast::Sender via DashMap's entry API, then send. The `dead_code` warning on `PubSub.channels` resolves at that point.
+- JOLT-RS-129 (priority 129, phase30): `PubSub::subscribe(&self, channel: &str) -> broadcast::Receiver<PubSubMessage>` — same entry-or-insert pattern, call `sender.subscribe()` to get a receiver.
+- The `Clone` derive on PubSubMessage is load-bearing: removing it will break any broadcast channel storing PubSubMessage. JOLT-RS-130's tests should lock this in by exercising Clone through the real broadcast channel type.
