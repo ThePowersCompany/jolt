@@ -5930,5 +5930,32 @@ Files changed:
 - jolt-utils/src/lib.rs — added `pub mod mime;`.
 - prd.json — JOLT-RS-158 passes: true.
 
-Blockers / next notes:
-- JOLT-RS-159 (priority 159): `content_type_for_path(path: &str) -> Option<&str>`. Extract extension (lowercase), lookup in MIME_TABLE. Fallback `None` for unknown or missing extension. The `content_type_for_extension` helper in mime.rs provides the table access; 159 just needs path→extension extraction logic (e.g. `Path::new(s).extension()?.to_str()?.to_ascii_lowercase()` with leading dot prepend).
+## 2026-05-11 — JOLT-RS-159: content_type_for_path
+
+PRD item: JOLT-RS-159 (priority 159, phase37-datetime-email-mime) — Implement `content_type_for_path(path: &str) -> Option<&'static str>`: extract extension, lookup in MIME_TABLE. Fallback None for unknown or missing extension. Closes phase37.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 89 passed (5 new content_type_for_path tests + 84 existing); 0 failed.
+- `cargo check --workspace` → clean in 1.42s; no regressions.
+
+Key decisions:
+- Extension extracted via `std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase()`. This gives OS-independent extension parsing (handles `.tar.gz` → `"gz"`, `README` → `None`, deep paths → final component's extension).
+- Prepended `.` to the extracted extension before MIME_TABLE lookup to match the existing table key format (`.css`, `.html`, etc.).
+- `format!(".{}", ext)` used for the dotted prepend; a small allocation per call (extension strings are short — typically 2-5 chars). If profiling shows this is hot, inline the allocation with a stack buffer, but defer.
+- Did NOT expose `MIME_TABLE` directly (remains module-private). `content_type_for_path` and `content_type_for_extension` are the public API surface; callers don't need to know the storage shape.
+- Added `use std::path::Path` to mime.rs imports.
+- Five new inline tests added to the existing `#[cfg(test)] mod tests` block in mime.rs (matching the pattern from JOLT-RS-158's tests):
+  1. `content_type_for_path_with_known_extension_returns_mime` — PRD-mandated verification: `style.css` → `Some("text/css")`, plus `.jpeg` and `.mjs` for breadth.
+  2. `content_type_for_path_with_unknown_extension_returns_none` — PRD-mandated verification: `file.xyz` → `None`.
+  3. `content_type_for_path_with_no_extension_returns_none` — `README` (no dot) → `None`.
+  4. `content_type_for_path_extension_is_case_insensitive` — `IMAGE.PNG` → `Some("image/png")` (locks in to_ascii_lowercase behavior).
+  5. `content_type_for_path_with_deep_path_uses_final_extension` — `/static/css/style.css` → `Some("text/css")` (locks in Path::extension's final-component semantics).
+
+Files changed:
+- jolt-utils/src/mime.rs — added `use std::path::Path;`, `content_type_for_path` function, 5 inline unit tests.
+- prd.json — JOLT-RS-159 passes: true.
+
+Notes for next iterations:
+- Phase37-datetime-email-mime is now CLOSED. All 4 items (156/157/158/159) are passes: true.
+- The next unfinished PRD items are JOLT-RS-160 through JOLT-RS-176 (phase38 json-optional-types, phase39 tsexport-basic, phase40 tsexport-attributes, phase41 tsexport-enums). These are the types layer (Json, JsonArray, Optional<T>) and TypeScript typegen derive macros — belonging to jolt-macros and jolt-utils.
+- `content_type_for_path` allocates a String (via `format!`) even though the extension is short-lived. If this is called in a hot path (file-serving loop at request rate), the allocation can be avoided by using a fixed-size stack buffer: since dot extensions are ≤ 15 chars in practice, a `tinyvec::ArrayVec` or manual `[u8; 16]` would elide the heap. Not a concern for current PRD scope; flag for a future file-serving optimization pass.

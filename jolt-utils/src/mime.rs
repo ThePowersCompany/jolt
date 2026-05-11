@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::LazyLock;
 
 static MIME_TABLE: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -31,6 +32,12 @@ static MIME_TABLE: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
 
 pub fn content_type_for_extension(ext: &str) -> Option<&'static str> {
     MIME_TABLE.get(ext).copied()
+}
+
+pub fn content_type_for_path(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    let dotted = format!(".{}", ext);
+    MIME_TABLE.get(dotted.as_str()).copied()
 }
 
 #[cfg(test)]
@@ -71,5 +78,32 @@ mod tests {
     fn content_type_for_extension_returns_correct_type() {
         assert_eq!(content_type_for_extension(".css"), Some("text/css"));
         assert_eq!(content_type_for_extension(".png"), Some("image/png"));
+    }
+
+    #[test]
+    fn content_type_for_path_with_known_extension_returns_mime() {
+        assert_eq!(content_type_for_path("style.css"), Some("text/css"));
+        assert_eq!(content_type_for_path("image.jpeg"), Some("image/jpeg"));
+        assert_eq!(content_type_for_path("script.mjs"), Some("application/javascript"));
+    }
+
+    #[test]
+    fn content_type_for_path_with_unknown_extension_returns_none() {
+        assert_eq!(content_type_for_path("file.xyz"), None);
+    }
+
+    #[test]
+    fn content_type_for_path_with_no_extension_returns_none() {
+        assert_eq!(content_type_for_path("README"), None);
+    }
+
+    #[test]
+    fn content_type_for_path_extension_is_case_insensitive() {
+        assert_eq!(content_type_for_path("IMAGE.PNG"), Some("image/png"));
+    }
+
+    #[test]
+    fn content_type_for_path_with_deep_path_uses_final_extension() {
+        assert_eq!(content_type_for_path("/static/css/style.css"), Some("text/css"));
     }
 }
