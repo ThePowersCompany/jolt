@@ -70,7 +70,7 @@ pub use router::Router;
 pub use server::{CorsConfig, JoltServer, TlsConfig};
 pub use sse::{into_sse_response, into_sse_response_with_keep_alive, SseEvent, SseHandler, SseStream};
 pub use status::StatusCode;
-pub use task::{Task, TaskError, TaskFuture};
+pub use task::{Task, TaskError, TaskFuture, TaskScheduler};
 // JOLT-RS-118 surface: the WebSocket lifecycle trait (five async callbacks
 // with no-op defaults).
 // JOLT-RS-119 surface: the real `WebSocketSender` (mpsc-backed cheap-clone

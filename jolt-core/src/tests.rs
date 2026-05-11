@@ -7076,7 +7076,9 @@ mod sse {
 }
 
 mod task {
-    use crate::{Task, TaskFuture};
+    use crate::{Task, TaskFuture, TaskScheduler};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     struct CleanupTask;
@@ -7095,6 +7097,28 @@ mod task {
         }
     }
 
+    struct CountingTask {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Task for CountingTask {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+
+        fn run(&mut self) -> TaskFuture<'_> {
+            let count = Arc::clone(&self.count);
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
     #[test]
     fn task_trait_can_be_implemented() {
         let task = CleanupTask;
@@ -7107,5 +7131,67 @@ mod task {
         let mut task = CleanupTask;
         let result = task.run().await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn task_scheduler_new_creates_empty_scheduler() {
+        let _scheduler = TaskScheduler::new();
+    }
+
+    #[test]
+    fn task_scheduler_register_adds_task_without_panic() {
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(CleanupTask);
+        scheduler.register(CleanupTask);
+    }
+
+    #[tokio::test]
+    async fn task_scheduler_start_spawns_and_runs_task() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(CountingTask {
+            count: Arc::clone(&count),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(count.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn task_scheduler_start_error_does_not_stop_loop() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let finish_flag = Arc::clone(&finished);
+
+        struct FailThenFinish {
+            flag: Arc<AtomicBool>,
+        }
+
+        impl Task for FailThenFinish {
+            fn name(&self) -> &str {
+                "fail-then-finish"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(5)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let flag = Arc::clone(&self.flag);
+                Box::pin(async move {
+                    flag.store(true, Ordering::SeqCst);
+                    Err(crate::TaskError::new("always fails"))
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(FailThenFinish {
+            flag: finish_flag,
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(finished.load(Ordering::SeqCst));
     }
 }

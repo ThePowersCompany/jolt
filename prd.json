@@ -2001,7 +2001,7 @@
       "verification": [
         "Struct compiles, register adds task."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-141",

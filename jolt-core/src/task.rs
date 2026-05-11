@@ -49,3 +49,34 @@ pub trait Task {
 
     fn run(&mut self) -> TaskFuture<'_>;
 }
+
+pub struct TaskScheduler {
+    tasks: Vec<Box<dyn Task + Send>>,
+}
+
+impl TaskScheduler {
+    pub fn new() -> Self {
+        Self { tasks: Vec::new() }
+    }
+
+    pub fn register<T: Task + Send + 'static>(&mut self, task: T) {
+        self.tasks.push(Box::new(task));
+    }
+
+    pub fn start(self) {
+        for mut task in self.tasks {
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = task.run().await {
+                        tracing::warn!(
+                            error = %e,
+                            name = task.name(),
+                            "background task failed, will retry after interval"
+                        );
+                    }
+                    tokio::time::sleep(task.interval()).await;
+                }
+            });
+        }
+    }
+}
