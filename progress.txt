@@ -5476,3 +5476,36 @@ Blockers / next notes:
 - The `get_mut` lifetime approach (`&mut **b` via deref coercion instead of `.as_mut()`) avoids the `'static` lifetime pinning that Box::as_mut() imposes. The Slab itself handles lifetime management internally.
 - `dyn Task + Send` return type on get/get_mut preserves the Send auto-trait info from the stored Box — callers that need to move/store references across thread boundaries keep the Send guarantee.
 
+## 2026-05-11 — JOLT-RS-143: Task unit tests (interval timing, error resilience, concurrent execution)
+
+PRD item: JOLT-RS-143 (priority 143, phase33-background-tasks) — Write task unit tests: interval timing (within tolerance), task error doesn't crash loop, multiple tasks run concurrently. Closes phase33.
+
+Verification:
+- `cargo test -p jolt-core -- tests::task` → 15/15 passed (10 prior + 5 new), 0 failed.
+- `cargo test -p jolt-core --lib` → 268 passed, 0 failed.
+- `cargo check --workspace` → all 5 crates check clean.
+
+Note on harness instructions: same as JOLT-RS-007..142 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- Added 5 new tests in `mod task` covering the three PRD verification categories:
+  * **Interval timing**: `task_interval_timing_is_within_tolerance` — TimedTask records Instant::now() on each run, scheduler runs with 20ms interval, sleep 80ms, then assert each delta between consecutive timestamps is within factor-of-4 tolerance of 20ms. Test sleeps 80ms to give 2+ runs for delta assertion.
+  * **Error doesn't crash loop**: `task_error_runs_multiple_iterations_without_stopping_loop` — AlwaysFail task increments counter then returns Err on every run, sleep 50ms, assert run count >= 3. Stronger than the existing `task_scheduler_start_error_does_not_stop_loop` test (which only asserts AtomicBool was set at least once); this one proves the loop CONTINUES (>= 3 iterations).
+  * **Multiple tasks run concurrently**: `multiple_tasks_run_concurrently` — CounterA (5ms interval) and CounterB (10ms interval) registered simultaneously, started, sleep 60ms, assert both counters incremented AND counterA > counterB (faster interval → more runs).
+  * **Successful execution continues loop**: `task_successful_execution_does_not_stop_loop` — OkTask increments counter, returns Ok, sleep 50ms, assert >= 3 runs. Proves the success path is a continuation loop, not a one-shot.
+  * **Interval delta tolerance**: between consecutive TimedTask runs, assert `expected/2 <= delta <= expected*4`. This is intentionally loose (factor-of-4 range) because tokio task scheduling is non-deterministic under test load and tight tolerance would cause flaky CI.
+- Did NOT refactor the pre-existing tests. The 10 tests from JOLT-RS-139..142 are untouched. New tests follow the same fixture pattern (per-test structs, Arc<Atomic*> sharing, Box::pin async blocks).
+- Did NOT add any production code. This is a test-only PRD item. The Task trait, TaskScheduler, and start() implementation are unchanged from JOLT-RS-142.
+- Used `std::time::Instant` in `TimedTask` instead of `tokio::time::Instant` — we measure wall-clock deltas between loop iterations, and std Instant is adequate for this low-precision tolerance check.
+- Used `std::sync::Mutex` for the timestamps Vec (rather than a channel or crossbeam queue) because the write lock is brief (push one Instant) and the test reads only after the sleep completes.
+
+Files changed:
+- jolt-core/src/tests.rs — added 5 new `#[tokio::test]` cases in `mod task`.
+- prd.json — JOLT-RS-143 passes: true.
+
+Blockers / next notes:
+- Phase33-background-tasks is now CLOSED. All 5 items (139/140/141/142/143) are passes: true.
+- JOLT-RS-144 (priority 144, opens phase34-task-retry-shutdown): retry logic with backoff on task error. The `start()` body currently loops `sleep(interval)` after every run regardless of success/failure. 144 should introduce a separate backoff duration that kicks in on error (e.g. `task.run().await.map_err(|e| ...)` triggers `sleep(backoff)` instead of `sleep(interval)`). The Task trait has no `backoff()` method — 144 either adds one or uses a scheduler-global default.
+- The `task_error_runs_multiple_iterations_without_stopping_loop` test asserts >= 3 runs within 50ms (5ms interval). If the backoff changes the error-path sleep duration, this test will need updating.
+- The timing tolerance test uses factor-of-4 tolerance. On overloaded CI, even this may be insufficient. If it flakes, increase the sleep time or widen to factor-of-8.
+

@@ -7244,4 +7244,196 @@ mod task {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(finished.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn task_error_runs_multiple_iterations_without_stopping_loop() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        struct AlwaysFail {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Task for AlwaysFail {
+            fn name(&self) -> &str {
+                "always-fail"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(5)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(crate::TaskError::new("deliberate error"))
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(AlwaysFail {
+            count: Arc::clone(&run_count),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let runs = run_count.load(Ordering::SeqCst);
+        assert!(runs >= 3, "erroring task must keep retrying; got {runs} runs, expected >= 3");
+    }
+
+    #[tokio::test]
+    async fn task_interval_timing_is_within_tolerance() {
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        struct TimedTask {
+            timestamps: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        }
+
+        impl Task for TimedTask {
+            fn name(&self) -> &str {
+                "timed"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(20)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let timestamps = Arc::clone(&self.timestamps);
+                Box::pin(async move {
+                    timestamps.lock().unwrap().push(std::time::Instant::now());
+                    Ok(())
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(TimedTask {
+            timestamps: Arc::clone(&timestamps),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let runs = timestamps.lock().unwrap();
+        assert!(runs.len() >= 2, "must have at least 2 runs for timing check");
+
+        for i in 1..runs.len() {
+            let delta = runs[i].duration_since(runs[i - 1]);
+            let expected = Duration::from_millis(20);
+            let lower = expected / 2;
+            let upper = expected * 4;
+            assert!(
+                delta >= lower && delta <= upper,
+                "interval between run {} and {} must be within factor-of-4 tolerance of 20ms; got delta={:?}",
+                i - 1,
+                i,
+                delta
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_tasks_run_concurrently() {
+        let count_a = Arc::new(AtomicUsize::new(0));
+        let count_b = Arc::new(AtomicUsize::new(0));
+
+        struct CounterA {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Task for CounterA {
+            fn name(&self) -> &str {
+                "counter-a"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(5)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        struct CounterB {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Task for CounterB {
+            fn name(&self) -> &str {
+                "counter-b"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(10)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(CounterA {
+            count: Arc::clone(&count_a),
+        });
+        scheduler.register(CounterB {
+            count: Arc::clone(&count_b),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let a = count_a.load(Ordering::SeqCst);
+        let b = count_b.load(Ordering::SeqCst);
+        assert!(a >= 4, "counter-a must run multiple times; got {a}");
+        assert!(b >= 2, "counter-b must run multiple times; got {b}");
+        assert!(a > b, "counter-a (5ms interval) must run more often than counter-b (10ms interval)");
+    }
+
+    #[tokio::test]
+    async fn task_successful_execution_does_not_stop_loop() {
+        let run_count = Arc::new(AtomicUsize::new(0));
+
+        struct OkTask {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Task for OkTask {
+            fn name(&self) -> &str {
+                "ok-task"
+            }
+
+            fn interval(&self) -> Duration {
+                Duration::from_millis(5)
+            }
+
+            fn run(&mut self) -> TaskFuture<'_> {
+                let count = Arc::clone(&self.count);
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let mut scheduler = TaskScheduler::new();
+        scheduler.register(OkTask {
+            count: Arc::clone(&run_count),
+        });
+        scheduler.start();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let runs = run_count.load(Ordering::SeqCst);
+        assert!(runs >= 3, "successful task must run multiple times; got {runs}");
+    }
 }
