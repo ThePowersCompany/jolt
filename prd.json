@@ -1833,7 +1833,7 @@
       "verification": [
         "Unit test: 0 subscribers \u2192 publish returns 0. 1 subscriber \u2192 publish returns 1."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-129",

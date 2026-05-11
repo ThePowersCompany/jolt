@@ -5009,3 +5009,35 @@ Blockers / next notes:
 - JOLT-RS-128 (priority 128, phase30): `PubSub::publish(&self, channel: &str, msg: PubSubMessage)` — get or create channel's broadcast::Sender via DashMap's entry API, then send. The `dead_code` warning on `PubSub.channels` resolves at that point.
 - JOLT-RS-129 (priority 129, phase30): `PubSub::subscribe(&self, channel: &str) -> broadcast::Receiver<PubSubMessage>` — same entry-or-insert pattern, call `sender.subscribe()` to get a receiver.
 - The `Clone` derive on PubSubMessage is load-bearing: removing it will break any broadcast channel storing PubSubMessage. JOLT-RS-130's tests should lock this in by exercising Clone through the real broadcast channel type.
+
+## 2026-05-11 — JOLT-RS-128: PubSub::publish (get-or-create channel, broadcast, return receiver count)
+
+PRD item: JOLT-RS-128 (priority 128, phase30-pubsub-core) — Implement `PubSub::publish(&self, channel: &str, msg: PubSubMessage) -> usize`: get or create channel's sender via DashMap entry API, broadcast msg via `sender.send(msg)`, return number of receivers (0 if none).
+
+Why picked over JOLT-RS-129 (which is next in strict-priority order): JOLT-RS-128 is the higher-priority item (128 vs 129) and defines the publish half of the pubsub contract. The verification demands both 0-subscriber and 1-subscriber tests — the latter requires subscribe to exist, so a minimal `subscribe` was co-implemented here. JOLT-RS-129 can build on this with additional subscribe-specific tests (unsubscribe-via-drop, etc.).
+
+Verification:
+- `cargo test -p jolt-core -- tests::pubsub` → 2/2 passed (`publish_returns_zero_with_no_subscribers`, `publish_returns_one_with_one_subscriber`); 0 failed; 223 filtered out.
+- `cargo test -p jolt-core --lib` → 225 passed total (up from 223); 0 failed.
+- `cargo check --workspace` → clean in 0.56s; no regressions.
+
+Note on harness instructions: same as JOLT-RS-007..127 — auto-prompt's `npm run type-check` / Bun-Hono server commands don't apply to this Rust workspace; cargo is the verification tool.
+
+Key decisions:
+- `publish` uses `DashMap::entry().or_insert_with()` to get-or-create the broadcast::Sender. If the entry exists, `send()` broadcasts to existing receivers; if it doesn't, a new channel is created first. This matches the PRD step text ("get or create channel's sender") and the DashMap entry API pattern used by the prior subscribe skeleton.
+- Return value: `Ok(n)` from `sender.send(msg)` → number of receivers that received the message; `Err(_)` (sent when there are zero receivers) → returns 0. `tokio::sync::broadcast::Sender::send()` returns `Ok(n)` when at least one receiver exists and `Err(SendError(msg))` when zero receivers exist. Returning 0 on the error path gives the caller a simple `usize` API without leaking broadcast internals. Matches the PRD verification: "0 subscribers → publish returns 0. 1 subscriber → publish returns 1."
+- `subscribe` was co-implemented as a minimal companion method: same `entry().or_insert_with()` pattern, calls `sender.subscribe()` to produce a `broadcast::Receiver<PubSubMessage>`. Required by the 128 verification (cannot test 1-subscriber case without creating a subscriber). The method is the exact shape specified by JOLT-RS-129's description but without tests specific to the subscribe lifecycle (those belong to 129).
+- `PubSubMessage` re-exported at crate root via `pub use pubsub::PubSubMessage` alongside the existing `PubSub` + `PUBSUB_BROADCAST_CAPACITY` re-exports. Previously `PubSubMessage` was defined in pubsub.rs but not re-exported, so callers needed `jolt_core::pubsub::PubSubMessage`. Now accessible as `jolt_core::PubSubMessage` per the established crate convention.
+- No new dependencies. `dashmap` and `tokio` (for broadcast) are already workspace deps.
+- Noted downstream: `sender.send(msg)` returns `Err(SendError(msg))` when there are zero receivers, which contains the original message. Currently discarded; if a future PRD wants to recover the message (e.g. for a dead-letter log or at-least-once delivery), the `send()` result shape can be widened. The existing return type `usize` is minimally correct and matches the PRD.
+
+Files changed:
+- jolt-core/src/pubsub.rs — added `publish(&self, channel, msg) -> usize` and `subscribe(&self, channel) -> broadcast::Receiver<PubSubMessage>`.
+- jolt-core/src/lib.rs — added `PubSubMessage` to the existing `pub use pubsub::{...}` re-export.
+- jolt-core/src/tests.rs — added `mod pubsub` with 2 tests.
+- prd.json — JOLT-RS-128 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-129 (priority 129, phase30): `PubSub::subscribe()` is already implemented (co-implemented here to enable 128's verification). The 129 work is: add subscribe-specific tests (subscribe returns receiver, publish delivers to receiver, drop receiver → publish to 0). The subscribe implementation here is minimal; 129 should not rewrite it, only test it.
+- JOLT-RS-130 (priority 130, phase30): comprehensive pubsub tests — multi-channel isolation, late subscriber, concurrent publishes. These tests now have both `publish` and `subscribe` available. Concurrent testing will need `std::thread::spawn` + blocking tokio runtimes or `tokio::task::spawn`.
+- `PubSubMessage` now requires Clone (derived in JOLT-RS-127) — since publish stores via `sender.send(msg)` which internally clones for each receiver. Each receiver gets its own clone. This matches the expected broadcast channel contract.

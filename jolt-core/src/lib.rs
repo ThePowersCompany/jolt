@@ -59,7 +59,7 @@ pub use parse_query::{
     extract_vec as extract_query_vec, ParseQueryLayer, ParseQueryService, QueryExtractError,
     QueryParams,
 };
-pub use pubsub::{PubSub, PUBSUB_BROADCAST_CAPACITY};
+pub use pubsub::{PubSub, PubSubMessage, PUBSUB_BROADCAST_CAPACITY};
 pub use registered_endpoint::RegisteredEndpoint;
 pub use request::Request;
 pub use request_ext::RequestExt;

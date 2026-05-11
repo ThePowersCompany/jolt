@@ -6668,3 +6668,32 @@ mod websocket {
         );
     }
 }
+
+mod pubsub {
+    use crate::{PubSub, PubSubMessage};
+
+    #[test]
+    fn publish_returns_zero_with_no_subscribers() {
+        let ps = PubSub::new();
+        let msg = PubSubMessage {
+            channel: "test".into(),
+            payload: "hello".into(),
+            sender_id: None,
+        };
+        let n = ps.publish("test", msg);
+        assert_eq!(n, 0, "publish with 0 subscribers must return 0");
+    }
+
+    #[test]
+    fn publish_returns_one_with_one_subscriber() {
+        let ps = PubSub::new();
+        let _rx = ps.subscribe("test");
+        let msg = PubSubMessage {
+            channel: "test".to_string(),
+            payload: "hello".into(),
+            sender_id: None,
+        };
+        let n = ps.publish("test", msg);
+        assert_eq!(n, 1);
+    }
+}
