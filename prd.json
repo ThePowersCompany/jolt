@@ -2169,7 +2169,7 @@
       "verification": [
         "Unit test: hash returns non-empty hash and salt."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "JOLT-RS-153",

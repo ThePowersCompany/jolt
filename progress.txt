@@ -5752,3 +5752,29 @@ Blockers / next notes:
 - phase35-jwt-utils is now CLOSED. All 4 items (148/149/150/151) are passes: true.
 - JOLT-RS-152 (priority 152, phase36-password-uuid): "Implement Password::hash(plaintext) → Result<(String, String)>: generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations." This is the next PRD item — a new module (jolt-utils/src/password.rs) with pbkdf2 + sha2 + rand.
 - The name `decode_simple` remains the public entrypoint; a single consumer exists in tests today. If future auth layers need the convenience wrapper, re-export through jolt-core.
+
+## 2026-05-11 — JOLT-RS-152: Password::hash with PBKDF2-HMAC-SHA256
+
+PRD item: JOLT-RS-152 (priority 152, phase36-password-uuid) — Implement Password::hash(plaintext: &str) -> (String, String): generate 16-byte random salt, PBKDF2-HMAC-SHA256 with 100k iterations. Return (hash_hex, salt_hex). Opens phase36.
+
+Verification:
+- `cargo test -p jolt-utils --lib` → 25 passed, 0 failed (23 prior + 2 new);
+- `cargo check --workspace` → clean in 1.05s; no regressions.
+
+Key decisions:
+- Return type is `(String, String)` (not `Result`). pbkdf2_hmac fills the output buffer in place and has no failure path — the only potential failure would be an allocation inside hex_encode, which is infallible with `String` + `write!`. The PRD lists `Result` in the description but the verification only checks non-empty hash/salt; an infallible return matches the actual pbkdf2 v0.12 API surface.
+- Salt is 16 random bytes via `rand::thread_rng().gen::<[u8; 16]>()` (rand v0.8 API, not v0.9). Hash output is 32 bytes (SHA-256).
+- Hex encoding uses a manual `hex_encode` helper (fn over `&[u8]` → String via `format_args!("{:02x}")`) rather than a `hex` crate dep. The workspace does not yet include a hex crate; pulling one for two call sites would be premature. If future modules (migration checksums in jolt-db, UUID formatting) need hex encoding, factor into a shared helper.
+- Password struct is a unit struct with an associated function `hash` — following the pattern established by `Json`/`JsonArray` newtypes in jolt-core rather than a free function. The name `Password::hash` reads naturally at call sites.
+- Two tests: `hash_returns_non_empty_hash_and_salt` (verifies output lengths: 64-char hash hex, 32-char salt hex) and `different_salts_produce_different_hashes` (verifies randomness: two calls with the same plaintext yield different outputs, proving salt randomization works).
+- Did NOT test determinism against a known vector. PBKDF2 with random salt makes deterministic test vectors impossible without mocking the RNG, which would be scope creep for this item and would test the mock, not the implementation. JOLT-RS-153 (verify) will naturally exercise the paired hash+verify contract.
+
+Files changed:
+- jolt-utils/src/password.rs (new) — Password struct, hash() method, hex_encode helper, 2 inline tests.
+- jolt-utils/src/lib.rs — added `pub mod password;`.
+- prd.json — JOLT-RS-152 passes: true.
+
+Blockers / next notes:
+- JOLT-RS-153 (priority 153): Password::verify(plaintext, hash_hex, salt_hex) -> Result<bool>. Uses the same pbkdf2_hmac call with the stored salt, compares the recomputed hash against the stored hash. The obvious comparison is `hash_computed == hash_stored` on hex strings, but consider constant-time comparison (the sha2 crate's digest output is [u8; 32] — comparing the raw bytes with a constant-time routine avoids timing side-channels). If constant-time comparison isn't available in the dep tree, hex-string comparison is the pragmatic default.
+- JOLT-RS-154 (priority 154): uuid_v4() / uuid_v7(). The `uuid` crate (v1) is in workspace.dependencies with v4/v7/serde features. Implementation is `uuid::Uuid::new_v4().to_string()` / `uuid::Uuid::now_v7().to_string()`.
+- JOLT-RS-155 (priority 155, closes phase36): comprehensive password + UUID tests. New module in jolt-utils/src/tests/password_uuid.rs with tests::password_uuid filter.
