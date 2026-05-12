@@ -300,6 +300,15 @@
       "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs", "examples/basic/src/endpoints.rs", "joltr-types/src/main.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs", "examples/basic/src/main.rs"],
       "passes": true
+    },
+    {
+      "id": "35",
+      "title": "Example app Docker image",
+      "phase": "Finalization",
+      "description": "Add a Dockerfile for examples/basic that builds the Rust workspace, packages the example mini project using the local JoltR crates, exposes the configured HTTP port, and starts the example binary without requiring external services by default.",
+      "files": ["examples/basic/Dockerfile", "examples/basic/README.md", ".dockerignore"],
+      "tests": ["docker build -f examples/basic/Dockerfile ."],
+      "passes": true
     }
   ]
 }

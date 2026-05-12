@@ -1096,3 +1096,33 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #35 can package the example; PRD #36 can call `cargo run -p joltr-basic-example -- --generate-types` or the compiled binary's `--generate-types` mode before TypeScript checks.
+
+
+2026-05-12 PRD #35 - Example app Docker image
+
+Completed:
+- Added a multi-stage `examples/basic/Dockerfile` that builds `joltr-basic-example` from the local workspace crates, generates `types.d.ts`, and packages the runtime binary plus the example templates, public assets, and migrations.
+- Added a root `.dockerignore` to keep build contexts small and exclude local/generated artifacts.
+- Documented Docker build/run commands in `examples/basic/README.md`.
+
+Verification:
+- `docker build -f examples/basic/Dockerfile .` -> passed.
+- `docker build -t joltr-basic-example:prd35 -f examples/basic/Dockerfile .` -> passed from cache.
+- Runtime smoke test with `docker run -d -p 127.0.0.1::3000 joltr-basic-example:prd35` plus `curl /api/test/typed` -> returned the stable typed JSON response; logs showed `DATABASE_URL is not set; skipping example database migrations`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Preserved `/workspace/examples/basic` in the runtime image because the compiled example resolves templates, public assets, and migrations from `CARGO_MANIFEST_DIR`.
+- Kept `DATABASE_URL` optional so the image starts without Postgres or other external services by default.
+- Generated `types.d.ts` during the image build so later integration tests can reuse the same container artifact.
+
+Files changed:
+- `.dockerignore` (new)
+- `examples/basic/Dockerfile` (new)
+- `examples/basic/README.md`
+- `prd.json` (item 35 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #36 can now use `joltr-basic-example:prd35` or rebuild the Dockerfile for the TypeScript container integration test.

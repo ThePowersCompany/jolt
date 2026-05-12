@@ -1,0 +1,11 @@
+.git
+.gitignore
+.zig-cache
+zig-out
+target
+types.d.ts
+*.log
+node_modules
+**/node_modules
+**/.DS_Store
+.env
