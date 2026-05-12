@@ -318,6 +318,15 @@
       "files": ["examples/basic/integration/package.json", "examples/basic/integration/tsconfig.json", "examples/basic/integration/test.ts", "examples/basic/integration/run.sh"],
       "tests": ["examples/basic/integration/run.sh"],
       "passes": true
+    },
+    {
+      "id": "37",
+      "title": "CI builds example container and runs TypeScript integration",
+      "phase": "Finalization",
+      "description": "Update .github/workflows/build-and-test.yml so CI runs the Rust workspace checks, builds the examples/basic Docker image, starts it, and runs the TypeScript integration test against the containerized JoltR example endpoint.",
+      "files": [".github/workflows/build-and-test.yml", "examples/basic/integration/run.sh"],
+      "tests": [".github/workflows/build-and-test.yml"],
+      "passes": true
     }
   ]
 }

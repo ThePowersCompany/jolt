@@ -1157,3 +1157,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #37 can wire `examples/basic/integration/run.sh` into CI.
+
+
+2026-05-12 PRD #37 - CI builds example container and runs TypeScript integration
+
+Completed:
+- Updated `.github/workflows/build-and-test.yml` from the legacy Zig-only job to the Rust-port CI path.
+- Added stable Rust setup, Node 20 setup, `cargo fmt --check`, and `cargo check --workspace --all-targets`.
+- Added an explicit `examples/basic` Docker image build and then reused that image when running `examples/basic/integration/run.sh` against the containerized endpoint.
+- Left `examples/basic/integration/run.sh` unchanged because it already starts the container, waits for `/api/test/typed`, copies generated `types.d.ts`, type-checks, and runs the TypeScript runtime assertion.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `bash -n examples/basic/integration/run.sh` -> clean.
+- `docker build -t joltr-basic-example:ci -f examples/basic/Dockerfile .` -> passed.
+- `JOLTR_BASIC_IMAGE=joltr-basic-example:ci JOLTR_BASIC_SKIP_DOCKER_BUILD=1 examples/basic/integration/run.sh` -> passed; verified `TypedTestResponse v1` from the running container.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Removed `mlugg/setup-zig` and `zig build test` from this workflow because PRD #37 is the Rust-port CI integration and the current Zig package fingerprint fails locally.
+- Built the Docker image in its own CI step, then passed `JOLTR_BASIC_SKIP_DOCKER_BUILD=1` to the integration script so CI visibly covers both image build and container-based TypeScript verification without a duplicate build.
+- Used `npm exec` through the existing integration package scripts instead of adding a lockfile/install step for this focused CI wiring slice.
+
+Files changed:
+- `.github/workflows/build-and-test.yml`
+- `prd.json` (item 37 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #38 remains unfinished for final Rust port verification docs.
