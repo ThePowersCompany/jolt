@@ -246,6 +246,15 @@
       "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs"],
       "passes": true
+    },
+    {
+      "id": "29",
+      "title": "JWT RSA algorithm support",
+      "phase": "Phase 5",
+      "description": "Add RS256/RS384/RS512 encode/decode support using PEM key material while preserving existing HS256/HS384/HS512 behavior and errors.",
+      "files": ["joltr-utils/src/jwt.rs"],
+      "tests": ["joltr-utils/src/tests/jwt.rs"],
+      "passes": true
     }
   ]
 }

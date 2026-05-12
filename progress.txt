@@ -911,3 +911,33 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished items are JWT RSA/ECDSA support (#29/#30) and example app polish (#31/#32).
+
+
+2026-05-12 PRD #29 - JWT RSA algorithm support
+
+Completed:
+- Added RS256, RS384, and RS512 variants to `joltr_utils::jwt::Algorithm`.
+- Updated JWT encode/decode key construction to use HMAC secrets for HS algorithms and RSA PEM key material for RS algorithms.
+- Added RSA JWT tests for all supported RS algorithms, wrong public key rejection, and algorithm mismatch rejection.
+
+Verification:
+- `cargo test -p joltr-utils jwt` -> 28 passed.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-utils` -> 103 passed, doc tests passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Preserved the existing `JwtConfig::new(key_material, algorithm)` API and `secret` field for compatibility; RS decode expects PEM public key bytes and RS encode expects PEM private key bytes.
+- Kept unsupported algorithms returning `InvalidAlgorithm`/`JwtEncodeError` rather than adding ECDSA behavior in this RSA-only slice.
+- Reused the existing `JwtDecodeError` mapping so wrong RSA public keys surface as `InvalidSignature`, matching HS wrong-secret behavior.
+
+Files changed:
+- `joltr-utils/src/jwt.rs`
+- `joltr-utils/src/tests/jwt.rs`
+- `prd.json` (item 29 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #30 can add ES256/ES384 using the same algorithm-dispatch helper shape.

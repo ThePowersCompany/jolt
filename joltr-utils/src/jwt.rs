@@ -10,13 +10,10 @@
 //!
 //! Architectural decisions pinned here for JOLTR-RS-073..074 to build on:
 //!
-//! 1. **HS-style symmetric algorithms only for the initial slice.** The
-//!    [`JwtConfig`] holds the raw secret bytes and builds
-//!    [`jsonwebtoken::DecodingKey::from_secret`] on each decode call. RS/ES
-//!    algorithms (PEM-keyed) are deferred to a future iteration that adds a
-//!    [`jsonwebtoken::DecodingKey`]-carrying variant. JOLTR-RS-072's PRD slice
-//!    asks for "configured secret and algorithm", which the secret + algorithm
-//!    pair satisfies.
+//! 1. **Key construction is selected from the configured algorithm.** HS-style
+//!    symmetric algorithms use raw secret bytes, while RS-style asymmetric
+//!    algorithms use PEM key material. ES algorithms are intentionally deferred
+//!    to the ECDSA PRD slice.
 //!
 //! 2. **Typed error variants on the rejection side, NOT a single
 //!    `Other(String)`.** A downstream
@@ -62,15 +59,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
-/// Symmetric signing algorithms supported by the framework. Mirrors
-/// jsonwebtoken's HMAC-SHA variants so the module doc "HS-only" scope is
-/// enforced at the type level. JOLTR-RS-149 (encode) and JOLTR-RS-150 (decode)
-/// surface this as a public parameter on their convenience functions.
+/// Signing algorithms supported by the framework. Mirrors the HMAC-SHA and
+/// RSA-SHA variants exposed by jsonwebtoken while keeping ECDSA out of this
+/// PRD slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
     HS256,
     HS384,
     HS512,
+    RS256,
+    RS384,
+    RS512,
 }
 
 impl From<Algorithm> for jsonwebtoken::Algorithm {
@@ -79,20 +78,21 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
             Algorithm::HS256 => jsonwebtoken::Algorithm::HS256,
             Algorithm::HS384 => jsonwebtoken::Algorithm::HS384,
             Algorithm::HS512 => jsonwebtoken::Algorithm::HS512,
+            Algorithm::RS256 => jsonwebtoken::Algorithm::RS256,
+            Algorithm::RS384 => jsonwebtoken::Algorithm::RS384,
+            Algorithm::RS512 => jsonwebtoken::Algorithm::RS512,
         }
     }
 }
 
-/// Verification-side JWT configuration. Carries the symmetric secret bytes and
-/// the expected algorithm; the same instance is reused across requests by
+/// Verification-side JWT configuration. Carries the verification key material
+/// and the expected algorithm; the same instance is reused across requests by
 /// the [`AuthJwtLayer`](../../../joltr_core/auth_jwt/struct.AuthJwtLayer.html)
 /// wrapper (which holds an `Arc<JwtConfig>` so cloning the layer is cheap).
-///
-/// See module docs decision 1 for the HS-only scope rationale.
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
-    /// Symmetric secret bytes for HS-style algorithms. Used to build
-    /// [`DecodingKey::from_secret`] on each decode call.
+    /// HMAC secret bytes for HS algorithms or PEM public key bytes for RS
+    /// algorithms.
     pub secret: Vec<u8>,
     /// Expected algorithm. A token whose header carries a different `alg`
     /// will be rejected with [`JwtDecodeError::InvalidAlgorithm`].
@@ -100,14 +100,12 @@ pub struct JwtConfig {
 }
 
 impl JwtConfig {
-    /// Construct a config from a secret + algorithm. `secret` accepts any
-    /// `Into<Vec<u8>>` (e.g. `&[u8]`, `&str`). `algorithm` accepts our own
-    /// [`Algorithm`] (recommended) or a bare
+    /// Construct a config from key material + algorithm. `secret` accepts any
+    /// `Into<Vec<u8>>` (e.g. `&[u8]`, `&str`): use raw secret bytes for HS
+    /// algorithms and PEM public key bytes for RS algorithms. `algorithm`
+    /// accepts our own [`Algorithm`] (recommended) or a bare
     /// [`jsonwebtoken::Algorithm`] for backward compatibility.
-    pub fn new(
-        secret: impl Into<Vec<u8>>,
-        algorithm: impl Into<jsonwebtoken::Algorithm>,
-    ) -> Self {
+    pub fn new(secret: impl Into<Vec<u8>>, algorithm: impl Into<jsonwebtoken::Algorithm>) -> Self {
         Self {
             secret: secret.into(),
             algorithm: algorithm.into(),
@@ -213,8 +211,9 @@ pub fn decode_simple(
     secret: &[u8],
     algorithm: Algorithm,
 ) -> Result<JwtClaims, JwtDecodeError> {
-    let key = DecodingKey::from_secret(secret);
-    let validation = Validation::new(algorithm.into());
+    let algorithm = algorithm.into();
+    let key = decoding_key(secret, algorithm)?;
+    let validation = Validation::new(algorithm);
     jwt_decode::<JwtClaims>(token, &key, &validation)
         .map(|data| data.claims)
         .map_err(map_error)
@@ -231,9 +230,10 @@ pub fn encode(
     secret: &[u8],
     algorithm: Algorithm,
 ) -> Result<String, JwtEncodeError> {
-    let header = Header::new(algorithm.into());
-    jwks_encode(&header, claims, &EncodingKey::from_secret(secret))
-        .map_err(|e| JwtEncodeError(e.to_string()))
+    let algorithm = algorithm.into();
+    let header = Header::new(algorithm);
+    let key = encoding_key(secret, algorithm)?;
+    jwks_encode(&header, claims, &key).map_err(|e| JwtEncodeError(e.to_string()))
 }
 
 /// Validate `token` against `config` and return the parsed [`JwtClaims`] on
@@ -252,7 +252,7 @@ pub fn encode(
 ///
 /// [`AuthBearerLayer`]: ../../../joltr_core/auth_bearer/struct.AuthBearerLayer.html
 pub fn decode(token: &str, config: &JwtConfig) -> Result<JwtClaims, JwtDecodeError> {
-    let key = DecodingKey::from_secret(&config.secret);
+    let key = decoding_key(&config.secret, config.algorithm)?;
 
     // jsonwebtoken's `Validation::new` defaults `validate_aud` to true with
     // an empty audience set, which would reject tokens lacking an `aud`
@@ -265,6 +265,42 @@ pub fn decode(token: &str, config: &JwtConfig) -> Result<JwtClaims, JwtDecodeErr
     jwt_decode::<JwtClaims>(token, &key, &validation)
         .map(|data| data.claims)
         .map_err(map_error)
+}
+
+fn encoding_key(
+    key_material: &[u8],
+    algorithm: jsonwebtoken::Algorithm,
+) -> Result<EncodingKey, JwtEncodeError> {
+    match algorithm {
+        jsonwebtoken::Algorithm::HS256
+        | jsonwebtoken::Algorithm::HS384
+        | jsonwebtoken::Algorithm::HS512 => Ok(EncodingKey::from_secret(key_material)),
+        jsonwebtoken::Algorithm::RS256
+        | jsonwebtoken::Algorithm::RS384
+        | jsonwebtoken::Algorithm::RS512 => {
+            EncodingKey::from_rsa_pem(key_material).map_err(|err| JwtEncodeError(err.to_string()))
+        }
+        _ => Err(JwtEncodeError(format!(
+            "unsupported JWT algorithm for encode: {algorithm:?}"
+        ))),
+    }
+}
+
+fn decoding_key(
+    key_material: &[u8],
+    algorithm: jsonwebtoken::Algorithm,
+) -> Result<DecodingKey, JwtDecodeError> {
+    match algorithm {
+        jsonwebtoken::Algorithm::HS256
+        | jsonwebtoken::Algorithm::HS384
+        | jsonwebtoken::Algorithm::HS512 => Ok(DecodingKey::from_secret(key_material)),
+        jsonwebtoken::Algorithm::RS256
+        | jsonwebtoken::Algorithm::RS384
+        | jsonwebtoken::Algorithm::RS512 => {
+            DecodingKey::from_rsa_pem(key_material).map_err(map_error)
+        }
+        _ => Err(JwtDecodeError::InvalidAlgorithm),
+    }
 }
 
 /// Map a [`jsonwebtoken::errors::Error`] to the framework's typed
@@ -375,8 +411,7 @@ mod tests {
     #[test]
     fn decode_malformed_token_yields_malformed_variant() {
         let config = JwtConfig::new(b"any-secret".to_vec(), Algorithm::HS256);
-        let err = decode("definitely-not-a-jwt", &config)
-            .expect_err("malformed token must reject");
+        let err = decode("definitely-not-a-jwt", &config).expect_err("malformed token must reject");
         assert_eq!(err, JwtDecodeError::Malformed);
     }
 
@@ -489,14 +524,8 @@ mod tests {
             3,
             "JWT must have three segments (header.payload.signature), got {token}"
         );
-        assert!(
-            !segments[0].is_empty(),
-            "header segment must be non-empty"
-        );
-        assert!(
-            !segments[1].is_empty(),
-            "payload segment must be non-empty"
-        );
+        assert!(!segments[0].is_empty(), "header segment must be non-empty");
+        assert!(!segments[1].is_empty(), "payload segment must be non-empty");
         assert!(
             !segments[2].is_empty(),
             "signature segment must be non-empty"
