@@ -622,3 +622,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #19 can now consume `TlsConfig` to start the rustls-backed server path.
+
+
+2026-05-12 PRD #19 - TLS server startup uses rustls
+
+Completed:
+- Added `axum-server` to `joltr-core` and routed `JoltRServer::start` through `axum_server::bind_rustls` when `tls_config` is present.
+- Preserved the existing plain HTTP path for servers without TLS config.
+- Added a focused server unit test that writes a short PEM cert/key fixture, starts the TLS path on port 0, and shuts it down immediately without a long-lived listener.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 20 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed: 294 lib tests plus all joltr-core integration tests; skipped the same pre-existing WebSocket timeout noted in prior progress.
+- `python3 -m json.tool prd.json >/dev/null` -> clean.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept TLS startup behind private helpers so the public server API remains unchanged.
+- Used `RustlsConfig::from_pem_file` directly against `TlsConfig` paths, leaving detailed invalid-cert assertions to PRD #20.
+- Used `axum_server::Handle` for TLS shutdown because axum-server does not expose axum's `with_graceful_shutdown` API.
+
+Files changed:
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/server.rs`
+- `prd.json` (item 19 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #20 can add explicit startup-error assertions for missing, unreadable, or malformed TLS cert/key files.

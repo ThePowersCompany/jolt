@@ -13,8 +13,9 @@
 //! [`Default`] impl produces an empty/restrictive config (no origins, no
 //! methods, no headers, `max_age = 0`) — opening up CORS is an explicit
 //! caller decision, never the default. [`TlsConfig`] carries certificate/key
-//! paths for the TLS startup path landing in the next phase.
+//! paths used by the rustls startup path when TLS is configured.
 
+use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -22,6 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
 use tower_http::trace::TraceLayer;
 
 use crate::body_log::BodyLogLayer;
@@ -203,8 +205,8 @@ impl JoltRServer {
     ///
     /// JOLTR-RS-068: the merged router is wrapped in
     /// [`TraceLayer::new_for_http`] via [`Self::build_serving_router`] before
-    /// being handed to `axum::serve`, so every served request emits a
-    /// tower-http trace span.
+    /// being handed to the plain HTTP or TLS serving path, so every served
+    /// request emits a tower-http trace span.
     ///
     /// JOLTR-RS-069: a [`tracing_subscriber::fmt`] subscriber with compact
     /// format is installed (if none already exists) so those trace spans
@@ -218,12 +220,10 @@ impl JoltRServer {
         init_tracing_subscriber();
 
         let port = self.port;
+        let tls_config = self.tls_config.clone();
         let serving = self.build_serving_router(extra_router);
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, serving)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
+        serve_configured(addr, serving, tls_config, shutdown_signal()).await
     }
 
     /// Build a Tokio multi-thread runtime using [`Self::threads`] and run the
@@ -249,9 +249,113 @@ impl JoltRServer {
     }
 }
 
+async fn serve_configured<S>(
+    addr: SocketAddr,
+    serving: Router,
+    tls_config: Option<TlsConfig>,
+    shutdown: S,
+) -> io::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
+    match tls_config {
+        Some(tls) => serve_tls(addr, serving, tls, shutdown).await,
+        None => serve_plain(addr, serving, shutdown).await,
+    }
+}
+
+async fn serve_plain<S>(addr: SocketAddr, serving: Router, shutdown: S) -> io::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, serving)
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
+async fn serve_tls<S>(
+    addr: SocketAddr,
+    serving: Router,
+    tls: TlsConfig,
+    shutdown: S,
+) -> io::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
+    let rustls_config = rustls_config_from_tls_config(&tls).await?;
+    let handle = axum_server::Handle::new();
+    let server = axum_server::bind_rustls(addr, rustls_config)
+        .handle(handle.clone())
+        .serve(serving.into_make_service());
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result,
+        _ = shutdown => {
+            handle.graceful_shutdown(None);
+            server.await
+        }
+    }
+}
+
+async fn rustls_config_from_tls_config(tls: &TlsConfig) -> io::Result<RustlsConfig> {
+    RustlsConfig::from_pem_file(&tls.cert_chain_path, &tls.private_key_path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDCTCCAfGgAwIBAgIUdZHJ5Kf5Zi7oIlRfw0YHKK7kaywwDQYJKoZIhvcNAQEL\n\
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDUxMjE2MjYxNVoXDTI2MDUx\n\
+MzE2MjYxNVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\n\
+AAOCAQ8AMIIBCgKCAQEA5xG5LivSFtY8AbPs0vSHxMd6+cjFPXRBgB7zRJ54ClIU\n\
+KIIdE67+Jup35Pu3M7idZfymhQEdpWcNvkEpCSXxbathYdCtWWaXQM8BpAtmk92L\n\
+8ACtjsjxD+oLTAZmAYkv98dzxaEdiblOg7pEBUO1rDk6J+LLk6heWUzQw2v0+1GQ\n\
+2UgOqMtvn/zpaa06bS2XRZuzYA20Ii/iwj2l9q2v5cECxlkcBODAxThZODXlFwPJ\n\
+tRkwLcJO7VSl1pdXQsvWxPW2pcLZjiM7vGQSrVoEvZuvBKA1FIuGOa2HFuGUN2Kq\n\
+pztMNpHkDf/ubal7nuY71rxUt9VuJKtKCs9igW2sxQIDAQABo1MwUTAdBgNVHQ4E\n\
+FgQUu6uHYXpfC8xGBEDxHfThvvVJX4EwHwYDVR0jBBgwFoAUu6uHYXpfC8xGBEDx\n\
+HfThvvVJX4EwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEASloq\n\
+q5WE3QSxocnKA+ECJa4oLFNJ9xtANFx9PWp6+aCjAEWkh1VZplg8vzbb73EpeMQ9\n\
+NwwoCLlzg4tJS88IHzPxOFwHGBINDEoXW8pWAOsU+p1FcHvnppcXpHDm+UMAlFyM\n\
+AT0RNz1sR3/aoyZe4wXSu1nm/sLcy5+AfLtrYwvuuiLXf5yhGwfU1fBKNvWDsBU+\n\
+Isg4rC/b/1lzm5LbXPHyV6wXo/GGif4PjiVax7s/gfy2+LiQm0mfrKJRpzojkE0h\n\
+JDUFpdcvPttpdHW7hkXl0kThC/8L+ThzbgM++DEiMPDEuvBmwdGRkHrcCUZ2FYIg\n\
+Nq8gbSwEEs86P+G7uw==\n\
+-----END CERTIFICATE-----\n";
+
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDnEbkuK9IW1jwB\n\
+s+zS9IfEx3r5yMU9dEGAHvNEnngKUhQogh0Trv4m6nfk+7czuJ1l/KaFAR2lZw2+\n\
+QSkJJfFtq2Fh0K1ZZpdAzwGkC2aT3YvwAK2OyPEP6gtMBmYBiS/3x3PFoR2JuU6D\n\
+ukQFQ7WsOTon4suTqF5ZTNDDa/T7UZDZSA6oy2+f/OlprTptLZdFm7NgDbQiL+LC\n\
+PaX2ra/lwQLGWRwE4MDFOFk4NeUXA8m1GTAtwk7tVKXWl1dCy9bE9balwtmOIzu8\n\
+ZBKtWgS9m68EoDUUi4Y5rYcW4ZQ3YqqnO0w2keQN/+5tqXue5jvWvFS31W4kq0oK\n\
+z2KBbazFAgMBAAECggEAFOMBPi8v2mibG/xLl/YKn7r4XsPLMHblxNMHYliAuU4a\n\
+DF9WiYTz7EidddFbCg3SDHn+A1/Kcj0SfPQe5XjMjgFD2Deos8AWRAFyQIXXS95m\n\
+29bz2UhIoguh4cliRxlDgL5CtMaPiPd7JWUc6Ozp6xtxKlHR3RMHFENhS4jiqCTX\n\
+UqoGvW8OzDstNrCAZMOwQFCdCazuvIYFRCkvK8ZK9deClDXTriOdw53V8usYqn82\n\
+/OJUdjx0jlWXapVnw3iazeoMtV8igU3V4JQihNwSM2it3iQ5lk6MeMVTwbcEo3W4\n\
+Ha6KXAqzcRv8igECxfc5YwhBOwxWXxQi8iCPb4nwsQKBgQD+vnvsr2mrmA36H45G\n\
++g1O1WmFcgLnoYkeiIs7M+4PXpJVGzykmUxe96eusHLDrZOvNNOjQ2nKWZ+KEzh3\n\
+zjOtuGoHaE/eS5rfCZKH6ZF2LtmqSwgxh83j21LqCI+QR6D+wiRqTCigrPiRLWVU\n\
+hQW7TAkb2ulDIvQ4aisT/yNljwKBgQDoNVvjbG0qC/8e6s2TSXbXC2IsyzaDfotg\n\
+vSJ06vX1ZQXdvAiXvu07+wsnTMXqB28AkYAXLQdT4kOjntzImb4XIs6jrwW94IIs\n\
+tojO//+Q08ahYjYEIbymX6i4wRtKhxOfpeHQWHmIs9oBNJ4tXj3fV6L2V+2pkApM\n\
+TQAy2QEmawKBgA0bZ+zpqZo2nKF99igYvY6M1H0VPKkGWrPDesZ1CY6o4waV/CzL\n\
+5m4MeAg48+61g5/ELA9+bHcI3XiRPJqNdYM+tdXjvBhH85P+PhfYIK/gATsN2UIT\n\
+JrjOlBmOjzRxOwtgmdcOTBjYTYHKwCf1IDJe2ykfvljB96bfb4/71KppAoGAZel9\n\
+QawFoS2Qs6YDwX+9m5XQaa5qZ32zeCqqI7w3ZJMI5w8uikLuZaPBemcUeaj3i71Q\n\
+BVvq2mL0oqwHZDctmYPaQzZ+g540I6GdG5R5Orvnck7jPB7+Z9qV9zgxXR05fJjW\n\
+KZWbCWc958eLIIg7CXmx+QIQOZoRGvm0e5yIB68CgYAn9f5DKN9/4nfKuFfcjq8h\n\
+OL4p+t0a8acgv/RkaXlsIf5we5RcNwfjavBRkFxXexI0Cv0To2IXawId3ytC+2DH\n\
+du2CqitncSr8ObFGp6kazdYbTCSh5eZYP4q/sf2+k2mrjO0pMj7XA3Ato5NW/zi9\n\
+NZP3uANaD/XvAdpmTHmVDg==\n\
+-----END PRIVATE KEY-----\n";
 
     #[test]
     fn build_owned_runtime_uses_configured_thread_count() {
@@ -294,6 +398,40 @@ mod tests {
         let server = JoltRServer::new().tls(config.clone());
 
         assert_eq!(server.tls_config, Some(config));
+    }
+
+    #[tokio::test]
+    async fn configured_tls_path_loads_rustls_and_starts_server() {
+        let dir = unique_tls_fixture_dir();
+        std::fs::create_dir_all(&dir).expect("create tls fixture dir");
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, TEST_CERT).expect("write cert fixture");
+        std::fs::write(&key_path, TEST_KEY).expect("write key fixture");
+
+        let result = serve_configured(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            Router::new(),
+            Some(TlsConfig {
+                cert_chain_path: cert_path,
+                private_key_path: key_path,
+            }),
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            },
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
+        result.expect("tls server should start and shut down cleanly");
+    }
+
+    fn unique_tls_fixture_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("joltr-core-tls-{}-{nanos}", std::process::id()))
     }
 
     #[test]

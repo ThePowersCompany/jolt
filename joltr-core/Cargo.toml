@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 axum = { workspace = true }
+axum-server = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }

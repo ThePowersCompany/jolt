@@ -158,6 +158,15 @@
       "passes": true
     },
     {
+      "id": "19",
+      "title": "TLS server startup uses rustls",
+      "phase": "Phase 6",
+      "description": "When tls_config is present, start the server with axum-server and rustls using the configured cert/key paths. Preserve the existing plain HTTP path when tls_config is absent.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/tests/tls.rs"],
+      "passes": true
+    },
+    {
       "id": "21",
       "title": "Server threads build owned Tokio runtime",
       "phase": "Phase 1",
