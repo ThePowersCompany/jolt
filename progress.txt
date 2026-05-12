@@ -500,3 +500,33 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished example items are WebSocket chat (#15), background task/DB migration (#16), and template rendering (#17).
+
+
+2026-05-12 PRD #16 - Example app: background task and DB migration
+
+Completed:
+- Added `examples/basic/src/tasks.rs` with a `Task` implementation that logs basic uptime/run stats every 30 seconds and a scheduler constructor registering it.
+- Added `examples/basic/migrations/0001_init.sql` with an idempotent example table migration.
+- Wired startup to run `JoltRDb::connect(...).migrate(...)` when `DATABASE_URL` is set, then start the background task scheduler before serving HTTP/WebSocket routes.
+
+Verification:
+- `cargo fmt --package joltr-basic-example -- --check` -> clean after formatting fix.
+- `cargo test -p joltr-basic-example` -> 11 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Migration startup is enabled by `DATABASE_URL`; missing or empty values skip migrations so the example remains runnable without a local Postgres instance.
+- Kept the background task example self-contained and stdout-based, avoiding a new direct tracing dependency in the example crate.
+- Used an absolute compile-time migrations path from `CARGO_MANIFEST_DIR` so startup works regardless of the current working directory.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/src/tasks.rs` (new)
+- `examples/basic/migrations/0001_init.sql` (new)
+- `prd.json` (item 16 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD item is template rendering (#17).

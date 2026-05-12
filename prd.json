@@ -138,7 +138,7 @@
       "phase": "Phase 6",
       "description": "Add a Task that logs stats every 30s. Add a migrations/ directory with one SQL migration file. Wire JoltRDb with migrate() call on startup.",
       "files": ["examples/basic/src/tasks.rs", "examples/basic/migrations/0001_init.sql"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "17",

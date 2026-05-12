@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS example_items (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
