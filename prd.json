@@ -147,6 +147,15 @@
       "description": "Add GET / that renders a Handlebars template with dynamic data. Add a templates/ directory with an index.hbs file. Demonstrate TemplateEngine usage.",
       "files": ["examples/basic/src/endpoints.rs", "examples/basic/templates/index.hbs"],
       "passes": true
+    },
+    {
+      "id": "21",
+      "title": "Server threads build owned Tokio runtime",
+      "phase": "Phase 1",
+      "description": "Add a non-async server entry point that builds a Tokio multi-thread runtime using JoltRServer::threads and then serves the configured router. Keep the existing async start path for callers that already own a runtime.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/src/tests.rs"],
+      "passes": true
     }
   ]
 }

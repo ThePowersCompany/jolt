@@ -563,3 +563,33 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. All PRD items are now marked complete in the current worktree.
+
+
+2026-05-12 PRD #21 - Server threads build owned Tokio runtime
+
+Completed:
+- Added `JoltRServer::start_blocking(extra_router)` as a non-async entry point for binaries that do not already own a Tokio runtime.
+- Added a private owned-runtime builder that uses `JoltRServer::threads`, enables Tokio IO/time drivers, and rejects `threads(0)` with `InvalidInput` instead of panicking.
+- Kept the existing async `JoltRServer::start` path unchanged for callers that already own a runtime.
+- Added focused `server.rs` unit tests for configured worker count, zero-thread rejection, and bind-error propagation through `start_blocking`.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 17 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `python3 -m json.tool prd.json > /dev/null` -> clean.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Named the blocking API `start_blocking` so the async `start` signature remains stable and the runtime ownership boundary is explicit.
+- Used `tokio::runtime::Builder::new_multi_thread().worker_threads(self.threads).enable_all()` so the configured thread count only applies to the owned-runtime path.
+- Placed tests in `joltr-core/src/server.rs` to avoid touching the already-dirty shared `joltr-core/src/tests.rs` file.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `prd.json` (item 21 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. TLS config/startup items (#18-#20) remain unfinished and can build on the server entry-point split without changing the async API.

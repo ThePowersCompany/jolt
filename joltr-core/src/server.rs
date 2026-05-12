@@ -2,9 +2,10 @@
 //!
 //! [`JoltRServer`] is a plain configuration record carrying port, thread, and
 //! optional CORS/TLS settings, an [`EndpointRegistry`] for routes registered
-//! via [`JoltRServer::endpoint`], plus a [`JoltRServer::start`] entry point that
-//! binds an axum [`Router`] on `0.0.0.0:port` with graceful shutdown driven by
-//! `tokio::signal` (SIGINT plus SIGTERM on unix).
+//! via [`JoltRServer::endpoint`], plus [`JoltRServer::start`] and
+//! [`JoltRServer::start_blocking`] entry points that bind an axum [`Router`] on
+//! `0.0.0.0:port` with graceful shutdown driven by `tokio::signal` (SIGINT plus
+//! SIGTERM on unix).
 //!
 //! [`CorsConfig`] (JOLTR-RS-055) carries the four CORS knobs the upcoming
 //! [`tower::Layer`](::tower::Layer) impls in JOLTR-RS-056..058 read at request
@@ -14,6 +15,7 @@
 //! caller decision, never the default. [`TlsConfig`] remains a stub marker
 //! whose fields are filled in when the TLS phase lands.
 
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -199,10 +201,10 @@ impl JoltRServer {
     /// format is installed (if none already exists) so those trace spans
     /// render as human-readable log lines.
     ///
-    /// `self.threads` is currently advisory: the server runs on the caller's
-    /// existing tokio runtime, so worker count is whatever that runtime was
-    /// built with. A future runtime-build PRD item can wire `threads` through
-    /// without changing this signature.
+    /// `self.threads` is intentionally ignored here: this async entry point
+    /// runs on the caller's existing tokio runtime. Use
+    /// [`Self::start_blocking`] when JoltR should own the runtime and apply the
+    /// configured worker-thread count.
     pub async fn start(self, extra_router: Router) -> std::io::Result<()> {
         init_tracing_subscriber();
 
@@ -213,6 +215,67 @@ impl JoltRServer {
         axum::serve(listener, serving)
             .with_graceful_shutdown(shutdown_signal())
             .await
+    }
+
+    /// Build a Tokio multi-thread runtime using [`Self::threads`] and run the
+    /// async [`Self::start`] path to completion. This is the entry point for
+    /// binaries that do not already own a Tokio runtime.
+    pub fn start_blocking(self, extra_router: Router) -> std::io::Result<()> {
+        let runtime = self.build_owned_runtime()?;
+        runtime.block_on(self.start(extra_router))
+    }
+
+    fn build_owned_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        if self.threads == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JoltRServer::threads must be greater than 0",
+            ));
+        }
+
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(self.threads)
+            .enable_all()
+            .build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_owned_runtime_uses_configured_thread_count() {
+        let runtime = JoltRServer::new()
+            .threads(2)
+            .build_owned_runtime()
+            .expect("runtime should build");
+
+        assert_eq!(runtime.metrics().num_workers(), 2);
+    }
+
+    #[test]
+    fn build_owned_runtime_rejects_zero_threads() {
+        let err = JoltRServer::new()
+            .threads(0)
+            .build_owned_runtime()
+            .expect_err("zero worker threads should be invalid");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn start_blocking_surfaces_bind_errors_without_external_runtime() {
+        let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+
+        let err = JoltRServer::new()
+            .port(port)
+            .threads(1)
+            .start_blocking(Router::new())
+            .expect_err("start_blocking should surface the bind failure");
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }
 
