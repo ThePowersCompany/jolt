@@ -194,6 +194,15 @@
       "passes": true
     },
     {
+      "id": "23",
+      "title": "AutoMiddleware by-ref Request extraction",
+      "phase": "Phase 2",
+      "description": "Replace the &Request unimplemented! expansion by threading lifetimes through the generated helper so middleware structs can borrow the request instead of cloning it.",
+      "files": ["joltr-macros/src/auto_middleware.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
       "id": "24",
       "title": "AutoMiddleware generated layer performs extraction",
       "phase": "Phase 2",

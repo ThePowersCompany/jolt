@@ -83,6 +83,12 @@ struct TypedQueryMw {
     query: QueryParams<Filters>,
 }
 
+#[derive(AutoMiddleware)]
+#[allow(dead_code)]
+struct BorrowRequestMw<'a> {
+    req: &'a Request,
+}
+
 /// JOLTR-RS-053: derives `serde::Deserialize` so the auto-middleware extraction
 /// helper's body-extraction call (`__req.json::<CreateUserRequest>()`) compiles.
 /// Before 053 this only had to be a syntactic placeholder; the macro now emits
@@ -205,11 +211,10 @@ async fn middleware_layer_wraps_inner_service() {
 // 053 emits a per-derive `__jolt_extract_from(&Request) -> Self` helper rather
 // than splicing the extraction calls directly into the wrapper service's
 // `call()` body. The wrapper is generic over `__Req` (per JOLTR-RS-051), so
-// inlining `__req.json::<T>()` would either force `__Req: ::joltr_core::Request`
-// (breaking the `Service<()>` test above) or require lifetime threading on
-// `Self` construction (deferred). The helper is the standalone observable
-// surface this test exercises end-to-end: build a fake `joltr_core::Request`,
-// call the helper, assert per-field population.
+// inlining `__req.json::<T>()` would force `__Req: ::joltr_core::Request`
+// (breaking the `Service<()>` test above). The helper is the standalone
+// observable surface this test exercises end-to-end: build a fake
+// `joltr_core::Request`, call the helper, assert per-field population.
 //
 // The chain markers in the wrapper's `call()` body stay as marker statements
 // at 053; replacing them with calls into `__jolt_extract_from` is whichever
@@ -284,6 +289,27 @@ fn extract_from_populates_typed_query_params_field() {
 
     assert_eq!(mw.query.page, 2);
     assert_eq!(mw.query.filter, "active");
+}
+
+#[test]
+fn extract_from_populates_by_ref_request_field() {
+    use axum::http::HeaderMap;
+
+    let req = Request {
+        method: Method::Get,
+        path: "/borrowed".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::new(),
+        body: Vec::new(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let mw = BorrowRequestMw::__jolt_extract_from(&req);
+
+    assert!(std::ptr::eq(mw.req, &req));
+    assert_eq!(mw.req.path, "/borrowed");
+    assert_eq!(mw.req.method, Method::Get);
 }
 
 #[tokio::test]

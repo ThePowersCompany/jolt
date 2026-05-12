@@ -62,12 +62,10 @@
 //!   `Self { ... }` with each field initialised by an expression matched to its
 //!   [`FieldKind`]: Body via `req.json::<T>()`, HashMap-shaped QueryParams via
 //!   `req.query_params.clone()`, by-value Request via `<Request as Clone>::clone(req)`,
-//!   and Other via `<T as Default>::default()`. Typed `QueryParams<T>` and
-//!   by-ref `&Request` are emitted as `unimplemented!(...)` placeholders —
-//!   typed QueryParams needs the framework type that JOLTR-RS-055+ will
-//!   introduce, and by-ref Request needs generic-parameter threading on the
-//!   user struct's lifetimes (deferred, see the "Notes for next iterations" in
-//!   progress.txt). The 052 chain markers in `call()` stay as marker
+//!   and Other via `<T as Default>::default()`. Typed `QueryParams<T>` originally
+//!   emitted an `unimplemented!(...)` placeholder until typed parsing landed;
+//!   by-ref `&Request` borrows the active request once the user's lifetime
+//!   generics are threaded through the helper impl. The 052 chain markers in `call()` stay as marker
 //!   statements — replacing them with calls into `__jolt_extract_from` would
 //!   either break 051's generic-over-`__Req` design (the wrapper's `call` is
 //!   generic over `__Req`, but extraction needs `&::joltr_core::Request`
@@ -82,7 +80,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type,
+    parse_quote, Attribute, Data, DataStruct, DeriveInput, Fields, GenericArgument, Generics,
+    Ident, Lifetime, PathArguments, Type,
 };
 
 /// Parsed shape of a `#[derive(AutoMiddleware)]` input.
@@ -98,6 +97,7 @@ use syn::{
 #[derive(Debug)]
 pub(crate) struct AutoMiddlewareInput {
     pub(crate) ident: Ident,
+    pub(crate) generics: Generics,
     pub(crate) fields: Vec<AutoMiddlewareField>,
     /// `true` iff the struct carries a bare `#[cors]` attribute. 052 reads
     /// this in [`middleware_chain`] to splice the cors step into the
@@ -200,12 +200,14 @@ pub(crate) enum FieldKind {
 ///   that doesn't compose with named-field structs.
 pub(crate) fn parse_auto_middleware_input(input: DeriveInput) -> syn::Result<AutoMiddlewareInput> {
     let ident = input.ident.clone();
+    let generics = input.generics.clone();
     let cors = parse_struct_attrs(&input.attrs);
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
             Ok(AutoMiddlewareInput {
                 ident,
+                generics,
                 fields,
                 cors,
             })
@@ -476,7 +478,8 @@ pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareSt
 ///    parse-body) for steps that fire on the parsed input. The terminal
 ///    `inner.call(__req)` delegation stays as the handler step.
 /// 5. A per-derive `__jolt_extract_from(&::joltr_core::Request) -> Self` method
-///    (053) on the user's struct that constructs `Self { ... }` with each
+///    (053) on the user's struct, using the user's request lifetime for
+///    by-ref `&Request` fields, that constructs `Self { ... }` with each
 ///    field initialised by an expression matched to its [`FieldKind`]. This is
 ///    the standalone observable surface JOLTR-RS-054 will exercise to verify
 ///    per-field extraction; later PRD items will splice the call into the
@@ -493,13 +496,14 @@ pub(crate) fn expand_auto_middleware(input: DeriveInput) -> TokenStream {
         Err(err) => return err.to_compile_error(),
     };
     let ident = &parsed.ident;
+    let (impl_generics, ty_generics, where_clause) = parsed.generics.split_for_impl();
     let field_count = parsed.fields.len();
     let cors = parsed.cors;
     let layer = expand_layer_impl(&parsed);
     let extraction = expand_extraction(&parsed);
     quote! {
         #[automatically_derived]
-        impl #ident {
+        impl #impl_generics #ident #ty_generics #where_clause {
             #[doc(hidden)]
             pub const __JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT: usize = #field_count;
             #[doc(hidden)]
@@ -631,6 +635,10 @@ fn service_ident_for(ident: &Ident) -> Ident {
 ///    integration-test contract for `UnitMiddleware`.
 fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
     let ident = &parsed.ident;
+    let (_, ty_generics, _) = parsed.generics.split_for_impl();
+    let mut layer_generics = parsed.generics.clone();
+    layer_generics.params.push(parse_quote!(__S));
+    let (layer_impl_generics, _, layer_where_clause) = layer_generics.split_for_impl();
     let service_ident = service_ident_for(ident);
     let chain = middleware_chain(parsed);
     let chain_stmts: Vec<_> = chain
@@ -731,7 +739,7 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
         }
 
         #[automatically_derived]
-        impl<__S> ::joltr_core::tower::Layer<__S> for #ident {
+        impl #layer_impl_generics ::joltr_core::tower::Layer<__S> for #ident #ty_generics #layer_where_clause {
             type Service = #service_ident<__S>;
 
             fn layer(&self, inner: __S) -> Self::Service {
@@ -745,10 +753,12 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
 
 /// Emit the per-derive extraction helper (JOLTR-RS-053).
 ///
-/// Renders, for the user's middleware struct `<Ident>`, an
-/// `impl <Ident> { pub fn __jolt_extract_from(__req: &::joltr_core::Request) -> Self { ... } }`
-/// where the body constructs `Self { #ident: <init>, ... }` with one init
-/// expression per parsed field, matched to its [`FieldKind`]:
+/// Renders, for the user's middleware struct `<Ident>`, an impl preserving the
+/// user's generics with `pub fn __jolt_extract_from(__req: &Request) -> Self`.
+/// When a by-ref request field is present, the helper parameter uses that field's
+/// lifetime so the returned `Self` can borrow the request. The body constructs
+/// `Self { #ident: <init>, ... }` with one init expression per parsed field,
+/// matched to its [`FieldKind`]:
 ///
 /// | FieldKind                            | init expression                                       |
 /// | ------------------------------------ | ----------------------------------------------------- |
@@ -756,7 +766,7 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
 /// | `QueryParams` (HashMap shape)        | `::core::clone::Clone::clone(&__req.query_params)`    |
 /// | `QueryParams` (typed `<T>` shape)    | `::core::unimplemented!("…JOLTR-RS-055+…")`            |
 /// | `Request` (by-value bare `Request`)  | `<::joltr_core::Request as Clone>::clone(__req)`       |
-/// | `Request` (by-ref `&Request`)        | `::core::unimplemented!("…generics threading…")`      |
+/// | `Request` (by-ref `&Request`)        | `__req`                                                |
 /// | `Other`                              | `<#ty as ::core::default::Default>::default()`        |
 ///
 /// The helper is `#[doc(hidden)]` and prefixed with the macro-internal
@@ -793,19 +803,11 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
 ///    framework's typed-error surface lands; for now `.expect` matches the
 ///    spec's "extract body into struct" verbiage without an extra Default
 ///    bound on user types.
-/// 4. **Typed `QueryParams<T>` and by-ref `&Request` are placeholders.** The
-///    typed `QueryParams<T>` framework type doesn't exist yet — JOLTR-RS-055+
-///    will land it. By-ref `&Request` would require either lifetime threading
-///    on the user struct's generics (the macro currently drops `input.generics`
-///    on the floor — see 051's "Generic-parameter threading deferred" note) or
-///    a different helper signature returning `Self<'_>`. Both are out of
-///    scope for 053. Both placeholders use `::core::unimplemented!(...)`
-///    rather than `compile_error!`: the macro expansion still succeeds (so a
-///    user can run the marker-const tests, the layer-impl tests, etc.), but
-///    calling `__jolt_extract_from` on such a struct panics at runtime with a
-///    clear "JOLTR-RS-XXX will land this" diagnostic. Pinned by
-///    `expand_extraction_initializes_typed_query_params_via_unimplemented`
-///    and `expand_extraction_initializes_by_ref_request_via_unimplemented`.
+/// 4. **By-ref `&Request` borrows the helper argument.** The generated helper
+///    impl preserves the user's generics and, when a request-reference field is
+///    present, uses that lifetime on the `__req` parameter so `Self` can hold
+///    the active request borrow. Typed `QueryParams<T>` is handled above through
+///    the query deserializer.
 /// 5. **`Other` fields use `<#ty as Default>::default()`.** The spec says the
 ///    Other catch-all is `Default::default()` per-request. Each Other-kinded
 ///    field's type must therefore impl `Default`; the struct literal makes
@@ -818,6 +820,8 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
 ///    `expand_extraction_handles_unit_struct`.
 fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
     let ident = &parsed.ident;
+    let (impl_generics, ty_generics, where_clause) = parsed.generics.split_for_impl();
+    let request_ref_ty = helper_request_ref_ty(parsed);
     let field_inits = parsed.fields.iter().map(|f| {
         let f_ident = &f.ident;
         let init_expr = field_init_expr(f);
@@ -825,7 +829,7 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
     });
     quote! {
         #[automatically_derived]
-        impl #ident {
+        impl #impl_generics #ident #ty_generics #where_clause {
             /// JOLTR-RS-053: per-derive extraction helper. Constructs an
             /// instance of this middleware struct from a
             /// `&::joltr_core::Request` by running per-field extraction (body,
@@ -834,7 +838,7 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
             /// `#[doc(hidden)]` because it's macro-internal. JOLTR-RS-054 will
             /// exercise this method at runtime to verify per-field population.
             #[doc(hidden)]
-            pub fn __jolt_extract_from(__req: &::joltr_core::Request) -> Self {
+            pub fn __jolt_extract_from(__req: #request_ref_ty) -> Self {
                 match Self::__jolt_try_extract_from(__req) {
                     ::core::result::Result::Ok(__jolt_middleware) => __jolt_middleware,
                     ::core::result::Result::Err(_) => {
@@ -845,7 +849,7 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
 
             #[doc(hidden)]
             pub fn __jolt_try_extract_from(
-                __req: &::joltr_core::Request,
+                __req: #request_ref_ty,
             ) -> ::core::result::Result<Self, ::joltr_core::parse_query::QueryErrorResponse> {
                 ::core::result::Result::Ok(Self {
                     #(#field_inits),*
@@ -853,6 +857,34 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
             }
         }
     }
+}
+
+fn helper_request_ref_ty(parsed: &AutoMiddlewareInput) -> TokenStream {
+    if let Some(lifetime) = by_ref_request_lifetime(parsed) {
+        quote! { &#lifetime ::joltr_core::Request }
+    } else {
+        quote! { &::joltr_core::Request }
+    }
+}
+
+fn by_ref_request_lifetime(parsed: &AutoMiddlewareInput) -> Option<Lifetime> {
+    parsed.fields.iter().find_map(|field| {
+        if field.kind != FieldKind::Request {
+            return None;
+        }
+        let Type::Reference(reference) = &field.ty else {
+            return None;
+        };
+        if reference.mutability.is_some() || !type_path_ends_with(&reference.elem, "Request") {
+            return None;
+        }
+        reference.lifetime.clone().or_else(|| {
+            parsed.generics.params.iter().find_map(|param| match param {
+                syn::GenericParam::Lifetime(lifetime) => Some(lifetime.lifetime.clone()),
+                _ => None,
+            })
+        })
+    })
 }
 
 fn typed_query_params_init_expr(field_ty: &Type, inner_ty: &Type) -> TokenStream {
@@ -898,11 +930,7 @@ fn field_init_expr(field: &AutoMiddlewareField) -> TokenStream {
         }
         FieldKind::Request => {
             if matches!(f_ty, Type::Reference(_)) {
-                quote! {
-                    ::core::unimplemented!(
-                        "by-ref &Request extraction in #[derive(AutoMiddleware)] needs generic-parameter threading on the user struct's lifetimes (deferred; see auto_middleware.rs progress notes)"
-                    )
-                }
+                quote! { __req }
             } else {
                 quote! { <::joltr_core::Request as ::core::clone::Clone>::clone(__req) }
             }
@@ -2601,14 +2629,10 @@ mod tests {
     }
 
     #[test]
-    fn expand_extraction_initializes_by_ref_request_via_unimplemented() {
-        // `&Request` (by-ref) → init expression is `unimplemented!(...)`. The
-        // by-ref shape requires generic-parameter threading on the user's
-        // struct lifetimes (the macro currently drops `input.generics`); 053
-        // emits a runtime placeholder rather than a compile_error so the rest
-        // of the derive surface stays usable. Pinning the placeholder string
-        // makes any future PRD that lands lifetime threading explicitly
-        // remove this test.
+    fn expand_extraction_initializes_by_ref_request_from_borrowed_request() {
+        // `&Request` (by-ref) → init expression borrows the active request.
+        // The helper signature threads the user's request lifetime through the
+        // generated impl, so the returned middleware can hold the request ref.
         let input = parse_derive(
             r#"
             struct WithReq<'a> {
@@ -2619,12 +2643,16 @@ mod tests {
         let parsed = parse_auto_middleware_input(input).expect("parses");
         let rendered = expand_extraction(&parsed).to_string();
         assert!(
-            rendered.contains("req : :: core :: unimplemented !"),
-            "by-ref &Request field must be initialised via unimplemented!, rendered: {rendered}"
+            rendered.contains("impl < 'a > WithReq < 'a >"),
+            "extraction impl must preserve user lifetime generics, rendered: {rendered}"
         );
         assert!(
-            rendered.contains("generic-parameter threading"),
-            "placeholder message must reference the deferred reason, rendered: {rendered}"
+            rendered.contains("__req : & 'a :: joltr_core :: Request"),
+            "helper request parameter must use the user's request lifetime, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("req : __req"),
+            "by-ref &Request field must be initialised from the borrowed request, rendered: {rendered}"
         );
     }
 

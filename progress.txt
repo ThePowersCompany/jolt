@@ -753,3 +753,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #23 can now focus on lifetime threading for by-ref `&Request`; PRD #25 can reuse the boxed field-bearing service path for finished-request short circuits.
+
+
+2026-05-12 PRD #23 - AutoMiddleware by-ref Request extraction
+
+Completed:
+- Threaded user generics through the generated AutoMiddleware marker and extraction impls so lifetime-bearing middleware structs compile.
+- Changed by-ref `&Request` field initialization from `unimplemented!` to borrowing the active request.
+- Added integration coverage proving `BorrowRequestMw<'a>` receives the same borrowed request reference.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 10 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 263 passed.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- Guarded `npm run type-check` and guarded `cd server && npm run type-check` equivalents were no-ops because there is no repo-root `package.json` or `server/package.json`.
+
+Key decisions:
+- Used the explicit lifetime from the first by-ref request field on the helper request parameter, so `Self` can legally hold the request borrow.
+- Preserved the existing generic tower wrapper shape; the service still downcasts only real `joltr_core::Request` values before extraction.
+- Kept type-generic middleware support out of scope; this slice only unblocks the lifetime-bearing `&Request` shape in the PRD.
+
+Files changed:
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `prd.json` (item 23 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #25 remains the next core AutoMiddleware behavior item: honor finished requests before later middleware or endpoint handling.
