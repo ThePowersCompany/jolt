@@ -1,7 +1,7 @@
 //! Outbound HTTP response value returned from JoltR handlers.
 
 use axum::body::Body;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use serde::Serialize;
@@ -23,6 +23,58 @@ impl<T> Response<T> {
             body,
         }
     }
+}
+
+impl Response<String> {
+    pub fn redirect(location: impl Into<String>, status: StatusCode) -> Self {
+        Redirect::new(location, status).into()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redirect {
+    location: String,
+    status: StatusCode,
+}
+
+impl Redirect {
+    pub fn new(location: impl Into<String>, status: StatusCode) -> Self {
+        assert_supported_redirect_status(status);
+
+        Self {
+            location: location.into(),
+            status,
+        }
+    }
+
+    pub fn location(&self) -> &str {
+        &self.location
+    }
+
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+}
+
+impl From<Redirect> for Response<String> {
+    fn from(value: Redirect) -> Self {
+        assert_supported_redirect_status(value.status);
+
+        let mut response = Response::new(value.status, String::new());
+        response.headers.insert(
+            LOCATION,
+            HeaderValue::from_str(&value.location)
+                .expect("redirect location must be a valid HTTP Location header value"),
+        );
+        response
+    }
+}
+
+fn assert_supported_redirect_status(status: StatusCode) {
+    assert!(
+        matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308),
+        "redirect status must be one of 301, 302, 303, 307, or 308"
+    );
 }
 
 /// Marker trait identifying body types whose `Response<T>` bridges to axum

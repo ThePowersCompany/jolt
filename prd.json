@@ -7,7 +7,7 @@
       "description": "Add Response::redirect(location, status) constructor and a Redirect type that converts into a Response with Location header. Support 301/302/303/307/308 status codes.",
       "files": ["joltr-core/src/response.rs"],
       "tests": ["joltr-core/tests/redirect.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "2",

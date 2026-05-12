@@ -252,3 +252,33 @@ Files changed:
 Next notes:
 - PRD #2 can now add `SetCookie::parse(header_value)` against the concrete `SetCookie`/`SameSite` shape.
 - PRD #5 can use `SetCookie::to_header()` when appending `Set-Cookie` response headers.
+
+
+2026-05-12 PRD #1 — Redirect helper
+
+Completed:
+- Added `Redirect::new(location, status)` in `joltr-core/src/response.rs` with `location()` / `status()` accessors.
+- Added `Response::redirect(location, status) -> Response<String>` and `From<Redirect> for Response<String>`, inserting the HTTP `Location` header with an empty body.
+- Added `joltr-core/tests/redirect.rs` with coverage for helper construction, `Redirect` conversion, all supported redirect statuses (301/302/303/307/308), invalid status rejection, and axum response bridging.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test redirect` → 5 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skipped the same pre-existing WebSocket test noted in the prior progress entry.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no `package.json` or `server/package.json`.
+
+Key decisions:
+- Kept redirect statuses as `StatusCode::Other(301|302|303|307|308)` instead of adding new `StatusCode` variants, keeping the change scoped to the response abstraction.
+- `Response::redirect` returns `Response<String>` with an empty body so the existing string bridge emits no response body instead of JSON `null`.
+- Unsupported statuses panic with a clear invariant message because the requested constructor is not fallible.
+- Did not add a crate-root `Redirect` re-export because `joltr-core/src/lib.rs` already has unrelated unstaged changes; the type is public at `joltr_core::response::Redirect`.
+
+Files changed:
+- `joltr-core/src/response.rs`
+- `joltr-core/tests/redirect.rs` (new)
+- `prd.json` (item 1 → passes: true)
+- `progress.txt`
+
+Next notes:
+- A later API-polish pass can re-export `Redirect` from the crate root once the unrelated `lib.rs` worktree changes are settled.
