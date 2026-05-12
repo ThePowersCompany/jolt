@@ -210,6 +210,15 @@
       "files": ["joltr-macros/src/auto_middleware.rs"],
       "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
       "passes": true
+    },
+    {
+      "id": "25",
+      "title": "AutoMiddleware request-finished short circuit",
+      "phase": "Phase 2",
+      "description": "Honor RequestExt::is_finished() inside generated middleware so a finished request returns the stored shortcut response without invoking later middleware or the endpoint handler.",
+      "files": ["joltr-macros/src/auto_middleware.rs", "joltr-core/src/request_ext.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
     }
   ]
 }

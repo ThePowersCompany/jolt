@@ -784,3 +784,36 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #25 remains the next core AutoMiddleware behavior item: honor finished requests before later middleware or endpoint handling.
+
+
+2026-05-12 PRD #25 - AutoMiddleware request-finished short circuit
+
+Completed:
+- Added a hidden `request_ext` helper that detects an `axum` request carrying a finished `Arc<RequestExt>` and takes its stashed shortcut response, with the existing 500 fallback when no response was stashed.
+- Updated field-bearing `#[derive(AutoMiddleware)]` service codegen to check the helper before extraction or delegation, returning the shortcut response without invoking the inner service.
+- Added integration coverage proving a finished `RequestExt` returns the stashed 401 response and the wrapped service is not called.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-core --test auto_middleware_derive middleware_layer_returns_finished_request_ext_response` -> failed before implementation, then 1 passed after implementation.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 11 passed.
+- `cargo test -p joltr-macros --lib` -> 263 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `cargo fmt --check` -> clean.
+- `npm run type-check` and `cd server && npm run type-check` were guarded no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Reused the existing `Any`-downcast strategy from PRD #24 so the generated service can remain generic while observing real `axum` requests at runtime.
+- Kept short-circuiting on the field-bearing boxed-future path, matching the current extraction-capable middleware path without changing zero-field middleware's generic `Service<()>` contract.
+- Centralized the stashed-response-plus-500-fallback logic in `request_ext.rs` for macro use instead of duplicating it in generated tokens.
+
+Files changed:
+- `joltr-core/src/request_ext.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `prd.json` (item 25 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).

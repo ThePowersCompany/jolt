@@ -11,9 +11,13 @@
 //! [`Router`]: crate::Router
 //! [`Response`]: axum::response::Response
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use axum::body::Body;
+use axum::extract::Request as AxumRequest;
+use axum::http::StatusCode;
 use axum::response::Response;
 
 #[derive(Debug)]
@@ -64,4 +68,26 @@ impl RequestExt {
             .expect("RequestExt response mutex poisoned")
             .take()
     }
+}
+
+#[doc(hidden)]
+pub fn take_finished_response_for<Req: Any>(req: &Req) -> Option<Response> {
+    let axum_req = (req as &dyn Any).downcast_ref::<AxumRequest>()?;
+    let request_ext = axum_req.extensions().get::<Arc<RequestExt>>()?;
+
+    if request_ext.is_finished() {
+        Some(take_short_circuit_response(request_ext))
+    } else {
+        None
+    }
+}
+
+#[doc(hidden)]
+pub fn take_short_circuit_response(ext: &Arc<RequestExt>) -> Response {
+    ext.take_response().unwrap_or_else(|| {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::empty())
+            .expect("static 500 builder always succeeds")
+    })
 }

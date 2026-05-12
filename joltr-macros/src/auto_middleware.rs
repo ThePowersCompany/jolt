@@ -704,6 +704,15 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
                 }
 
                 fn call(&mut self, __req: __Req) -> Self::Future {
+                    if let ::core::option::Option::Some(__jolt_response) =
+                        ::joltr_core::request_ext::take_finished_response_for(&__req)
+                    {
+                        let __jolt_response = <Self::Response as ::core::convert::From<_>>::from(__jolt_response);
+                        return ::std::boxed::Box::pin(async move {
+                            ::core::result::Result::Ok(__jolt_response)
+                        });
+                    }
+
                     #(#chain_stmts)*
                     if let ::core::option::Option::Some(__jolt_req) =
                         (&__req as &dyn ::core::any::Any).downcast_ref::<::joltr_core::Request>()

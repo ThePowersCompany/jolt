@@ -361,6 +361,57 @@ async fn middleware_layer_returns_bad_request_for_invalid_typed_query() {
     );
 }
 
+#[tokio::test]
+async fn middleware_layer_returns_finished_request_ext_response() {
+    use axum::body::{to_bytes, Body};
+    use axum::extract::Request as AxumRequest;
+    use axum::http::StatusCode;
+    use axum::response::Response as AxumResponse;
+    use joltr_core::tower::{Layer, Service};
+    use joltr_core::RequestExt;
+    use std::convert::Infallible;
+    use std::sync::Arc;
+
+    let mw = TypedQueryMw {
+        query: QueryParams(Filters {
+            page: 0,
+            filter: String::new(),
+        }),
+    };
+    let inner = joltr_core::tower::service_fn(|_: AxumRequest| async move {
+        panic!("inner service must not run when RequestExt is finished");
+        #[allow(unreachable_code)]
+        Ok::<_, Infallible>(AxumResponse::new(Body::empty()))
+    });
+    let mut wrapped = mw.layer(inner);
+
+    let ext = Arc::new(RequestExt::new());
+    ext.set_response(
+        AxumResponse::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("auth required"))
+            .unwrap(),
+    );
+    ext.mark_finished();
+
+    let mut req = AxumRequest::builder()
+        .method("GET")
+        .uri("/users?page=2&filter=active")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(Arc::clone(&ext));
+
+    let response = <_ as Service<AxumRequest>>::call(&mut wrapped, req)
+        .await
+        .expect("middleware returns the stashed response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body[..], b"auth required");
+}
+
 #[test]
 #[should_panic(expected = "body deserialization failed")]
 fn middleware_layer_runs_extraction_before_inner_service() {
