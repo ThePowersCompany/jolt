@@ -20,7 +20,7 @@
 //! (which calls `__req.json::<CreateUserRequest>()` for the `body` field of
 //! `MixedMiddleware` and `CorsEnabledMiddleware`) compiles.
 
-use joltr_core::{AutoMiddleware, Method, Request};
+use joltr_core::{AutoMiddleware, Method, QueryParams, Request};
 use std::collections::HashMap;
 
 /// Unit-style middleware: zero fields. The derive must accept this and report
@@ -77,6 +77,12 @@ struct ExtractMw {
     req: Request,
 }
 
+#[derive(AutoMiddleware)]
+#[allow(dead_code)]
+struct TypedQueryMw {
+    query: QueryParams<Filters>,
+}
+
 /// JOLTR-RS-053: derives `serde::Deserialize` so the auto-middleware extraction
 /// helper's body-extraction call (`__req.json::<CreateUserRequest>()`) compiles.
 /// Before 053 this only had to be a syntactic placeholder; the macro now emits
@@ -86,6 +92,12 @@ struct ExtractMw {
 struct CreateUserRequest {
     name: String,
     age: u32,
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+struct Filters {
+    page: u32,
+    filter: String,
 }
 
 #[test]
@@ -122,7 +134,10 @@ fn middleware_with_cors_attribute_emits_cors_true() {
     // to codegen. Same const-block rationale as the false-case test.
     const { assert!(CorsEnabledMiddleware::__JOLTR_AUTO_MIDDLEWARE_CORS) }
     // The field-count const still works alongside the cors const.
-    assert_eq!(CorsEnabledMiddleware::__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT, 1);
+    assert_eq!(
+        CorsEnabledMiddleware::__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT,
+        1
+    );
 }
 
 // JOLTR-RS-051 PRD verification: "Generated code compiles and implements
@@ -166,9 +181,9 @@ const _: fn() = _assert_implements_tower_layer::<CorsEnabledMiddleware, ()>;
 // needing real HTTP types here.
 #[tokio::test]
 async fn middleware_layer_wraps_inner_service() {
+    use joltr_core::tower::{Layer, Service};
     use std::convert::Infallible;
     use std::future::ready;
-    use joltr_core::tower::{Layer, Service};
 
     let inner = joltr_core::tower::service_fn(|_: ()| ready(Ok::<_, Infallible>(())));
     // `UnitMiddleware` is a unit struct — instantiate it directly. This is the
@@ -249,6 +264,78 @@ fn extract_from_populates_body_query_request_fields() {
 }
 
 #[test]
+fn extract_from_populates_typed_query_params_field() {
+    use axum::http::HeaderMap;
+
+    let req = Request {
+        method: Method::Get,
+        path: "/users".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::from([
+            ("page".to_string(), "2".to_string()),
+            ("filter".to_string(), "active".to_string()),
+        ]),
+        body: Vec::new(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let mw = TypedQueryMw::__jolt_extract_from(&req);
+
+    assert_eq!(mw.query.page, 2);
+    assert_eq!(mw.query.filter, "active");
+}
+
+#[tokio::test]
+async fn middleware_layer_returns_bad_request_for_invalid_typed_query() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::Response as AxumResponse;
+    use joltr_core::tower::{Layer, Service};
+    use std::convert::Infallible;
+
+    let mw = TypedQueryMw {
+        query: QueryParams(Filters {
+            page: 0,
+            filter: String::new(),
+        }),
+    };
+    let inner = joltr_core::tower::service_fn(|_: Request| async move {
+        panic!("inner service must not run when typed query extraction fails");
+        #[allow(unreachable_code)]
+        Ok::<_, Infallible>(AxumResponse::new(Body::empty()))
+    });
+    let mut wrapped = mw.layer(inner);
+
+    let bad_req = Request {
+        method: Method::Get,
+        path: "/users".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::from([
+            ("page".to_string(), "not-a-number".to_string()),
+            ("filter".to_string(), "active".to_string()),
+        ]),
+        body: Vec::new(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let response = <_ as Service<Request>>::call(&mut wrapped, bad_req)
+        .await
+        .expect("middleware returns a response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    let body = std::str::from_utf8(&body).expect("body is utf-8");
+    assert!(
+        body.contains("Invalid query parameter"),
+        "body must include query parse error, got: {body}"
+    );
+}
+
+#[test]
 #[should_panic(expected = "body deserialization failed")]
 fn middleware_layer_runs_extraction_before_inner_service() {
     use axum::http::HeaderMap;
@@ -276,7 +363,9 @@ fn middleware_layer_runs_extraction_before_inner_service() {
     let inner = joltr_core::tower::service_fn(|_: Request| {
         panic!("inner service must not run when extraction rejects the request body");
         #[allow(unreachable_code)]
-        ready(Ok::<_, Infallible>(()))
+        ready(Ok::<_, Infallible>(axum::response::Response::new(
+            axum::body::Body::empty(),
+        )))
     });
     let mut wrapped = mw.layer(inner);
 

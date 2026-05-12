@@ -717,3 +717,39 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished items are AutoMiddleware extraction/short-circuit work (#22/#23/#25), TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).
+
+
+2026-05-12 PRD #22 - AutoMiddleware typed QueryParams extraction
+
+Completed:
+- Made `QueryParams` generic with the existing raw-map shape as its default type.
+- Added `deserialize_query<T>()` in `joltr-core::parse_query` using the existing parsed query map plus `serde_urlencoded` to deserialize typed query structs.
+- Updated `#[derive(AutoMiddleware)]` codegen so `QueryParams<T>` fields deserialize into `T`, wrap back into the declared field type, and return the existing 400 bad-request query response on invalid input before invoking the inner service.
+- Added integration coverage for successful typed query extraction and invalid typed query short-circuit behavior.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 9 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Used `QueryParams<T = HashMap<String, String>>` to preserve the existing raw map API while enabling typed middleware fields.
+- Reused `bad_request_for_query_error` for typed query deserialize failures so the generated middleware returns the same 400 shape as the existing field-level extractors.
+- Boxed the generated future only for field-bearing middleware, keeping zero-field middleware on the old direct inner-service future path.
+
+Files changed:
+- `Cargo.toml`
+- `Cargo.lock`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/parse_query.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `prd.json` (item 22 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #23 can now focus on lifetime threading for by-ref `&Request`; PRD #25 can reuse the boxed field-bearing service path for finished-request short circuits.

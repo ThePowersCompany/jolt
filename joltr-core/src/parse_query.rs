@@ -99,6 +99,7 @@ use axum::extract::Request as AxumRequest;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
+use serde::de::DeserializeOwned;
 use tower::{Layer, Service};
 
 use crate::request_ext::RequestExt;
@@ -112,27 +113,29 @@ use crate::request_ext::RequestExt;
 /// `Default` is derived so [`ParseQueryService::call`] can produce an empty
 /// instance without manual construction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct QueryParams(pub HashMap<String, String>);
+pub struct QueryParams<T = HashMap<String, String>>(pub T);
 
-impl std::ops::Deref for QueryParams {
-    type Target = HashMap<String, String>;
+impl<T> std::ops::Deref for QueryParams<T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl std::ops::DerefMut for QueryParams {
+impl<T> std::ops::DerefMut for QueryParams<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl From<HashMap<String, String>> for QueryParams {
-    fn from(map: HashMap<String, String>) -> Self {
-        Self(map)
+impl<T> From<T> for QueryParams<T> {
+    fn from(value: T) -> Self {
+        Self(value)
     }
 }
+
+pub type QueryErrorResponse = Response;
 
 /// `tower::Layer` that parses the request URI's query string into a
 /// [`QueryParams`] map and stashes it in request extensions. See module docs
@@ -288,10 +291,7 @@ impl fmt::Display for QueryExtractError {
                 value,
                 message,
             } => {
-                write!(
-                    f,
-                    "Invalid query parameter '{key}'='{value}': {message}",
-                )
+                write!(f, "Invalid query parameter '{key}'='{value}': {message}",)
             }
             Self::InvalidElement {
                 key,
@@ -455,6 +455,29 @@ where
                 })
         })
         .collect()
+}
+
+/// Deserialize the parsed query map into a user-provided typed shape.
+///
+/// This is the full-struct companion to the field-level extractors above. The
+/// map comes from the same foundational query parser, then gets re-encoded with
+/// `serde_urlencoded` so serde can apply the user's `Deserialize` impl.
+pub fn deserialize_query<T>(params: &HashMap<String, String>) -> Result<T, QueryExtractError>
+where
+    T: DeserializeOwned,
+{
+    let encoded =
+        serde_urlencoded::to_string(params).map_err(|err| QueryExtractError::Invalid {
+            key: "<query>".to_string(),
+            value: String::new(),
+            message: err.to_string(),
+        })?;
+
+    serde_urlencoded::from_str(&encoded).map_err(|err| QueryExtractError::Invalid {
+        key: "<query>".to_string(),
+        value: encoded,
+        message: err.to_string(),
+    })
 }
 
 /// Build the `400 Bad Request` response surfaced when a typed query

@@ -198,9 +198,7 @@ pub(crate) enum FieldKind {
 ///   names (`body`, `query_params`, `req`); positional fields can't carry that
 ///   meaning, so accepting them would force a separate kind-detection rule
 ///   that doesn't compose with named-field structs.
-pub(crate) fn parse_auto_middleware_input(
-    input: DeriveInput,
-) -> syn::Result<AutoMiddlewareInput> {
+pub(crate) fn parse_auto_middleware_input(input: DeriveInput) -> syn::Result<AutoMiddlewareInput> {
     let ident = input.ident.clone();
     let cors = parse_struct_attrs(&input.attrs);
     match input.data {
@@ -239,10 +237,7 @@ fn parse_struct_attrs(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cors"))
 }
 
-fn parse_struct_fields(
-    data: &DataStruct,
-    owner: &Ident,
-) -> syn::Result<Vec<AutoMiddlewareField>> {
+fn parse_struct_fields(data: &DataStruct, owner: &Ident) -> syn::Result<Vec<AutoMiddlewareField>> {
     match &data.fields {
         Fields::Named(named) => {
             let mut out = Vec::with_capacity(named.named.len());
@@ -294,10 +289,7 @@ fn type_path_ends_with(ty: &Type, name: &str) -> bool {
     let Type::Path(tp) = ty else {
         return false;
     };
-    tp.path
-        .segments
-        .last()
-        .is_some_and(|seg| seg.ident == name)
+    tp.path.segments.last().is_some_and(|seg| seg.ident == name)
 }
 
 /// True iff `ty` is `Request` or a shared reference to `Request`.
@@ -346,6 +338,28 @@ fn is_hashmap_string_string(ty: &Type) -> bool {
         GenericArgument::Type(t) => type_path_ends_with(t, "String"),
         _ => false,
     })
+}
+
+fn query_params_inner_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "QueryParams" {
+        return None;
+    }
+    single_generic_inner(last)
+}
+
+fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
+    if let PathArguments::AngleBracketed(args) = &segment.arguments {
+        if args.args.len() == 1 {
+            if let GenericArgument::Type(inner) = &args.args[0] {
+                return Some(inner);
+            }
+        }
+    }
+    None
 }
 
 /// One step in the canonical middleware call chain emitted into the wrapper
@@ -431,7 +445,11 @@ pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareSt
     if parsed.cors {
         chain.push(MiddlewareStep::Cors);
     }
-    if parsed.fields.iter().any(|f| f.kind == FieldKind::QueryParams) {
+    if parsed
+        .fields
+        .iter()
+        .any(|f| f.kind == FieldKind::QueryParams)
+    {
         chain.push(MiddlewareStep::ParseQuery);
     }
     if parsed.fields.iter().any(|f| f.kind == FieldKind::Body) {
@@ -615,25 +633,85 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
     let ident = &parsed.ident;
     let service_ident = service_ident_for(ident);
     let chain = middleware_chain(parsed);
-    let chain_stmts = chain.iter().map(|step| {
-        let tag = step.token_tag();
+    let chain_stmts: Vec<_> = chain
+        .iter()
+        .map(|step| {
+            let tag = step.token_tag();
+            quote! {
+                let _: &::core::primitive::str = #tag;
+            }
+        })
+        .collect();
+    let service_impl = if parsed.fields.is_empty() {
         quote! {
-            let _: &::core::primitive::str = #tag;
-        }
-    });
-    let request_bound = if parsed.fields.is_empty() {
-        quote! {}
-    } else {
-        quote! { __Req: ::core::any::Any, }
-    };
-    let runtime_extraction = if parsed.fields.is_empty() {
-        quote! {}
-    } else {
-        quote! {
-            if let ::core::option::Option::Some(__jolt_req) =
-                (&__req as &dyn ::core::any::Any).downcast_ref::<::joltr_core::Request>()
+            #[automatically_derived]
+            impl<__S, __Req> ::joltr_core::tower::Service<__Req> for #service_ident<__S>
+            where
+                __S: ::joltr_core::tower::Service<__Req>,
             {
-                let _ = #ident::__jolt_extract_from(__jolt_req);
+                type Response = <__S as ::joltr_core::tower::Service<__Req>>::Response;
+                type Error = <__S as ::joltr_core::tower::Service<__Req>>::Error;
+                type Future = <__S as ::joltr_core::tower::Service<__Req>>::Future;
+
+                fn poll_ready(
+                    &mut self,
+                    __cx: &mut ::core::task::Context<'_>,
+                ) -> ::core::task::Poll<::core::result::Result<(), Self::Error>> {
+                    <__S as ::joltr_core::tower::Service<__Req>>::poll_ready(&mut self.inner, __cx)
+                }
+
+                fn call(&mut self, __req: __Req) -> Self::Future {
+                    #(#chain_stmts)*
+                    <__S as ::joltr_core::tower::Service<__Req>>::call(&mut self.inner, __req)
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[automatically_derived]
+            impl<__S, __Req> ::joltr_core::tower::Service<__Req> for #service_ident<__S>
+            where
+                __S: ::joltr_core::tower::Service<__Req>,
+                __Req: ::core::any::Any,
+                <__S as ::joltr_core::tower::Service<__Req>>::Future: 'static,
+                <__S as ::joltr_core::tower::Service<__Req>>::Response:
+                    ::core::convert::From<::joltr_core::parse_query::QueryErrorResponse> + 'static,
+                <__S as ::joltr_core::tower::Service<__Req>>::Error: 'static,
+            {
+                type Response = <__S as ::joltr_core::tower::Service<__Req>>::Response;
+                type Error = <__S as ::joltr_core::tower::Service<__Req>>::Error;
+                type Future = ::core::pin::Pin<
+                    ::std::boxed::Box<
+                        dyn ::core::future::Future<
+                            Output = ::core::result::Result<Self::Response, Self::Error>
+                        >
+                    >
+                >;
+
+                fn poll_ready(
+                    &mut self,
+                    __cx: &mut ::core::task::Context<'_>,
+                ) -> ::core::task::Poll<::core::result::Result<(), Self::Error>> {
+                    <__S as ::joltr_core::tower::Service<__Req>>::poll_ready(&mut self.inner, __cx)
+                }
+
+                fn call(&mut self, __req: __Req) -> Self::Future {
+                    #(#chain_stmts)*
+                    if let ::core::option::Option::Some(__jolt_req) =
+                        (&__req as &dyn ::core::any::Any).downcast_ref::<::joltr_core::Request>()
+                    {
+                        if let ::core::result::Result::Err(__jolt_response) =
+                            #ident::__jolt_try_extract_from(__jolt_req)
+                        {
+                            let __jolt_response = <Self::Response as ::core::convert::From<_>>::from(__jolt_response);
+                            return ::std::boxed::Box::pin(async move {
+                                ::core::result::Result::Ok(__jolt_response)
+                            });
+                        }
+                    }
+                    let __jolt_future = <__S as ::joltr_core::tower::Service<__Req>>::call(&mut self.inner, __req);
+                    ::std::boxed::Box::pin(async move { __jolt_future.await })
+                }
             }
         }
     };
@@ -661,33 +739,7 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
             }
         }
 
-        #[automatically_derived]
-        impl<__S, __Req> ::joltr_core::tower::Service<__Req> for #service_ident<__S>
-        where
-            __S: ::joltr_core::tower::Service<__Req>,
-            #request_bound
-        {
-            type Response = <__S as ::joltr_core::tower::Service<__Req>>::Response;
-            type Error = <__S as ::joltr_core::tower::Service<__Req>>::Error;
-            type Future = <__S as ::joltr_core::tower::Service<__Req>>::Future;
-
-            fn poll_ready(
-                &mut self,
-                __cx: &mut ::core::task::Context<'_>,
-            ) -> ::core::task::Poll<::core::result::Result<(), Self::Error>> {
-                <__S as ::joltr_core::tower::Service<__Req>>::poll_ready(&mut self.inner, __cx)
-            }
-
-            fn call(&mut self, __req: __Req) -> Self::Future {
-                // JOLTR-RS-052: canonical chain steps for this derive, one
-                // statement per active step. The marker statements are stable
-                // ordering witnesses. Field-bearing middleware now runs the
-                // extraction helper when the tower request is a JoltR Request.
-                #(#chain_stmts)*
-                #runtime_extraction
-                <__S as ::joltr_core::tower::Service<__Req>>::call(&mut self.inner, __req)
-            }
-        }
+        #service_impl
     }
 }
 
@@ -783,10 +835,44 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
             /// exercise this method at runtime to verify per-field population.
             #[doc(hidden)]
             pub fn __jolt_extract_from(__req: &::joltr_core::Request) -> Self {
-                Self {
-                    #(#field_inits),*
+                match Self::__jolt_try_extract_from(__req) {
+                    ::core::result::Result::Ok(__jolt_middleware) => __jolt_middleware,
+                    ::core::result::Result::Err(_) => {
+                        ::core::panic!("JoltR auto-middleware: query parameter extraction failed")
+                    }
                 }
             }
+
+            #[doc(hidden)]
+            pub fn __jolt_try_extract_from(
+                __req: &::joltr_core::Request,
+            ) -> ::core::result::Result<Self, ::joltr_core::parse_query::QueryErrorResponse> {
+                ::core::result::Result::Ok(Self {
+                    #(#field_inits),*
+                })
+            }
+        }
+    }
+}
+
+fn typed_query_params_init_expr(field_ty: &Type, inner_ty: &Type) -> TokenStream {
+    quote! {
+        {
+            let __jolt_query = ::joltr_core::parse_query::deserialize_query::<#inner_ty>(&__req.query_params)
+                .map_err(|__jolt_err| ::joltr_core::bad_request_for_query_error(&__jolt_err))?;
+            <#field_ty as ::core::convert::From<_>>::from(__jolt_query)
+        }
+    }
+}
+
+fn raw_query_params_init_expr(field_ty: &Type) -> TokenStream {
+    if is_hashmap_string_string(field_ty) {
+        quote! { ::core::clone::Clone::clone(&__req.query_params) }
+    } else {
+        quote! {
+            <#field_ty as ::core::convert::From<_>>::from(
+                ::core::clone::Clone::clone(&__req.query_params)
+            )
         }
     }
 }
@@ -804,14 +890,10 @@ fn field_init_expr(field: &AutoMiddlewareField) -> TokenStream {
                 .expect("JoltR auto-middleware: body deserialization failed (JOLTR-RS-062 will replace this panic with typed Result handling)")
         },
         FieldKind::QueryParams => {
-            if is_hashmap_string_string(f_ty) {
-                quote! { ::core::clone::Clone::clone(&__req.query_params) }
+            if let Some(inner) = query_params_inner_type(f_ty) {
+                typed_query_params_init_expr(f_ty, inner)
             } else {
-                quote! {
-                    ::core::unimplemented!(
-                        "typed QueryParams<T> extraction in #[derive(AutoMiddleware)] lands in JOLTR-RS-055+ once the framework QueryParams<T> type is introduced"
-                    )
-                }
+                raw_query_params_init_expr(f_ty)
             }
         }
         FieldKind::Request => {
@@ -889,11 +971,7 @@ mod tests {
         let parsed = parse_auto_middleware_input(input).expect("various fields parse");
         assert_eq!(parsed.ident, "Mixed");
         assert_eq!(parsed.fields.len(), 5);
-        let names: Vec<String> = parsed
-            .fields
-            .iter()
-            .map(|f| f.ident.to_string())
-            .collect();
+        let names: Vec<String> = parsed.fields.iter().map(|f| f.ident.to_string()).collect();
         assert_eq!(
             names,
             vec!["body", "query_params", "headers", "req", "count"]
@@ -903,8 +981,7 @@ mod tests {
     #[test]
     fn rejects_enum() {
         let input = parse_derive("enum Bad { A, B }");
-        let err = parse_auto_middleware_input(input)
-            .expect_err("enum must be rejected");
+        let err = parse_auto_middleware_input(input).expect_err("enum must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("structs"),
@@ -926,8 +1003,7 @@ mod tests {
             }
             "#,
         );
-        let err = parse_auto_middleware_input(input)
-            .expect_err("union must be rejected");
+        let err = parse_auto_middleware_input(input).expect_err("union must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("structs"),
@@ -945,8 +1021,7 @@ mod tests {
         // keys on names. Reject with a diagnostic that points at the struct ident
         // and explains the constraint.
         let input = parse_derive("struct TupleMw(String, u32);");
-        let err = parse_auto_middleware_input(input)
-            .expect_err("tuple struct must be rejected");
+        let err = parse_auto_middleware_input(input).expect_err("tuple struct must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("named fields"),
@@ -1097,7 +1172,10 @@ mod tests {
         );
         let parsed = parse_auto_middleware_input(input).expect("mixed struct parses");
         let kinds: Vec<FieldKind> = parsed.fields.iter().map(|f| f.kind).collect();
-        assert_eq!(kinds, vec![FieldKind::Other, FieldKind::Body, FieldKind::Other]);
+        assert_eq!(
+            kinds,
+            vec![FieldKind::Other, FieldKind::Body, FieldKind::Other]
+        );
     }
 
     #[test]
@@ -1798,7 +1876,9 @@ mod tests {
         // `quote!`'s tokens print double-`>` without a space when one closes a
         // nested generic (`Service<__Req>>::call`). Match that exact shape.
         assert!(
-            rendered.contains(":: joltr_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)"),
+            rendered.contains(
+                ":: joltr_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)"
+            ),
             "call() must delegate to inner.call, rendered: {rendered}"
         );
         assert!(
@@ -1979,10 +2059,7 @@ mod tests {
             "#,
         );
         let parsed = parse_auto_middleware_input(input).expect("parses");
-        assert_eq!(
-            middleware_chain(&parsed),
-            vec![MiddlewareStep::ParseQuery]
-        );
+        assert_eq!(middleware_chain(&parsed), vec![MiddlewareStep::ParseQuery]);
     }
 
     #[test]
@@ -2065,10 +2142,7 @@ mod tests {
             "#,
         );
         let parsed = parse_auto_middleware_input(input).expect("parses");
-        assert_eq!(
-            middleware_chain(&parsed),
-            vec![MiddlewareStep::ParseQuery]
-        );
+        assert_eq!(middleware_chain(&parsed), vec![MiddlewareStep::ParseQuery]);
     }
 
     #[test]
@@ -2255,7 +2329,9 @@ mod tests {
             .find("\"joltr::middleware::step::cors\"")
             .expect("cors marker present");
         let inner_call_pos = rendered
-            .find(":: joltr_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)")
+            .find(
+                ":: joltr_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)",
+            )
             .expect("inner.call delegation present");
         assert!(
             cors_pos < inner_call_pos,
@@ -2279,7 +2355,7 @@ mod tests {
         let parsed = parse_auto_middleware_input(input).expect("parses");
         let rendered = expand_layer_impl(&parsed).to_string();
         let extract_pos = rendered
-            .find("WithBody :: __jolt_extract_from (__jolt_req)")
+            .find("WithBody :: __jolt_try_extract_from (__jolt_req)")
             .expect("extraction helper call present");
         let inner_call_pos = rendered
             .find(
@@ -2472,13 +2548,10 @@ mod tests {
     }
 
     #[test]
-    fn expand_extraction_initializes_typed_query_params_via_unimplemented() {
-        // Typed `QueryParams<T>` → init expression is `unimplemented!(...)`.
-        // The framework type doesn't exist yet (JOLTR-RS-055+); 053 emits a
-        // runtime placeholder rather than a compile_error so the rest of the
-        // derive surface stays usable on structs that include a typed query
-        // field. Pinning the placeholder string makes any future PRD that
-        // actually implements typed extraction explicitly remove this test.
+    fn expand_extraction_initializes_typed_query_params_via_deserializer() {
+        // Typed `QueryParams<T>` → deserialize the request query map into T,
+        // then wrap it back into the user's QueryParams field type. Invalid
+        // query values map to the existing bad-request response helper.
         let input = parse_derive(
             r#"
             struct WithTypedQuery {
@@ -2489,12 +2562,16 @@ mod tests {
         let parsed = parse_auto_middleware_input(input).expect("parses");
         let rendered = expand_extraction(&parsed).to_string();
         assert!(
-            rendered.contains("q : :: core :: unimplemented !"),
-            "typed QueryParams<T> field must be initialised via unimplemented!, rendered: {rendered}"
+            rendered.contains("deserialize_query :: < Filters > (& __req . query_params)"),
+            "typed QueryParams<T> field must deserialize into the inner type, rendered: {rendered}"
         );
         assert!(
-            rendered.contains("JOLTR-RS-055"),
-            "placeholder message must reference the future PRD that lands typed extraction, rendered: {rendered}"
+            rendered.contains("bad_request_for_query_error"),
+            "typed query errors must map through the bad-request response helper, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("< QueryParams < Filters > as :: core :: convert :: From < _ >> :: from"),
+            "typed query result must be wrapped into the declared QueryParams<T> field type, rendered: {rendered}"
         );
     }
 

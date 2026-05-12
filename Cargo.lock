@@ -1275,6 +1275,7 @@ dependencies = [
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "slab",
  "tokio",
  "tokio-stream",

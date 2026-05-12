@@ -185,6 +185,15 @@
       "passes": true
     },
     {
+      "id": "22",
+      "title": "AutoMiddleware typed QueryParams extraction",
+      "phase": "Phase 2",
+      "description": "Replace the typed QueryParams<T> unimplemented! expansion with generated extraction that parses the request query into T using the existing parse_query support and fails with a bad-request response on invalid input.",
+      "files": ["joltr-macros/src/auto_middleware.rs", "joltr-core/src/parse_query.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
       "id": "24",
       "title": "AutoMiddleware generated layer performs extraction",
       "phase": "Phase 2",
