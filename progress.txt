@@ -817,3 +817,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished items are TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).
+
+
+2026-05-12 PRD #26 - TsExport preserves user-defined type references
+
+Completed:
+- Updated TsExport type mapping so unmapped plain/path-qualified Rust type paths render as the final identifier, e.g. `crate::models::User` -> `User`.
+- Nested wrapper mappings now preserve user-defined references through `Vec<T>`, `JsonArray<T>`, `Option<T>`, `Optional<T>`, and `Json<T>`.
+- Kept unsupported generic paths and unmapped primitive edge cases on the existing `None` path so inventory emission still falls back to `any` when the macro cannot safely infer a TS reference.
+- Added macro unit coverage and joltr-types integration coverage for direct, vector, and nullable user-defined field references.
+
+Verification:
+- `rustfmt joltr-macros/src/ts_export.rs joltr-types/tests/ts_export_integration.rs` -> clean.
+- `cargo test -p joltr-macros --lib ts_export` -> 62 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 6 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 267 passed.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Preserved only non-generic path identifiers as references; generic user-defined type rendering remains scoped to PRD #27.
+- Continued excluding unsupported primitive identifiers such as `u8` from TS reference fallback rather than emitting invalid TS primitive names.
+- Left `joltr-types/src/lib.rs` unchanged because the existing renderer already emits whatever `TsField.ts_type` the macro submits.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 26 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #27 can now add generic parameter emission on top of preserved user-defined type references.

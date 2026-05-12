@@ -45,6 +45,21 @@ enum StatusExport {
     Inactive,
 }
 
+/// Verifies user-defined path references survive instead of collapsing to any.
+#[derive(TsExport)]
+#[allow(dead_code)]
+struct ProfileExport {
+    handle: String,
+}
+
+#[derive(TsExport)]
+#[allow(dead_code)]
+struct AccountExport {
+    primary_profile: ProfileExport,
+    profiles: Vec<ProfileExport>,
+    fallback_profile: Option<ProfileExport>,
+}
+
 // ── Binary subprocess test helpers ──
 
 /// Generate a unique tempfile path inside the workspace's `target/` directory.
@@ -178,6 +193,28 @@ fn render_includes_enum_const_object_plus_type() {
     assert!(
         out.contains("export type StatusExport = typeof StatusExport[keyof typeof StatusExport];"),
         "enum must emit the companion type alias, got:\n{out}"
+    );
+}
+
+#[test]
+fn render_preserves_user_defined_type_references() {
+    let out = joltr_types::render();
+
+    assert!(
+        out.contains("export interface AccountExport {"),
+        "render must emit `export interface AccountExport`, got:\n{out}"
+    );
+    assert!(
+        out.contains("primary_profile: ProfileExport;"),
+        "direct user-defined field must render as ProfileExport, got:\n{out}"
+    );
+    assert!(
+        out.contains("profiles: ProfileExport[];"),
+        "Vec<ProfileExport> must render as ProfileExport[], got:\n{out}"
+    );
+    assert!(
+        out.contains("fallback_profile: ProfileExport | null;"),
+        "Option<ProfileExport> must render as ProfileExport | null, got:\n{out}"
     );
 }
 

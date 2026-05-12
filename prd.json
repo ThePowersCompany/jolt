@@ -219,6 +219,15 @@
       "files": ["joltr-macros/src/auto_middleware.rs", "joltr-core/src/request_ext.rs"],
       "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
       "passes": true
+    },
+    {
+      "id": "26",
+      "title": "TsExport preserves user-defined type references",
+      "phase": "Phase 5",
+      "description": "When a field type is a user-defined path that is not otherwise mapped, render the final Rust identifier as the TypeScript type instead of falling back to any or dropping the type information.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
     }
   ]
 }

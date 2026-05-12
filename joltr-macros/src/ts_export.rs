@@ -21,7 +21,10 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::punctuated::Punctuated;
-use syn::{Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Token, Type};
+use syn::{
+    Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Token,
+    Type,
+};
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
 ///
@@ -79,15 +82,13 @@ pub(crate) struct TsExportField {
 /// - `Json<T>` → inner `T`'s TS (transparent newtype)
 /// - `JsonArray<T>` → `"{T_ts}[]"` (transparent over `Vec<T>`)
 ///
-/// Returns `None` for types that don't have a direct mapping (user-defined
-/// structs, enums, tuples, references, etc.). Those types will either be
-/// resolved by a future cross-crate lookup phase or left as opaque
-/// references.
+/// Returns the final path identifier for user-defined path references that
+/// don't have a direct mapping (for example, `crate::models::User` → `User`).
+/// Unsupported non-path shapes and generic paths with unknown semantics still
+/// return `None`.
 ///
-/// For nested generics where the inner type is unmapped, the result is `None`
-/// (mirroring the existing `Vec<UnknownType>` behavior). A future PRD can
-/// fall back to the inner type's bare ident so user types compose cleanly,
-/// but that semantic change is out of scope for #12.
+/// For nested generics, mapped wrappers compose with user-defined references:
+/// `Vec<User>` → `User[]`, `Option<User>` → `User | null`.
 ///
 /// Matching is by identity alone — no path resolution. The compiler
 /// type-checks that the user's types are what they claim to be; the
@@ -112,11 +113,36 @@ pub(crate) fn rust_type_to_ts(ty: &Type) -> Option<String> {
                     .and_then(rust_type_to_ts)
                     .map(|inner| format!("{inner} | null")),
                 "Json" => single_generic_inner(last).and_then(rust_type_to_ts),
-                _ => None,
+                _ => user_defined_path_reference(type_path),
             }
         }
         _ => None,
     }
+}
+
+fn user_defined_path_reference(type_path: &syn::TypePath) -> Option<String> {
+    if type_path.qself.is_some() {
+        return None;
+    }
+
+    let last = type_path.path.segments.last()?;
+    if !matches!(last.arguments, PathArguments::None) {
+        return None;
+    }
+
+    let ident = last.ident.to_string();
+    if is_unmapped_primitive(&ident) {
+        return None;
+    }
+
+    Some(ident)
+}
+
+fn is_unmapped_primitive(ident: &str) -> bool {
+    matches!(
+        ident,
+        "u8" | "u16" | "u128" | "i8" | "i16" | "i128" | "char"
+    )
 }
 
 /// Extract the single `T` from a `Wrapper<T>`-shaped type path segment, if
@@ -145,9 +171,7 @@ fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
 ///   a span on the first data-carrying variant.  JOLTR-RS-174 will add support
 ///   for tagged unions.
 /// - **union** → rejected.
-pub(crate) fn parse_ts_export_input(
-    input: DeriveInput,
-) -> syn::Result<TsExportInput> {
+pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportInput> {
     let ident = input.ident.clone();
     match input.data {
         Data::Struct(s) => {
@@ -230,10 +254,13 @@ fn parse_ts_field_attrs(attrs: &[syn::Attribute]) -> TsFieldAttrInfo {
         if !attr.path().is_ident("ts") {
             continue;
         }
-        let Ok(list) = attr.meta.require_list() else { continue };
-        let Ok(items) = list.parse_args_with(
-            Punctuated::<Meta, Token![,]>::parse_terminated
-        ) else { continue };
+        let Ok(list) = attr.meta.require_list() else {
+            continue;
+        };
+        let Ok(items) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        else {
+            continue;
+        };
 
         for meta in items {
             match meta {
@@ -242,7 +269,10 @@ fn parse_ts_field_attrs(attrs: &[syn::Attribute]) -> TsFieldAttrInfo {
                 }
                 Meta::NameValue(nv) if nv.path.is_ident("rename") => {
                     if info.rename.is_none() {
-                        if let syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = &nv.value
+                        {
                             info.rename = Some(s.value());
                         }
                     }
@@ -269,7 +299,10 @@ fn parse_doc_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
         .filter(|a| a.path().is_ident("doc"))
         .filter_map(|a| {
             if let Meta::NameValue(nv) = &a.meta {
-                if let syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: Lit::Str(s), ..
+                }) = &nv.value
+                {
                     return Some(s.value().trim().to_string());
                 }
             }
@@ -283,10 +316,7 @@ fn parse_doc_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
     }
 }
 
-fn parse_struct_fields(
-    data: &DataStruct,
-    owner: &Ident,
-) -> syn::Result<Vec<TsExportField>> {
+fn parse_struct_fields(data: &DataStruct, owner: &Ident) -> syn::Result<Vec<TsExportField>> {
     match &data.fields {
         Fields::Named(named) => {
             let mut out = Vec::with_capacity(named.named.len());
@@ -465,10 +495,9 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
 ///
 /// Field-type resolution:
 /// 1. If [`rust_type_to_ts`] mapped the field, that string is used.
-/// 2. Otherwise `"any"` (TS top type) is the fallback — keeps the emitted
-///    TS syntactically valid for fields whose type the macro can't yet
-///    resolve. A future PRD can swap this for the bare Rust ident once
-///    cross-derive type resolution exists.
+/// 2. Otherwise `"any"` (TS top type) is the fallback for unsupported shapes —
+///    keeps the emitted TS syntactically valid for fields whose type the macro
+///    can't resolve.
 ///
 /// Enums: each variant contributes a [`TsField`] whose `name` is the variant
 /// ident and whose `ts_type` is `""` (unused by the [`TsKind::Enum`]
@@ -618,11 +647,17 @@ mod tests {
 
         let ty0 = &parsed.fields[0].rust_type;
         let type0 = quote! { #ty0 }.to_string();
-        assert!(type0.contains("Vec") && type0.contains("String"), "tags type must contain Vec and String");
+        assert!(
+            type0.contains("Vec") && type0.contains("String"),
+            "tags type must contain Vec and String"
+        );
 
         let ty1 = &parsed.fields[1].rust_type;
         let type1 = quote! { #ty1 }.to_string();
-        assert!(type1.contains("Option") || type1.contains("Value"), "meta type must contain Option/Value");
+        assert!(
+            type1.contains("Option") || type1.contains("Value"),
+            "meta type must contain Option/Value"
+        );
     }
 
     #[test]
@@ -655,7 +690,8 @@ mod tests {
     #[test]
     fn enum_with_all_unit_variants_is_accepted() {
         let input = parse_derive("enum Color { Red, Green, Blue }");
-        let parsed = parse_ts_export_input(input).expect("enum with unit variants must be accepted");
+        let parsed =
+            parse_ts_export_input(input).expect("enum with unit variants must be accepted");
         assert_eq!(parsed.variants.len(), 3);
         assert_eq!(parsed.variants, vec!["Red", "Green", "Blue"]);
     }
@@ -673,7 +709,10 @@ mod tests {
         );
         let err = parse_ts_export_input(input).expect_err("mixed enum must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("fields"), "error must mention fields, got: {msg}");
+        assert!(
+            msg.contains("fields"),
+            "error must mention fields, got: {msg}"
+        );
     }
 
     #[test]
@@ -821,12 +860,24 @@ mod tests {
     }
 
     #[test]
-    fn unknown_type_returns_none() {
-        for rt in ["MyStruct", "DateTime<Utc>", "u8"] {
+    fn user_defined_type_maps_to_final_identifier() {
+        let ty = parse_type("MyStruct");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("MyStruct"));
+    }
+
+    #[test]
+    fn qualified_user_defined_type_maps_to_final_identifier() {
+        let ty = parse_type("crate::models::MyStruct");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("MyStruct"));
+    }
+
+    #[test]
+    fn unsupported_path_types_return_none() {
+        for rt in ["DateTime<Utc>", "u8"] {
             let ty = parse_type(rt);
             assert!(
                 rust_type_to_ts(&ty).is_none(),
-                "{rt} must return None (not a mapped type)"
+                "{rt} must return None (not a supported TS reference)"
             );
         }
     }
@@ -886,12 +937,15 @@ mod tests {
     }
 
     #[test]
-    fn option_of_unknown_returns_none() {
-        // Mirrors Vec<UnknownType> → None; future PRD can fall back to the
-        // bare Rust ident so user types compose. For #12 the contract is
-        // identical to existing Vec semantics.
+    fn vec_of_user_defined_type_preserves_reference() {
+        let ty = parse_type("Vec<MyStruct>");
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("MyStruct[]"));
+    }
+
+    #[test]
+    fn option_of_user_defined_type_preserves_reference() {
         let ty = parse_type("Option<MyStruct>");
-        assert!(rust_type_to_ts(&ty).is_none());
+        assert_eq!(rust_type_to_ts(&ty).as_deref(), Some("MyStruct | null"));
     }
 
     // ── JOLTR-RS-177 (PRD #12) — inventory::submit! emission ──
@@ -973,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_submit_falls_back_to_any_for_unmapped_field_type() {
+    fn expand_submit_preserves_user_defined_field_type() {
         let input = parse_derive(
             r#"
             struct Blob {
@@ -983,8 +1037,24 @@ mod tests {
         );
         let out = expand_ts_export(input).to_string();
         assert!(
+            out.contains(r#"name : "payload""#) && out.contains(r#"ts_type : "SomeUserType""#),
+            "user-defined field type must render as its TS reference, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_submit_falls_back_to_any_for_unsupported_field_type() {
+        let input = parse_derive(
+            r#"
+            struct Blob {
+                payload: DateTime<Utc>,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
             out.contains(r#"name : "payload""#) && out.contains(r#"ts_type : "any""#),
-            "unmapped field type must fall back to \"any\" in submit body, got: {out}"
+            "unsupported generic field type must fall back to \"any\" in submit body, got: {out}"
         );
     }
 
@@ -1016,8 +1086,14 @@ mod tests {
             "#,
         );
         let out = expand_ts_export(input).to_string();
-        assert!(out.contains("__JOLTR_TS_EXPORT_FIELD_COUNT"), "must emit field count");
-        assert!(out.contains("__JOLTR_TS_EXPORT_MAPPED_FIELD_COUNT"), "must emit mapped count");
+        assert!(
+            out.contains("__JOLTR_TS_EXPORT_FIELD_COUNT"),
+            "must emit field count"
+        );
+        assert!(
+            out.contains("__JOLTR_TS_EXPORT_MAPPED_FIELD_COUNT"),
+            "must emit mapped count"
+        );
 
         assert!(
             out.contains(r#"__JOLTR_TS_EXPORT_type_0 :"#) && out.contains(r#"Some ("string")"#),
@@ -1032,8 +1108,9 @@ mod tests {
             "field 2 (active: bool) must map to Some(\"boolean\"), got: {out}"
         );
         assert!(
-            out.contains(r#"__JOLTR_TS_EXPORT_type_3 :"#) && out.contains("None"),
-            "field 3 (unknown: SomeUserType) must be None, got: {out}"
+            out.contains(r#"__JOLTR_TS_EXPORT_type_3 :"#)
+                && out.contains(r#"Some ("SomeUserType")"#),
+            "field 3 (unknown: SomeUserType) must preserve the type reference, got: {out}"
         );
     }
 
@@ -1044,12 +1121,12 @@ mod tests {
             struct HalfMapped {
                 name: String,
                 count: i32,
-                blob: UnknownBlob,
+                blob: DateTime<Utc>,
             }
             "#,
         );
         let out = expand_ts_export(input).to_string();
-        // mapped: 2 (String + i32), unmapped: 1 (UnknownBlob)
+        // mapped: 2 (String + i32), unmapped: 1 (unsupported generic path)
         assert!(
             out.contains("__JOLTR_TS_EXPORT_MAPPED_FIELD_COUNT : usize = 2"),
             "mapped count must be 2, got: {out}"
@@ -1057,12 +1134,12 @@ mod tests {
     }
 
     #[test]
-    fn expand_marks_all_fields_unmapped_for_unknown_types() {
+    fn expand_marks_all_fields_unmapped_for_unsupported_generic_types() {
         let input = parse_derive(
             r#"
             struct AllUnknown {
-                a: MyA,
-                b: MyB,
+                a: DateTime<Utc>,
+                b: Result<String, Error>,
             }
             "#,
         );
@@ -1193,7 +1270,10 @@ mod tests {
 
         // Verify field 1's name marker is None (between name_0 and name_2)
         let after_name0 = out.split("__JOLTR_TS_EXPORT_name_0").nth(1).unwrap_or("");
-        let before_name2 = after_name0.split("__JOLTR_TS_EXPORT_name_2").next().unwrap_or("");
+        let before_name2 = after_name0
+            .split("__JOLTR_TS_EXPORT_name_2")
+            .next()
+            .unwrap_or("");
         assert!(
             before_name2.contains("None"),
             "field 1 (no rename) must have None name marker between field 0 and field 2, got chunk: {before_name2}"
@@ -1255,8 +1335,14 @@ mod tests {
             "field 0 (addr) must be flatten=true, got: {out}"
         );
         // field 1 (name) must be false between flatten_0 and flatten_2
-        let after_flatten0 = out.split("__JOLTR_TS_EXPORT_flatten_0").nth(1).unwrap_or("");
-        let before_flatten2 = after_flatten0.split("__JOLTR_TS_EXPORT_flatten_2").next().unwrap_or("");
+        let after_flatten0 = out
+            .split("__JOLTR_TS_EXPORT_flatten_0")
+            .nth(1)
+            .unwrap_or("");
+        let before_flatten2 = after_flatten0
+            .split("__JOLTR_TS_EXPORT_flatten_2")
+            .next()
+            .unwrap_or("");
         assert!(
             before_flatten2.contains("false"),
             "field 1 (name, no flatten) must have false marker between flatten_0 and flatten_2, got chunk: {before_flatten2}"
@@ -1336,7 +1422,8 @@ mod tests {
         );
         let out = expand_ts_export(input).to_string();
         assert!(
-            out.contains("__JOLTR_TS_EXPORT_doc_0") && out.contains(r#"Some ("First line Second line")"#),
+            out.contains("__JOLTR_TS_EXPORT_doc_0")
+                && out.contains(r#"Some ("First line Second line")"#),
             "multi-line /// doc must be joined with spaces, got: {out}"
         );
     }
@@ -1362,13 +1449,17 @@ mod tests {
         );
         // field 1 (no doc) must be None between doc_0 and doc_2
         let after_doc0 = out.split("__JOLTR_TS_EXPORT_doc_0").nth(1).unwrap_or("");
-        let before_doc2 = after_doc0.split("__JOLTR_TS_EXPORT_doc_2").next().unwrap_or("");
+        let before_doc2 = after_doc0
+            .split("__JOLTR_TS_EXPORT_doc_2")
+            .next()
+            .unwrap_or("");
         assert!(
             before_doc2.contains("None"),
             "field 1 (no doc) must have None doc marker between doc_0 and doc_2, got chunk: {before_doc2}"
         );
         assert!(
-            out.contains("__JOLTR_TS_EXPORT_doc_2") && out.contains(r#"Some ("Whether the user is active")"#),
+            out.contains("__JOLTR_TS_EXPORT_doc_2")
+                && out.contains(r#"Some ("Whether the user is active")"#),
             "field 2 must emit Some(\"Whether the user is active\"), got: {out}"
         );
     }
@@ -1386,7 +1477,8 @@ mod tests {
         );
         let out = expand_ts_export(input).to_string();
         assert!(
-            out.contains("__JOLTR_TS_EXPORT_doc_0") && out.contains(r#"Some ("The unique identifier")"#),
+            out.contains("__JOLTR_TS_EXPORT_doc_0")
+                && out.contains(r#"Some ("The unique identifier")"#),
             "doc must coexist with rename, got: {out}"
         );
         assert!(
@@ -1408,7 +1500,8 @@ mod tests {
         );
         let out = expand_ts_export(input).to_string();
         assert!(
-            out.contains("__JOLTR_TS_EXPORT_doc_0") && out.contains(r#"Some ("The address details")"#),
+            out.contains("__JOLTR_TS_EXPORT_doc_0")
+                && out.contains(r#"Some ("The address details")"#),
             "doc must coexist with flatten, got: {out}"
         );
         assert!(
@@ -1477,7 +1570,8 @@ mod tests {
             );
             let out = expand_ts_export(input).to_string();
             assert!(
-                out.contains("__JOLTR_TS_EXPORT_doc_0") && out.contains(r#"Some ("The user identifier")"#),
+                out.contains("__JOLTR_TS_EXPORT_doc_0")
+                    && out.contains(r#"Some ("The user identifier")"#),
                 "doc must coexist with flatten+rename combo, got: {out}"
             );
             assert!(
@@ -1568,7 +1662,8 @@ mod tests {
                 "field 2 (plain) must have rename None, got: {out}"
             );
             assert!(
-                out.contains("__JOLTR_TS_EXPORT_doc_2") && out.contains(r#"Some ("Email address")"#),
+                out.contains("__JOLTR_TS_EXPORT_doc_2")
+                    && out.contains(r#"Some ("Email address")"#),
                 "field 2 must have doc, got: {out}"
             );
         }
