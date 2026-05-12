@@ -11,9 +11,8 @@
 //! Architectural decisions pinned here for JOLTR-RS-073..074 to build on:
 //!
 //! 1. **Key construction is selected from the configured algorithm.** HS-style
-//!    symmetric algorithms use raw secret bytes, while RS-style asymmetric
-//!    algorithms use PEM key material. ES algorithms are intentionally deferred
-//!    to the ECDSA PRD slice.
+//!    symmetric algorithms use raw secret bytes, while RSA and ECDSA
+//!    asymmetric algorithms use PEM key material.
 //!
 //! 2. **Typed error variants on the rejection side, NOT a single
 //!    `Other(String)`.** A downstream
@@ -59,9 +58,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
-/// Signing algorithms supported by the framework. Mirrors the HMAC-SHA and
-/// RSA-SHA variants exposed by jsonwebtoken while keeping ECDSA out of this
-/// PRD slice.
+/// Signing algorithms supported by the framework. Mirrors the HMAC-SHA,
+/// RSA-SHA, and ECDSA-SHA variants exposed by jsonwebtoken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
     HS256,
@@ -70,6 +68,8 @@ pub enum Algorithm {
     RS256,
     RS384,
     RS512,
+    ES256,
+    ES384,
 }
 
 impl From<Algorithm> for jsonwebtoken::Algorithm {
@@ -81,6 +81,8 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
             Algorithm::RS256 => jsonwebtoken::Algorithm::RS256,
             Algorithm::RS384 => jsonwebtoken::Algorithm::RS384,
             Algorithm::RS512 => jsonwebtoken::Algorithm::RS512,
+            Algorithm::ES256 => jsonwebtoken::Algorithm::ES256,
+            Algorithm::ES384 => jsonwebtoken::Algorithm::ES384,
         }
     }
 }
@@ -91,7 +93,7 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
 /// wrapper (which holds an `Arc<JwtConfig>` so cloning the layer is cheap).
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
-    /// HMAC secret bytes for HS algorithms or PEM public key bytes for RS
+    /// HMAC secret bytes for HS algorithms or PEM public key bytes for RSA/EC
     /// algorithms.
     pub secret: Vec<u8>,
     /// Expected algorithm. A token whose header carries a different `alg`
@@ -102,7 +104,7 @@ pub struct JwtConfig {
 impl JwtConfig {
     /// Construct a config from key material + algorithm. `secret` accepts any
     /// `Into<Vec<u8>>` (e.g. `&[u8]`, `&str`): use raw secret bytes for HS
-    /// algorithms and PEM public key bytes for RS algorithms. `algorithm`
+    /// algorithms and PEM public key bytes for RSA/EC algorithms. `algorithm`
     /// accepts our own [`Algorithm`] (recommended) or a bare
     /// [`jsonwebtoken::Algorithm`] for backward compatibility.
     pub fn new(secret: impl Into<Vec<u8>>, algorithm: impl Into<jsonwebtoken::Algorithm>) -> Self {
@@ -280,6 +282,9 @@ fn encoding_key(
         | jsonwebtoken::Algorithm::RS512 => {
             EncodingKey::from_rsa_pem(key_material).map_err(|err| JwtEncodeError(err.to_string()))
         }
+        jsonwebtoken::Algorithm::ES256 | jsonwebtoken::Algorithm::ES384 => {
+            EncodingKey::from_ec_pem(key_material).map_err(|err| JwtEncodeError(err.to_string()))
+        }
         _ => Err(JwtEncodeError(format!(
             "unsupported JWT algorithm for encode: {algorithm:?}"
         ))),
@@ -298,6 +303,9 @@ fn decoding_key(
         | jsonwebtoken::Algorithm::RS384
         | jsonwebtoken::Algorithm::RS512 => {
             DecodingKey::from_rsa_pem(key_material).map_err(map_error)
+        }
+        jsonwebtoken::Algorithm::ES256 | jsonwebtoken::Algorithm::ES384 => {
+            DecodingKey::from_ec_pem(key_material).map_err(map_error)
         }
         _ => Err(JwtDecodeError::InvalidAlgorithm),
     }

@@ -941,3 +941,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #30 can add ES256/ES384 using the same algorithm-dispatch helper shape.
+
+
+2026-05-12 PRD #30 - JWT ECDSA algorithm support
+
+Completed:
+- Added ES256 and ES384 variants to `joltr_utils::jwt::Algorithm`.
+- Updated JWT encode/decode key construction to use PEM EC key material for ECDSA algorithms while preserving existing HS and RSA dispatch.
+- Added ECDSA JWT tests for ES256 and ES384 round trips, wrong public key rejection, and algorithm mismatch rejection.
+
+Verification:
+- `cargo test -p joltr-utils jwt` -> 32 passed.
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-utils` -> 107 passed, doc tests passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Reused the existing algorithm-dispatch helper shape from RSA support and mapped ES algorithms to `EncodingKey::from_ec_pem` / `DecodingKey::from_ec_pem`.
+- Kept the `JwtConfig::new(key_material, algorithm)` API unchanged; ES encode expects a PEM private key and ES decode expects a PEM public key.
+- Covered one wrong-key path and one algorithm-mismatch path as behavior pins without adding new public error variants.
+
+Files changed:
+- `joltr-utils/src/jwt.rs`
+- `joltr-utils/src/tests/jwt.rs`
+- `prd.json` (item 30 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are example app polish for static files (#31) and TLS startup docs (#32).

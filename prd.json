@@ -255,6 +255,15 @@
       "files": ["joltr-utils/src/jwt.rs"],
       "tests": ["joltr-utils/src/tests/jwt.rs"],
       "passes": true
+    },
+    {
+      "id": "30",
+      "title": "JWT ECDSA algorithm support",
+      "phase": "Phase 5",
+      "description": "Add ES256/ES384 encode/decode support using PEM key material. Add tests for valid tokens, wrong keys, and algorithm mismatch.",
+      "files": ["joltr-utils/src/jwt.rs"],
+      "tests": ["joltr-utils/src/tests/jwt.rs"],
+      "passes": true
     }
   ]
 }

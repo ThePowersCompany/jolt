@@ -67,6 +67,35 @@ HbM/c+ukyIvWEwr9KH6Gi1x+611qaJHDjq1XuTqzv/S7C4GR71gaFaB4YaMIriKD
 BQIDAQAB
 -----END PUBLIC KEY-----"#;
 
+const ES256_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRFKTMW+0q3f6ebqG
+4vFgfCj4FOKktP5AQoDoX0A/f5GhRANCAARyOd6gl9+AQ01qm7ggYuuKdLYSOa7h
+f6vueRLTLfMD3rKo1bZgPxoknR3LD+pcjZlpf6qIa3zT3nX2VzYI/Lr2
+-----END PRIVATE KEY-----"#;
+
+const ES256_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcjneoJffgENNapu4IGLrinS2Ejmu
+4X+r7nkS0y3zA96yqNW2YD8aJJ0dyw/qXI2ZaX+qiGt809519lc2CPy69g==
+-----END PUBLIC KEY-----"#;
+
+const ES256_WRONG_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjfCzgLNtAJxAvaCY1SSzHiYhytVc
+xLWXdECEyopbSU0jUD8yFHl4nhTOJWU87AZRmI2kfryUHgRo4n2s90KrIg==
+-----END PUBLIC KEY-----"#;
+
+const ES384_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDD4xtiQ5xeYjiXWbacp
+SyyZ+do0G7rTZy7Eth7YzBVevsVOGkUzEEWCnbCQfhky4POhZANiAASk/xtsTN7n
+cvDYzIQSCzhEp+zpxcK0pdZweaatfKhBKQ9nDBtSGQ23BB0cwRA6zgGQsc7JRnMl
+BkPP21NvtCGQzD3SiwpAQEJOrNzzV1XwPDD7EtqKw8uwcXikySmrAIg=
+-----END PRIVATE KEY-----"#;
+
+const ES384_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
+MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEpP8bbEze53Lw2MyEEgs4RKfs6cXCtKXW
+cHmmrXyoQSkPZwwbUhkNtwQdHMEQOs4BkLHOyUZzJQZDz9tTb7QhkMw90osKQEBC
+Tqzc81dV8Dww+xLaisPLsHF4pMkpqwCI
+-----END PUBLIC KEY-----"#;
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,6 +192,20 @@ fn assert_rsa_round_trip(algorithm: Algorithm) {
     assert_eq!(out.iat, claims.iat);
 }
 
+fn assert_ecdsa_round_trip(algorithm: Algorithm, private_key: &str, public_key: &str) {
+    let claims = base_claims();
+    let token = encode(&claims, private_key.as_bytes(), algorithm)
+        .expect("ECDSA encode must succeed with private PEM");
+    let segments: Vec<&str> = token.split('.').collect();
+    assert_eq!(segments.len(), 3, "ECDSA token must have three segments");
+
+    let config = JwtConfig::new(public_key.as_bytes(), algorithm);
+    let out = decode(&token, &config).expect("ECDSA decode must succeed with public PEM");
+    assert_eq!(out.sub.as_deref(), Some("test-user"));
+    assert_eq!(out.exp, claims.exp);
+    assert_eq!(out.iat, claims.iat);
+}
+
 #[test]
 fn rs256_encode_decode_round_trip_preserves_claims() {
     assert_rsa_round_trip(Algorithm::RS256);
@@ -197,6 +240,38 @@ fn rs512_token_rejected_when_validated_as_rs256() {
     let config = JwtConfig::new(RSA_PUBLIC_KEY.as_bytes(), Algorithm::RS256);
 
     let err = decode(&token, &config).expect_err("RS512 token validated as RS256 must reject");
+    assert_eq!(err, JwtDecodeError::InvalidAlgorithm);
+}
+
+#[test]
+fn es256_encode_decode_round_trip_preserves_claims() {
+    assert_ecdsa_round_trip(Algorithm::ES256, ES256_PRIVATE_KEY, ES256_PUBLIC_KEY);
+}
+
+#[test]
+fn es384_encode_decode_round_trip_preserves_claims() {
+    assert_ecdsa_round_trip(Algorithm::ES384, ES384_PRIVATE_KEY, ES384_PUBLIC_KEY);
+}
+
+#[test]
+fn es256_token_rejected_with_wrong_public_key() {
+    let claims = base_claims();
+    let token = encode(&claims, ES256_PRIVATE_KEY.as_bytes(), Algorithm::ES256)
+        .expect("ES256 encode must succeed");
+    let config = JwtConfig::new(ES256_WRONG_PUBLIC_KEY.as_bytes(), Algorithm::ES256);
+
+    let err = decode(&token, &config).expect_err("wrong ECDSA public key must reject");
+    assert_eq!(err, JwtDecodeError::InvalidSignature);
+}
+
+#[test]
+fn es384_token_rejected_when_validated_as_es256() {
+    let claims = base_claims();
+    let token = encode(&claims, ES384_PRIVATE_KEY.as_bytes(), Algorithm::ES384)
+        .expect("ES384 encode must succeed");
+    let config = JwtConfig::new(ES384_PUBLIC_KEY.as_bytes(), Algorithm::ES256);
+
+    let err = decode(&token, &config).expect_err("ES384 token validated as ES256 must reject");
     assert_eq!(err, JwtDecodeError::InvalidAlgorithm);
 }
 
