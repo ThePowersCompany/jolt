@@ -43,7 +43,7 @@
       "description": "Add Response::set_cookie(set_cookie) that appends a Set-Cookie header. Add Response::remove_cookie(name) that sets a Set-Cookie with Max-Age=0 and Expires in the past.",
       "files": ["joltr-core/src/response.rs"],
       "tests": ["joltr-core/tests/cookie.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "6",

@@ -1,12 +1,15 @@
 //! Outbound HTTP response value returned from JoltR handlers.
 
 use axum::body::Body;
-use axum::http::header::{CONTENT_TYPE, LOCATION};
+use axum::http::header::{CONTENT_TYPE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use serde::Serialize;
 
+use crate::cookie::SetCookie;
 use crate::status::StatusCode;
+
+const REMOVE_COOKIE_EXPIRES: &str = "Thu, 01 Jan 1970 00:00:00 GMT";
 
 #[derive(Debug, Clone)]
 pub struct Response<T> {
@@ -22,6 +25,23 @@ impl<T> Response<T> {
             headers: HeaderMap::new(),
             body,
         }
+    }
+
+    pub fn set_cookie(mut self, set_cookie: SetCookie) -> Self {
+        self.headers.append(
+            SET_COOKIE,
+            HeaderValue::from_str(&set_cookie.to_header())
+                .expect("Set-Cookie value must be a valid HTTP header value"),
+        );
+        self
+    }
+
+    pub fn remove_cookie(self, name: impl Into<String>) -> Self {
+        self.set_cookie(
+            SetCookie::new(name, "")
+                .max_age(0)
+                .expires(REMOVE_COOKIE_EXPIRES),
+        )
     }
 }
 

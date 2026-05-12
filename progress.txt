@@ -344,3 +344,32 @@ Files changed:
 
 Next notes:
 - PRD #5 can now use the existing `SetCookie` builder/display path for response helpers.
+
+
+2026-05-12 PRD #5 — Response set_cookie and remove_cookie helpers
+
+Completed:
+- Added chainable `Response::set_cookie(set_cookie)` that appends a `Set-Cookie` header using `SetCookie::to_header()`.
+- Added `Response::remove_cookie(name)` that appends an expiring cookie with `Max-Age=0` and `Expires=Thu, 01 Jan 1970 00:00:00 GMT`.
+- Added cookie integration tests for multiple appended `Set-Cookie` headers and removal header rendering.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 12 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no repo-root `package.json` and no `server/package.json`.
+
+Key decisions:
+- Chose consuming, chainable helpers on `Response<T>` to match the existing builder style used by `SetCookie` and keep the response struct shape unchanged.
+- Used `HeaderMap::append` for `Set-Cookie` so multiple cookies survive instead of replacing each other.
+- Kept removal minimal: empty value plus max-age and a fixed past expiry date, with no implicit Path/Domain.
+
+Files changed:
+- `joltr-core/src/response.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 5 → passes: true)
+- `progress.txt`
+
+Next notes:
+- Phase 6 cookie support is complete. Remaining unfinished Phase 6 core work is static-file caching/compression/ranges (#7/#8) before the example app items.

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
+use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue};
-use joltr_core::{Cookie, Method, Request, SameSite, SetCookie};
+use joltr_core::{Cookie, Method, Request, Response, SameSite, SetCookie, StatusCode};
 
 fn cookie(name: &str, value: &str) -> Cookie {
     Cookie {
@@ -135,5 +136,33 @@ fn request_cookies_parse_cookie_header() {
     assert_eq!(
         req.cookies(),
         vec![cookie("sid", "abc123"), cookie("theme", "dark")]
+    );
+}
+
+#[test]
+fn response_set_cookie_appends_set_cookie_headers() {
+    let response = Response::new(StatusCode::Ok, "ok")
+        .set_cookie(SetCookie::new("sid", "abc123").path("/").http_only())
+        .set_cookie(SetCookie::new("theme", "dark"));
+
+    let values = response
+        .headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values, vec!["sid=abc123; Path=/; HttpOnly", "theme=dark"]);
+}
+
+#[test]
+fn response_remove_cookie_appends_expiring_set_cookie_header() {
+    let response = Response::new(StatusCode::Ok, "ok").remove_cookie("sid");
+
+    let value = response.headers.get(SET_COOKIE).unwrap().to_str().unwrap();
+
+    assert_eq!(
+        value,
+        "sid=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     );
 }
