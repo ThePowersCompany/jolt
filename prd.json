@@ -228,6 +228,15 @@
       "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs"],
       "passes": true
+    },
+    {
+      "id": "27",
+      "title": "TsExport emits generic parameters",
+      "phase": "Phase 5",
+      "description": "Parse generic parameters from derived structs and register them in TsTypeDef.generics so rendered interfaces include angle-bracket parameters such as export interface Page<T>.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
     }
   ]
 }

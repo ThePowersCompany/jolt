@@ -849,3 +849,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #27 can now add generic parameter emission on top of preserved user-defined type references.
+
+
+2026-05-12 PRD #27 - TsExport emits generic parameters
+
+Completed:
+- Added TsExport parsing for Rust type generic parameters and registered them in `TsTypeDef.generics`.
+- Updated the derived marker impl to preserve the user's full Rust generics and where-clause via `split_for_impl`, so generic exported structs compile.
+- Added macro and joltr-types integration coverage for `PageExport<T>` rendering as `export interface PageExport<T>` with `T[]` and `T | null` fields.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-macros --lib ts_export` -> 65 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 7 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 270 passed.
+- `npm run type-check` and `cd server && npm run type-check` were guarded no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Emitted only Rust type parameters as TypeScript generics; lifetimes and const generics are ignored because they have no direct TS declaration equivalent here.
+- Kept generic field type rendering on the existing type-mapping path, so `T`, `Vec<T>`, and `Option<T>` compose without a new special case.
+- Left `joltr-types/src/lib.rs` unchanged because its existing renderer already handles `TsTypeDef.generics`.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 27 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #28 remains the next TsExport core-polish item for data-carrying tagged enum unions.

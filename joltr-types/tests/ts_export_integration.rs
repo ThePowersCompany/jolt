@@ -60,6 +60,13 @@ struct AccountExport {
     fallback_profile: Option<ProfileExport>,
 }
 
+#[derive(TsExport)]
+#[allow(dead_code)]
+struct PageExport<T> {
+    items: Vec<T>,
+    next: Option<T>,
+}
+
 // ── Binary subprocess test helpers ──
 
 /// Generate a unique tempfile path inside the workspace's `target/` directory.
@@ -215,6 +222,24 @@ fn render_preserves_user_defined_type_references() {
     assert!(
         out.contains("fallback_profile: ProfileExport | null;"),
         "Option<ProfileExport> must render as ProfileExport | null, got:\n{out}"
+    );
+}
+
+#[test]
+fn render_includes_generic_struct_parameters() {
+    let out = joltr_types::render();
+
+    assert!(
+        out.contains("export interface PageExport<T> {"),
+        "generic struct must emit `export interface PageExport<T>`, got:\n{out}"
+    );
+    assert!(
+        out.contains("items: T[];"),
+        "Vec<T> must render as `items: T[];`, got:\n{out}"
+    );
+    assert!(
+        out.contains("next: T | null;"),
+        "Option<T> must render as `next: T | null;`, got:\n{out}"
     );
 }
 

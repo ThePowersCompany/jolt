@@ -22,8 +22,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    Data, DataStruct, DeriveInput, Fields, GenericArgument, Ident, Lit, Meta, PathArguments, Token,
-    Type,
+    Data, DataStruct, DeriveInput, Fields, GenericArgument, GenericParam, Generics, Ident, Lit,
+    Meta, PathArguments, Token, Type,
 };
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
@@ -37,6 +37,8 @@ use syn::{
 #[derive(Debug)]
 pub(crate) struct TsExportInput {
     pub(crate) ident: Ident,
+    pub(crate) generics: Generics,
+    pub(crate) ts_generics: Vec<String>,
     pub(crate) fields: Vec<TsExportField>,
     pub(crate) variants: Vec<String>,
 }
@@ -173,11 +175,15 @@ fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
 /// - **union** → rejected.
 pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportInput> {
     let ident = input.ident.clone();
+    let generics = input.generics.clone();
+    let ts_generics = ts_generic_params(&generics);
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
             Ok(TsExportInput {
                 ident,
+                generics,
+                ts_generics,
                 fields,
                 variants: Vec::new(),
             })
@@ -189,6 +195,8 @@ pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportI
             }
             Ok(TsExportInput {
                 ident,
+                generics,
+                ts_generics,
                 fields: Vec::new(),
                 variants,
             })
@@ -198,6 +206,17 @@ pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportI
             "#[derive(TsExport)] can only be applied to structs, not unions",
         )),
     }
+}
+
+fn ts_generic_params(generics: &Generics) -> Vec<String> {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Type(ty) => Some(ty.ident.to_string()),
+            GenericParam::Lifetime(_) | GenericParam::Const(_) => None,
+        })
+        .collect()
 }
 
 /// Walk enum variants collecting names for simple (no-data) enums.
@@ -448,10 +467,11 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     }
 
     let inventory_submit = generate_inventory_submit(&parsed);
+    let (impl_generics, ty_generics, where_clause) = parsed.generics.split_for_impl();
 
     quote! {
         #[automatically_derived]
-        impl #ident {
+        impl #impl_generics #ident #ty_generics #where_clause {
             #[doc(hidden)]
             pub const __JOLTR_TS_EXPORT_IS_ENUM: bool = #is_enum;
 
@@ -510,6 +530,7 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
 fn generate_inventory_submit(parsed: &TsExportInput) -> TokenStream {
     let ident = &parsed.ident;
     let name_lit = ident.to_string();
+    let generic_literals = &parsed.ts_generics;
 
     let (kind_tokens, field_literals): (TokenStream, Vec<TokenStream>) =
         if parsed.variants.is_empty() {
@@ -559,7 +580,7 @@ fn generate_inventory_submit(parsed: &TsExportInput) -> TokenStream {
                 name: #name_lit,
                 kind: #kind_tokens,
                 fields: &[ #(#field_literals),* ],
-                generics: &[],
+                generics: &[ #(#generic_literals),* ],
                 docs: ::core::option::Option::None,
             }
         }
@@ -658,6 +679,36 @@ mod tests {
             type1.contains("Option") || type1.contains("Value"),
             "meta type must contain Option/Value"
         );
+    }
+
+    #[test]
+    fn parses_type_generic_parameters() {
+        let input = parse_derive(
+            r#"
+            struct Page<T, U> {
+                item: T,
+                fallback: Option<U>,
+            }
+            "#,
+        );
+        let parsed = parse_ts_export_input(input).expect("generic struct parses");
+        assert_eq!(parsed.ts_generics, vec!["T", "U"]);
+        assert_eq!(parsed.fields[0].ts_type.as_deref(), Some("T"));
+        assert_eq!(parsed.fields[1].ts_type.as_deref(), Some("U | null"));
+    }
+
+    #[test]
+    fn ts_generics_ignore_lifetimes_and_const_params() {
+        let input = parse_derive(
+            r#"
+            struct Buffer<'a, T, const N: usize> {
+                item: T,
+                label: &'a str,
+            }
+            "#,
+        );
+        let parsed = parse_ts_export_input(input).expect("mixed generic params parse");
+        assert_eq!(parsed.ts_generics, vec!["T"]);
     }
 
     #[test]
@@ -1039,6 +1090,30 @@ mod tests {
         assert!(
             out.contains(r#"name : "payload""#) && out.contains(r#"ts_type : "SomeUserType""#),
             "user-defined field type must render as its TS reference, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_submit_registers_generic_parameters() {
+        let input = parse_derive(
+            r#"
+            struct Page<T> {
+                items: Vec<T>,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains("impl < T > Page < T >"),
+            "generic impl must preserve the user's type parameter, got: {out}"
+        );
+        assert!(
+            out.contains(r#"generics : & ["T"]"#),
+            "TsTypeDef.generics must register T, got: {out}"
+        );
+        assert!(
+            out.contains(r#"ts_type : "T []""#) || out.contains(r#"ts_type : "T[]""#),
+            "generic Vec<T> field must render as T[], got: {out}"
         );
     }
 
