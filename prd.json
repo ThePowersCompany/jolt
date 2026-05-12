@@ -16,7 +16,7 @@
       "description": "Implement SetCookie::parse(header_value) that parses the Set-Cookie response header format: name=value; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax|Strict|None; Max-Age=N; Expires=<date>.",
       "files": ["joltr-core/src/cookie.rs"],
       "tests": ["joltr-core/tests/cookie.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "3",

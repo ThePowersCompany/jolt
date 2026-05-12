@@ -282,3 +282,35 @@ Files changed:
 
 Next notes:
 - A later API-polish pass can re-export `Redirect` from the crate root once the unrelated `lib.rs` worktree changes are settled.
+
+
+2026-05-12 PRD #2 — SetCookie parsing from Set-Cookie header
+
+Completed:
+- Added `SetCookie::parse(header_value)` in `joltr-core/src/cookie.rs` for `name=value` plus `Path`, `Domain`, `Secure`, `HttpOnly`, `SameSite`, `Max-Age`, and `Expires` attributes.
+- Added `ParseSetCookieError` with `Display`/`Error` implementations for malformed headers and invalid attribute values.
+- Added cookie integration tests for full supported parsing, case-insensitive attribute names/SameSite values, cookie values containing `=`, and invalid inputs.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 7 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skipped the same pre-existing WebSocket integration test noted in prior progress.
+- `npm run type-check` → not applicable to this workspace: no repo-local `package.json` with a `type-check` script.
+- `cd server && npm run type-check` → not applicable: this workspace has no `server/` directory.
+
+Key decisions:
+- Returned `Result<SetCookie, ParseSetCookieError>` instead of silently dropping malformed input, so callers can reject invalid response cookies explicitly.
+- Parsed known attribute names and SameSite tokens case-insensitively, while rendering remains canonical through the existing `Display` impls.
+- Stored `Expires` as the raw string, matching the existing builder field and avoiding a date parsing dependency in this focused slice.
+- Ignored unknown Set-Cookie extensions so standard attributes can parse alongside future or vendor-specific attributes.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 2 → passes: true)
+- `progress.txt`
+
+Next notes:
+- PRD #4 can now build request-cookie parsing separately from this response-cookie parser.
+- PRD #5 can continue using the builder/display path; no response helper changes were made here.
