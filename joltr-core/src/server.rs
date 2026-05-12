@@ -12,12 +12,13 @@
 //! time: `allow_origins`, `allow_methods`, `allow_headers`, and `max_age`. The
 //! [`Default`] impl produces an empty/restrictive config (no origins, no
 //! methods, no headers, `max_age = 0`) — opening up CORS is an explicit
-//! caller decision, never the default. [`TlsConfig`] remains a stub marker
-//! whose fields are filled in when the TLS phase lands.
+//! caller decision, never the default. [`TlsConfig`] carries certificate/key
+//! paths for the TLS startup path landing in the next phase.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
@@ -61,8 +62,11 @@ pub struct CorsConfig {
     pub expose_headers: Vec<String>,
 }
 
-#[derive(Debug)]
-pub struct TlsConfig;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsConfig {
+    pub cert_chain_path: PathBuf,
+    pub private_key_path: PathBuf,
+}
 
 pub struct JoltRServer {
     pub port: u16,
@@ -101,6 +105,11 @@ impl JoltRServer {
 
     pub fn cors(mut self, cors: CorsConfig) -> Self {
         self.cors_config = Some(cors);
+        self
+    }
+
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls_config = Some(tls);
         self
     }
 
@@ -262,6 +271,29 @@ mod tests {
             .expect_err("zero worker threads should be invalid");
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn tls_config_carries_certificate_and_key_paths() {
+        let config = TlsConfig {
+            cert_chain_path: PathBuf::from("certs/fullchain.pem"),
+            private_key_path: PathBuf::from("certs/privkey.pem"),
+        };
+
+        assert_eq!(config.cert_chain_path, PathBuf::from("certs/fullchain.pem"));
+        assert_eq!(config.private_key_path, PathBuf::from("certs/privkey.pem"));
+    }
+
+    #[test]
+    fn tls_builder_wraps_arg_in_some_without_starting_tls() {
+        let config = TlsConfig {
+            cert_chain_path: PathBuf::from("certs/fullchain.pem"),
+            private_key_path: PathBuf::from("certs/privkey.pem"),
+        };
+
+        let server = JoltRServer::new().tls(config.clone());
+
+        assert_eq!(server.tls_config, Some(config));
     }
 
     #[test]

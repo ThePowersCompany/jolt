@@ -593,3 +593,32 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. TLS config/startup items (#18-#20) remain unfinished and can build on the server entry-point split without changing the async API.
+
+
+2026-05-12 PRD #18 - TLS config carries cert and key paths
+
+Completed:
+- Replaced the `TlsConfig` marker with public `cert_chain_path` and `private_key_path` fields.
+- Added `JoltRServer::tls(config)` to store TLS configuration without changing server startup behavior.
+- Added focused server unit tests for the TLS config field surface and builder wiring.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 19 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `npm run type-check` -> skipped: `**/package.json` search found no npm project.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept TLS as configuration-only in this slice; `start` and `start_blocking` still use the existing plain HTTP path.
+- Used `PathBuf` fields so the next rustls startup item can consume filesystem paths directly.
+- Added tests in `joltr-core/src/server.rs` alongside the existing server-entry tests to avoid expanding the already broad shared `src/tests.rs` module.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `prd.json` (item 18 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #19 can now consume `TlsConfig` to start the rustls-backed server path.

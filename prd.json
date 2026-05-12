@@ -149,6 +149,15 @@
       "passes": true
     },
     {
+      "id": "18",
+      "title": "TLS config carries cert and key paths",
+      "phase": "Phase 6",
+      "description": "Replace the TlsConfig stub with fields for certificate chain path and private key path, plus a builder method JoltRServer::tls(config). Do not change serving behavior yet.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/src/tests.rs"],
+      "passes": true
+    },
+    {
       "id": "21",
       "title": "Server threads build owned Tokio runtime",
       "phase": "Phase 1",
