@@ -1,4 +1,4 @@
-//! Static file-serving `tower::Layer` (PRD items 6 and 7).
+//! Static file-serving `tower::Layer` (PRD items 6, 7, and 8).
 //!
 //! [`FileServeLayer`] wraps an inner [`tower::Service`] (typically JoltR's
 //! [`Router`](crate::Router)) and intercepts requests whose path falls under a
@@ -22,7 +22,8 @@
 //! - **Cache validators**: successful file responses include `Cache-Control`,
 //!   `ETag`, and `Last-Modified`. Matching `If-None-Match` requests return
 //!   `304 Not Modified` with the same cache validators and no body.
-//! - **Range / gzip**: intentionally out of scope until PRD item 8.
+//! - **Range / gzip**: delegated to `ServeDir`; byte ranges return `206 Partial
+//!   Content`, and `Accept-Encoding: gzip` can serve `.gz` sidecars.
 //! - **Path traversal**: blocked by `ServeDir`'s built-in path validation —
 //!   any URI containing `..` components canonicalizes to a path outside the
 //!   configured root, which `ServeDir` refuses to serve.
@@ -80,7 +81,7 @@ impl<S> Layer<S> for FileServeLayer {
             inner,
             prefix: self.prefix.clone(),
             root: self.root.clone(),
-            serve_dir: ServeDir::new(&self.root),
+            serve_dir: ServeDir::new(&self.root).precompressed_gzip(),
         }
     }
 }
@@ -120,9 +121,9 @@ where
 
         match match_prefix(&self.prefix, req.uri().path()) {
             Some(stripped_path) => {
-                let cache_headers = file_cache_headers(&self.root, &stripped_path);
                 let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
                 let method = req.method().clone();
+                let root = self.root.clone();
                 *req.uri_mut() = rewrite_uri(req.uri(), &stripped_path);
                 let serve_dir = self.serve_dir.clone();
                 Box::pin(async move {
@@ -135,7 +136,11 @@ where
                         .unwrap_or_else(|infallible| match infallible {});
 
                     let response = if response.status() == StatusCode::OK {
-                        if let Some(cache_headers) = cache_headers {
+                        if let Some(cache_headers) = file_cache_headers_for_response(
+                            &root,
+                            &stripped_path,
+                            response.headers(),
+                        ) {
                             if accepts_not_modified(&method, if_none_match.as_ref(), &cache_headers)
                             {
                                 return Ok(not_modified_response(&cache_headers));
@@ -244,6 +249,27 @@ fn file_cache_headers(root: &Path, stripped_path: &str) -> Option<FileCacheHeade
         etag,
         last_modified,
     })
+}
+
+fn file_cache_headers_for_response(
+    root: &Path,
+    stripped_path: &str,
+    headers: &HeaderMap,
+) -> Option<FileCacheHeaders> {
+    if response_uses_gzip(headers) {
+        let gzip_path = format!("{stripped_path}.gz");
+        return file_cache_headers(root, &gzip_path);
+    }
+
+    file_cache_headers(root, stripped_path)
+}
+
+fn response_uses_gzip(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("gzip"))
+        .unwrap_or(false)
 }
 
 fn resolve_static_file_path(root: &Path, stripped_path: &str) -> Option<PathBuf> {

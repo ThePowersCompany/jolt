@@ -1,4 +1,4 @@
-//! PRD item 6 — `FileServeLayer` static file-serving contract.
+//! PRD items 6, 7, and 8 — `FileServeLayer` static file-serving contract.
 //!
 //! Exercises end-to-end through `tower::ServiceExt::oneshot`:
 //! - a path under the configured prefix serves the matching file with 200 +
@@ -91,6 +91,24 @@ fn get_with_if_none_match(path: &str, etag: &str) -> AxumRequest<Body> {
         .method("GET")
         .uri(path)
         .header(header::IF_NONE_MATCH, etag)
+        .body(Body::empty())
+        .expect("test request builds")
+}
+
+fn get_with_accept_encoding(path: &str, accept_encoding: &str) -> AxumRequest<Body> {
+    AxumRequest::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::ACCEPT_ENCODING, accept_encoding)
+        .body(Body::empty())
+        .expect("test request builds")
+}
+
+fn get_with_range(path: &str, range: &str) -> AxumRequest<Body> {
+    AxumRequest::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::RANGE, range)
         .body(Body::empty())
         .expect("test request builds")
 }
@@ -193,6 +211,69 @@ async fn matching_if_none_match_returns_304_without_body() {
         .await
         .expect("body collects");
     assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn accepts_gzip_serves_precompressed_sidecar() {
+    let root = fresh_test_dir();
+    const GZIPPED_JS: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 75, 206, 207, 43, 206, 207, 73, 213, 203, 201, 79, 215,
+        80, 79, 175, 202, 44, 80, 215, 180, 230, 2, 0, 36, 77, 142, 21, 21, 0, 0, 0,
+    ];
+    write_file(&root, "app.js", b"console.log('plain');\n");
+    write_file(&root, "app.js.gz", GZIPPED_JS);
+
+    let svc = FileServeLayer::new("/static", &root).layer(SentinelInner);
+    let response = svc
+        .oneshot(get_with_accept_encoding("/static/app.js", "gzip"))
+        .await
+        .expect("service is infallible");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+    assert!(response.headers().contains_key(header::ETAG));
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body[..], GZIPPED_JS);
+}
+
+#[tokio::test]
+async fn byte_range_returns_partial_content() {
+    let root = fresh_test_dir();
+    write_file(&root, "hello.txt", b"hello world");
+
+    let svc = FileServeLayer::new("/static", &root).layer(SentinelInner);
+    let response = svc
+        .oneshot(get_with_range("/static/hello.txt", "bytes=0-4"))
+        .await
+        .expect("service is infallible");
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes 0-4/11")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCEPT_RANGES)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes")
+    );
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert_eq!(&body[..], b"hello");
 }
 
 #[tokio::test]

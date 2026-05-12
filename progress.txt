@@ -406,3 +406,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #8 can now build on this layer for precompressed gzip and byte ranges.
+
+
+2026-05-12 PRD #8 - File serving: gzip and Range support
+
+Completed:
+- Enabled `ServeDir::precompressed_gzip()` inside `FileServeLayer`, so requests with `Accept-Encoding: gzip` can serve `.gz` sidecar files.
+- Preserved cache metadata correctness for gzip responses by deriving `ETag` / `Last-Modified` from the served `.gz` file when `Content-Encoding: gzip` is selected.
+- Added integration tests for gzip sidecar serving and `Range` requests returning `206 Partial Content`.
+- Kept path traversal protection delegated to `ServeDir`; the existing traversal regression test remains part of the file-serving suite.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --test file_serve` -> 11 passed.
+- `cargo test -p joltr-core --lib file_serve` -> 11 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- npm type-checks were not applicable: `**/package.json` search found no repo-root or `server/` npm project; guarded root/server npm checks were no-ops.
+
+Key decisions:
+- Enabled gzip sidecar serving by default instead of adding an opt-in builder flag, matching the PRD's support requirement without expanding the public API.
+- Delegated byte-range parsing and response construction to `tower-http::ServeDir`, which already emits `206`, `Content-Range`, and `Accept-Ranges` for valid single-range requests.
+- Computed cache headers after `ServeDir` returns so the selected representation is known; gzip responses use `.gz` metadata rather than the uncompressed file's metadata.
+
+Files changed:
+- `joltr-core/src/file_serve.rs`
+- `joltr-core/tests/file_serve.rs`
+- `prd.json` (item 8 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are the example app tasks (#13-#17).

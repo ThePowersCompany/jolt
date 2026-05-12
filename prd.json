@@ -70,7 +70,7 @@
       "description": "Support Accept-Encoding: gzip for pre-compressed files (.gz). Support Range header with 206 Partial Content responses for byte-range requests. Guard against path traversal (../).",
       "files": ["joltr-core/src/file_serve.rs"],
       "tests": ["joltr-core/tests/file_serve.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "9",
