@@ -1188,3 +1188,39 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #38 remains unfinished for final Rust port verification docs.
+
+
+2026-05-12 PRD #38 - Final Rust port verification docs
+
+Completed:
+- Documented the final Rust port verification path in the root README: Rust format/check/test, example Docker build, generated TypeScript declarations, and the TypeScript container integration test.
+- Expanded `examples/basic/README.md` with Docker reuse, generated `types.d.ts`, the typed integration endpoint URL, and the stable JSON response contract.
+- Fixed two verification blockers surfaced by the documented path: installed the rustls AWS-LC crypto provider before loading TLS config, and made the raw WebSocket integration test bounded and serialized so `cargo test --workspace` finishes deterministically.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test --workspace` -> passed after fixing the TLS provider panic and WebSocket test hang.
+- `JOLTR_TYPES_OUT=target/joltr-basic-example-types.d.ts cargo run -q -p joltr-basic-example -- --generate-types` -> wrote the generated declarations.
+- `docker build -t joltr-basic-example:local -f examples/basic/Dockerfile .` -> passed.
+- `JOLTR_BASIC_IMAGE=joltr-basic-example:local JOLTR_BASIC_SKIP_DOCKER_BUILD=1 examples/basic/integration/run.sh` -> passed and verified `TypedTestResponse v1` from the running container.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept the docs focused on the commands CI and local maintainers should actually run, with the integration script as the source of truth for container startup and TypeScript validation.
+- Documented the typed endpoint as `http://127.0.0.1:3000/api/test/typed` with the exact `TypedTestResponse` JSON shape asserted by the TypeScript test.
+- Used `rustls::crypto::aws_lc_rs::default_provider().install_default()` in the TLS config path because `axum-server` enables rustls without process-provider installation.
+- Replaced opportunistic WebSocket reads with exact frame reads under a deadline, and serialized the two raw-socket tests to avoid parallel test interference.
+
+Files changed:
+- `README.md`
+- `examples/basic/README.md`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/server.rs`
+- `joltr-core/tests/ws_integration.rs`
+- `prd.json` (item 38 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete and the documented final verification path passes locally.

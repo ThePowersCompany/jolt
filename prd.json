@@ -327,6 +327,15 @@
       "files": [".github/workflows/build-and-test.yml", "examples/basic/integration/run.sh"],
       "tests": [".github/workflows/build-and-test.yml"],
       "passes": true
+    },
+    {
+      "id": "38",
+      "title": "Final Rust port verification docs",
+      "phase": "Finalization",
+      "description": "Document the final local verification path for the Rust port: cargo check/test, example Docker build, generated TypeScript types, and the TypeScript integration test. Include the expected endpoint URL and response contract for the example mini project.",
+      "files": ["README.md", "examples/basic/README.md", "progress.txt"],
+      "tests": ["cargo check --workspace --all-targets", "cargo test --workspace", "examples/basic/integration/run.sh"],
+      "passes": true
     }
   ]
 }

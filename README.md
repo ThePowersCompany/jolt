@@ -65,6 +65,34 @@ async fn main() {
 - **Migrations** — File-based SQL migrations with SHA-256 checksums, auto-applied at startup
 - **Background tasks** — Scheduled tasks via `tokio::time::interval` with retry logic
 
+## Final Rust Port Verification
+
+Run the final local verification path from the workspace root:
+
+```sh
+cargo fmt --check
+cargo check --workspace --all-targets
+cargo test --workspace
+docker build -t joltr-basic-example:local -f examples/basic/Dockerfile .
+JOLTR_TYPES_OUT=target/joltr-basic-example-types.d.ts cargo run -q -p joltr-basic-example -- --generate-types
+examples/basic/integration/run.sh
+```
+
+The Docker image builds the `joltr-basic-example` binary from the local workspace crates, generates `/workspace/types.d.ts`, and starts without external services when `DATABASE_URL` is unset.
+
+The TypeScript integration test starts the example container, waits for `GET /api/test/typed`, copies the generated `types.d.ts`, type-checks against `TypedTestResponse`, and validates this stable JSON contract:
+
+```json
+{
+  "contract_version": 1,
+  "service": "joltr-basic-example",
+  "ok": true,
+  "features": ["endpoint-macro", "ts-export"]
+}
+```
+
+When running the example directly with `cargo run -p joltr-basic-example`, the endpoint is available at `http://127.0.0.1:3000/api/test/typed`.
+
 ## FAQ
 
 **Is this a port of the Zig JoltR?**

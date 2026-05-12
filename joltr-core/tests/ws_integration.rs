@@ -9,9 +9,14 @@ use tokio::net::TcpListener;
 use joltr_core::{ws, AuthError, JwtClaims, WebSocketHandler, WebSocketSender, WsMessage};
 
 static RECEIVED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static WS_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn received() -> &'static Mutex<Vec<String>> {
     RECEIVED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn ws_test_lock() -> &'static tokio::sync::Mutex<()> {
+    WS_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[derive(Default)]
@@ -52,6 +57,7 @@ fn auth_ok(token: &str) -> Result<JwtClaims, AuthError> {
 
 #[tokio::test]
 async fn valid_token_upgrade_and_message_exchange() {
+    let _guard = ws_test_lock().lock().await;
     let _ = tracing_subscriber::fmt().try_init();
     received().lock().unwrap().clear();
 
@@ -93,8 +99,7 @@ async fn valid_token_upgrade_and_message_exchange() {
 
     let first_frame = recv_frame(&mut stream).await;
     assert_eq!(
-        first_frame,
-        "welcome",
+        first_frame, "welcome",
         "expected 'welcome' from on_open, got: {first_frame:?}"
     );
 
@@ -122,6 +127,7 @@ async fn valid_token_upgrade_and_message_exchange() {
 
 #[tokio::test]
 async fn invalid_token_is_rejected_with_401() {
+    let _guard = ws_test_lock().lock().await;
     let _ = tracing_subscriber::fmt().try_init();
 
     #[derive(Default)]
@@ -232,125 +238,93 @@ fn rand_mask() -> [u8; 4] {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    [
-        (t >> 24) as u8,
-        (t >> 16) as u8,
-        (t >> 8) as u8,
-        t as u8,
-    ]
+    [(t >> 24) as u8, (t >> 16) as u8, (t >> 8) as u8, t as u8]
 }
 
 async fn recv_frame(stream: &mut tokio::net::TcpStream) -> String {
-    let mut buf = vec![0u8; 8192];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
 
     loop {
-        let bytes = match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            Err(_) => break,
+        let Some((opcode, payload, _raw)) = recv_frame_parts(stream, deadline).await else {
+            break;
         };
 
-        if bytes >= 2 {
-            let opcode = buf[0] & 0x0F;
-            let mask = (buf[1] & 0x80) != 0;
-            let mut payload_len = (buf[1] & 0x7F) as usize;
-            let mut offset = 2;
-
-            if payload_len == 126 {
-                if bytes < 4 {
-                    continue;
-                }
-                payload_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-                offset = 4;
-            } else if payload_len == 127 {
-                if bytes < 10 {
-                    continue;
-                }
-                payload_len = u64::from_be_bytes([
-                    buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
-                ]) as usize;
-                offset = 10;
-            }
-
-            if mask {
-                if bytes < offset + 4 + payload_len {
-                    continue;
-                }
-                let _mask_key = &buf[offset..offset + 4];
-                offset += 4;
-            }
-
-            if bytes < offset + payload_len {
-                continue;
-            }
-
-            let data = &buf[offset..offset + payload_len];
-
-            match opcode {
-                0x1 => return String::from_utf8_lossy(data).to_string(),
-                0x9 => {
-                    send_pong(stream, data).await;
-                    continue;
-                }
-                _ => continue,
-            }
+        match opcode {
+            0x1 => return String::from_utf8_lossy(&payload).to_string(),
+            0x9 => send_pong(stream, &payload).await,
+            0x8 => break,
+            _ => {}
         }
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     String::new()
 }
 
 async fn recv_frame_raw(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
-    let mut buf = vec![0u8; 8192];
-
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        if tokio::time::Instant::now() > deadline {
-            return None;
+        let (opcode, _payload, raw) = recv_frame_parts(stream, deadline).await?;
+        if opcode == 0x8 {
+            return Some(raw);
         }
+    }
+}
 
-        match stream.read(&mut buf).await {
-            Ok(0) => return None,
-            Ok(n) if n >= 2 => {
-                let opcode = buf[0] & 0x0F;
-                let mut payload_len = (buf[1] & 0x7F) as usize;
-                let mut offset = 2;
+async fn recv_frame_parts(
+    stream: &mut tokio::net::TcpStream,
+    deadline: tokio::time::Instant,
+) -> Option<(u8, Vec<u8>, Vec<u8>)> {
+    let mut header = [0u8; 2];
+    read_exact_before(stream, &mut header, deadline).await?;
 
-                if payload_len == 126 {
-                    if n < 4 {
-                        continue;
-                    }
-                    payload_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-                    offset = 4;
-                } else if payload_len == 127 {
-                    if n < 10 {
-                        continue;
-                    }
-                    payload_len = u64::from_be_bytes([
-                        buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
-                    ]) as usize;
-                    offset = 10;
-                }
+    let opcode = header[0] & 0x0F;
+    let masked = (header[1] & 0x80) != 0;
+    let mut payload_len = (header[1] & 0x7F) as usize;
+    let mut raw = header.to_vec();
 
-                return match opcode {
-                    0x8 => Some(buf[..offset + payload_len].to_vec()),
-                    _ => None,
-                };
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            _ => {}
+    if payload_len == 126 {
+        let mut extended = [0u8; 2];
+        read_exact_before(stream, &mut extended, deadline).await?;
+        raw.extend_from_slice(&extended);
+        payload_len = u16::from_be_bytes(extended) as usize;
+    } else if payload_len == 127 {
+        let mut extended = [0u8; 8];
+        read_exact_before(stream, &mut extended, deadline).await?;
+        raw.extend_from_slice(&extended);
+        payload_len = u64::from_be_bytes(extended) as usize;
+    }
+
+    let mask_key = if masked {
+        let mut key = [0u8; 4];
+        read_exact_before(stream, &mut key, deadline).await?;
+        raw.extend_from_slice(&key);
+        Some(key)
+    } else {
+        None
+    };
+
+    let mut payload = vec![0u8; payload_len];
+    read_exact_before(stream, &mut payload, deadline).await?;
+    raw.extend_from_slice(&payload);
+
+    if let Some(mask_key) = mask_key {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask_key[index % 4];
         }
+    }
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    Some((opcode, payload, raw))
+}
+
+async fn read_exact_before(
+    stream: &mut tokio::net::TcpStream,
+    buf: &mut [u8],
+    deadline: tokio::time::Instant,
+) -> Option<()> {
+    let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
+    match tokio::time::timeout(remaining, stream.read_exact(buf)).await {
+        Ok(Ok(_)) => Some(()),
+        _ => None,
     }
 }
 
@@ -369,19 +343,26 @@ async fn send_pong(stream: &mut tokio::net::TcpStream, payload: &[u8]) {
 
 async fn read_response(stream: &mut tokio::net::TcpStream, buf: &mut [u8]) -> usize {
     let mut total = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        match stream.read(&mut buf[total..]).await {
-            Ok(0) | Err(_) if total > 0 && contains_empty_line(&buf[..total]) => break total,
-            Ok(0) => break total,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            break total;
+        };
+
+        match tokio::time::timeout(remaining, stream.read(&mut buf[total..])).await {
+            Ok(Ok(0)) | Ok(Err(_)) if total > 0 && contains_empty_line(&buf[..total]) => {
+                break total
+            }
+            Ok(Ok(0)) => break total,
+            Ok(Err(e)) if e.kind() == ErrorKind::WouldBlock => {
                 if total > 0 && contains_empty_line(&buf[..total]) {
                     break total;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
-            Err(_) => break total,
-            Ok(n) => {
+            Ok(Err(_)) | Err(_) => break total,
+            Ok(Ok(n)) => {
                 total += n;
                 if contains_empty_line(&buf[..total]) {
                     break total;

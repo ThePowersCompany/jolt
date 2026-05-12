@@ -300,6 +300,7 @@ where
 }
 
 async fn rustls_config_from_tls_config(tls: &TlsConfig) -> io::Result<RustlsConfig> {
+    install_rustls_crypto_provider();
     ensure_tls_file_readable(&tls.cert_chain_path, "TLS certificate chain").await?;
     ensure_tls_file_readable(&tls.private_key_path, "TLS private key").await?;
     RustlsConfig::from_pem_file(&tls.cert_chain_path, &tls.private_key_path)
@@ -310,6 +311,10 @@ async fn rustls_config_from_tls_config(tls: &TlsConfig) -> io::Result<RustlsConf
                 format!("invalid TLS certificate/key configuration: {err}"),
             )
         })
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 async fn ensure_tls_file_readable(path: &Path, label: &str) -> io::Result<()> {
