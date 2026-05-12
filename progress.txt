@@ -972,3 +972,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD items are example app polish for static files (#31) and TLS startup docs (#32).
+
+
+2026-05-12 PRD #31 - Example app demonstrates static files
+
+Completed:
+- Added `examples/basic/public/app.css` as the example app's public static asset.
+- Wired `FileServeLayer::new("/static", PUBLIC_DIR)` into the example router through an axum fallback service, so unmatched `/static/*` requests serve files while other unknown paths still return 404.
+- Added a serving-router test proving `/static/app.css` is served through the configured static prefix.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 13 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- Staged snapshot verification: `cargo test --manifest-path <temp-index>/Cargo.toml -p joltr-basic-example` -> 9 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used `FileServeLayer` as a fallback service rather than axum `ServeDir` directly, keeping the example on the JoltR static-file abstraction.
+- Kept static serving scoped to `/static` and delegated non-static fallback requests to a tiny 404 service.
+- Left the HTML template unchanged to keep this slice focused on the static serving integration.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/public/app.css` (new)
+- `prd.json` (item 31 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD item is TLS startup documentation/configuration (#32).
