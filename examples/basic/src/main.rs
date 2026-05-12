@@ -3,9 +3,10 @@ use axum::http::{Request as AxumRequest, StatusCode as AxumStatusCode};
 use axum::response::Response as AxumResponse;
 use joltr_core::{
     tower::{service_fn, Layer},
-    CorsConfig, FileServeLayer, JoltRServer, Method,
+    CorsConfig, FileServeLayer, JoltRServer, Method, TlsConfig,
 };
 use joltr_db::{DbConfig, JoltRDb};
+use std::{io, path::PathBuf};
 
 mod endpoints;
 mod tasks;
@@ -13,6 +14,8 @@ mod tasks;
 const DEFAULT_PORT: u16 = 3000;
 const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
 const PUBLIC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
+const TLS_CERT_CHAIN_ENV: &str = "JOLTR_BASIC_TLS_CERT_CHAIN";
+const TLS_PRIVATE_KEY_ENV: &str = "JOLTR_BASIC_TLS_PRIVATE_KEY";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,9 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         expose_headers: Vec::new(),
     };
 
-    JoltRServer::new()
-        .port(DEFAULT_PORT)
-        .cors(cors)
+    configure_tls_from_env(JoltRServer::new().port(DEFAULT_PORT).cors(cors))?
         .endpoint(endpoints::TemplateEndpoint::new()?)
         .endpoint(endpoints::EchoEndpoint)
         .endpoint(endpoints::ItemEndpoint)
@@ -39,6 +40,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+fn configure_tls_from_env(server: JoltRServer) -> io::Result<JoltRServer> {
+    configure_tls(
+        server,
+        path_from_env(TLS_CERT_CHAIN_ENV),
+        path_from_env(TLS_PRIVATE_KEY_ENV),
+    )
+}
+
+fn path_from_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.as_os_str().is_empty())
+        .map(PathBuf::from)
+}
+
+fn configure_tls(
+    server: JoltRServer,
+    cert_chain_path: Option<PathBuf>,
+    private_key_path: Option<PathBuf>,
+) -> io::Result<JoltRServer> {
+    match (cert_chain_path, private_key_path) {
+        (None, None) => Ok(server),
+        (Some(cert_chain_path), Some(private_key_path)) => Ok(server.tls(TlsConfig {
+            cert_chain_path,
+            private_key_path,
+        })),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "set both {TLS_CERT_CHAIN_ENV} and {TLS_PRIVATE_KEY_ENV} to enable TLS, or neither for plain HTTP"
+            ),
+        )),
+    }
 }
 
 fn static_assets_router() -> axum::Router {
@@ -81,6 +116,46 @@ mod tests {
             .expect("body collects");
         let body = std::str::from_utf8(&body).expect("asset is utf-8");
         assert!(body.contains(".joltr-basic-example"));
+    }
+
+    #[test]
+    fn default_server_uses_plain_http_without_tls_paths() {
+        let server = configure_tls(JoltRServer::new(), None, None).expect("server configures");
+
+        assert!(server.tls_config.is_none());
+    }
+
+    #[test]
+    fn server_enables_tls_when_both_paths_are_provided() {
+        let server = configure_tls(
+            JoltRServer::new(),
+            Some(PathBuf::from("cert.pem")),
+            Some(PathBuf::from("key.pem")),
+        )
+        .expect("server configures");
+        let tls = server.tls_config.expect("TLS config is present");
+
+        assert_eq!(tls.cert_chain_path, PathBuf::from("cert.pem"));
+        assert_eq!(tls.private_key_path, PathBuf::from("key.pem"));
+    }
+
+    #[test]
+    fn tls_configuration_requires_both_paths() {
+        let missing_key =
+            match configure_tls(JoltRServer::new(), Some(PathBuf::from("cert.pem")), None) {
+                Ok(_) => panic!("missing key should fail"),
+                Err(err) => err,
+            };
+        let missing_cert =
+            match configure_tls(JoltRServer::new(), None, Some(PathBuf::from("key.pem"))) {
+                Ok(_) => panic!("missing cert should fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(missing_key.kind(), io::ErrorKind::InvalidInput);
+        assert!(missing_key.to_string().contains(TLS_CERT_CHAIN_ENV));
+        assert!(missing_key.to_string().contains(TLS_PRIVATE_KEY_ENV));
+        assert_eq!(missing_cert.kind(), io::ErrorKind::InvalidInput);
     }
 }
 

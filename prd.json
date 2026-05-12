@@ -273,6 +273,15 @@
       "files": ["examples/basic/src/main.rs", "examples/basic/public"],
       "tests": ["examples/basic/src/main.rs"],
       "passes": true
+    },
+    {
+      "id": "32",
+      "title": "Example app documents TLS startup",
+      "phase": "Phase 6",
+      "description": "Update examples/basic so TLS can be enabled through environment variables for cert and key paths, while default local startup remains plain HTTP.",
+      "files": ["examples/basic/src/main.rs", "examples/basic/README.md"],
+      "tests": ["examples/basic/src/main.rs"],
+      "passes": true
     }
   ]
 }

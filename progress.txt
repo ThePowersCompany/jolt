@@ -1004,3 +1004,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD item is TLS startup documentation/configuration (#32).
+
+
+2026-05-12 PRD #32 - Example app documents TLS startup
+
+Completed:
+- Added TLS startup configuration to `examples/basic/src/main.rs`: setting both `JOLTR_BASIC_TLS_CERT_CHAIN` and `JOLTR_BASIC_TLS_PRIVATE_KEY` enables `JoltRServer::tls` with those paths.
+- Preserved default plain HTTP startup when neither TLS environment variable is set.
+- Added a configuration error for one-sided TLS env setup so the example does not silently start with the wrong transport.
+- Added `examples/basic/README.md` with plain HTTP and TLS startup commands.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo test -p joltr-basic-example` -> 16 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used example-specific env var names to avoid implying a global JoltR convention.
+- Treated empty env values as unset, matching the example's optional local-startup behavior.
+- Kept TLS file validation in the existing `JoltRServer` startup path instead of duplicating certificate/key checks in the example.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/README.md` (new)
+- `prd.json` (item 32 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.
