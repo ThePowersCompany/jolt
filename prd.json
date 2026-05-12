@@ -25,7 +25,7 @@
       "description": "Add SetCookie::new(name, value) builder with .path(), .domain(), .secure(), .http_only(), .same_site(), .max_age(), .expires() chainable methods. Implement Display for SetCookie that renders the Set-Cookie header value string.",
       "files": ["joltr-core/src/cookie.rs"],
       "tests": ["joltr-core/tests/cookie.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "4",

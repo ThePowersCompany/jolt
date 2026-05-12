@@ -220,3 +220,35 @@ Next notes:
 - PRD #7 (cache headers + ETag + Last-Modified + If-None-Match → 304) is now unblocked. Likely shape: a post-call hook in `FileServeService::call` that inspects the request's `If-None-Match` and rewrites the response into a 304 when the inner ETag matches, otherwise injects `Cache-Control`/`ETag`/`Last-Modified` from the resolved file's metadata. The hook lives between `serve_dir.oneshot(req)` and the final `Ok(response.map(Body::new))`.
 - PRD #8 (gzip + Range) is partly free from `ServeDir`'s built-ins: `ServeDir::new(root).precompressed_gzip()` is the canonical toggle. The FileServeLayer constructor will need a `with_precompressed_gzip()` builder method, and tests will need to stage `.gz` companion files. `Range` handling and 206 responses are already implemented by `ServeDir`; the test surface just needs to assert them.
 - One pre-existing unused-import warning in `joltr-core/src/tests.rs:8` (`ParseMethodError`) is unrelated to this PRD; flagging it here so a polish pass can sweep it later.
+
+
+2026-05-12 PRD #3 — SetCookie builder and to_header
+
+Completed:
+- Added `SameSite` and `SetCookie` response-cookie types in `joltr-core/src/cookie.rs`.
+- Added `SetCookie::new(name, value)` plus chainable `.path()`, `.domain()`, `.secure()`, `.http_only()`, `.same_site()`, `.max_age()`, and `.expires()` methods.
+- Implemented `Display` for `SetCookie` and `SameSite`; `SetCookie::to_header()` delegates to the display rendering.
+- Re-exported `SameSite` and `SetCookie` from the `joltr_core` crate root.
+- Added `joltr-core/tests/cookie.rs` with 3 integration tests for the base header, full builder output order, and SameSite rendering.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 3 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skips one pre-existing WebSocket integration test that timed out twice when running the full suite unfiltered.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no `package.json` or `server/package.json`.
+
+Key decisions:
+- Stored `expires` as a `String` and left date validation/parsing for PRD #2, which owns `SetCookie::parse`.
+- Rendered attributes in the PRD order: `Path`, `Domain`, `Secure`, `HttpOnly`, `SameSite`, `Max-Age`, `Expires`.
+- Kept rendering dependency-free and did not add escaping or cookie-value normalization in this builder-only slice.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/src/lib.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 3 → passes: true)
+
+Next notes:
+- PRD #2 can now add `SetCookie::parse(header_value)` against the concrete `SetCookie`/`SameSite` shape.
+- PRD #5 can use `SetCookie::to_header()` when appending `Set-Cookie` response headers.

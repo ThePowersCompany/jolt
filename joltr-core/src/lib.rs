@@ -49,7 +49,7 @@ pub use auth_websocket::{
 // consume `AuthJwtLayer` (JOLTR-RS-072) don't need a direct `joltr-utils` dep
 // just to build a `JwtConfig` or read a `JwtClaims` from extensions.
 pub use joltr_utils::jwt::{Algorithm as JwtAlgorithm, JwtClaims, JwtConfig, JwtDecodeError, JwtEncodeError, encode as jwt_encode};
-pub use cookie::Cookie;
+pub use cookie::{Cookie, SameSite, SetCookie};
 pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
