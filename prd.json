@@ -61,7 +61,7 @@
       "description": "Add Cache-Control, ETag, and Last-Modified headers to served files. Support If-None-Match → 304 Not Modified conditional response.",
       "files": ["joltr-core/src/file_serve.rs"],
       "tests": ["joltr-core/tests/file_serve.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "8",

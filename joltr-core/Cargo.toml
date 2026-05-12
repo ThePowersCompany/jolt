@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 inventory = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
 joltr-macros = { path = "../joltr-macros" }
 joltr-utils = { path = "../joltr-utils" }
 dashmap = { workspace = true }

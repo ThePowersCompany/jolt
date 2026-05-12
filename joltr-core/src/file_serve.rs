@@ -1,4 +1,4 @@
-//! Static file-serving `tower::Layer` (PRD item 6).
+//! Static file-serving `tower::Layer` (PRD items 6 and 7).
 //!
 //! [`FileServeLayer`] wraps an inner [`tower::Service`] (typically JoltR's
 //! [`Router`](crate::Router)) and intercepts requests whose path falls under a
@@ -18,22 +18,27 @@
 //!   rather than `<root>/static/foo.txt`.
 //! - **404 for missing files**: delegated to `ServeDir`, which returns a 404
 //!   response (with empty body) when the resolved path does not resolve to a
-//!   regular file. This PRD does NOT add `Cache-Control` / `ETag` / range /
-//!   gzip handling — those land in PRD items 7 and 8 on top of this surface.
+//!   regular file.
+//! - **Cache validators**: successful file responses include `Cache-Control`,
+//!   `ETag`, and `Last-Modified`. Matching `If-None-Match` requests return
+//!   `304 Not Modified` with the same cache validators and no body.
+//! - **Range / gzip**: intentionally out of scope until PRD item 8.
 //! - **Path traversal**: blocked by `ServeDir`'s built-in path validation —
 //!   any URI containing `..` components canonicalizes to a path outside the
 //!   configured root, which `ServeDir` refuses to serve.
 
 use std::convert::Infallible;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::UNIX_EPOCH;
 
 use axum::body::Body;
 use axum::extract::Request as AxumRequest;
-use axum::http::Uri;
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
+use chrono::{DateTime, Utc};
 use tower::{Layer, Service, ServiceExt};
 use tower_http::services::ServeDir;
 
@@ -74,6 +79,7 @@ impl<S> Layer<S> for FileServeLayer {
         FileServeService {
             inner,
             prefix: self.prefix.clone(),
+            root: self.root.clone(),
             serve_dir: ServeDir::new(&self.root),
         }
     }
@@ -86,6 +92,7 @@ impl<S> Layer<S> for FileServeLayer {
 pub struct FileServeService<S> {
     inner: S,
     prefix: String,
+    root: PathBuf,
     serve_dir: ServeDir,
 }
 
@@ -113,6 +120,9 @@ where
 
         match match_prefix(&self.prefix, req.uri().path()) {
             Some(stripped_path) => {
+                let cache_headers = file_cache_headers(&self.root, &stripped_path);
+                let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
+                let method = req.method().clone();
                 *req.uri_mut() = rewrite_uri(req.uri(), &stripped_path);
                 let serve_dir = self.serve_dir.clone();
                 Box::pin(async move {
@@ -123,6 +133,26 @@ where
                         .oneshot(req)
                         .await
                         .unwrap_or_else(|infallible| match infallible {});
+
+                    let response = if response.status() == StatusCode::OK {
+                        if let Some(cache_headers) = cache_headers {
+                            if accepts_not_modified(&method, if_none_match.as_ref(), &cache_headers)
+                            {
+                                return Ok(not_modified_response(&cache_headers));
+                            }
+
+                            let mut response = response;
+                            insert_cache_headers(response.headers_mut(), &cache_headers);
+                            response
+                        } else {
+                            response
+                        }
+                    } else {
+                        response
+                    };
+
+                    // `ServeDir` owns the filesystem body type; adapt it into
+                    // axum's standard body after header injection.
                     Ok(response.map(Body::new))
                 })
             }
@@ -186,6 +216,96 @@ fn rewrite_uri(uri: &Uri, new_path: &str) -> Uri {
     Uri::from_parts(parts).unwrap_or_else(|_| Uri::from_static("/"))
 }
 
+#[derive(Clone, Debug)]
+struct FileCacheHeaders {
+    etag: HeaderValue,
+    last_modified: HeaderValue,
+}
+
+fn file_cache_headers(root: &Path, stripped_path: &str) -> Option<FileCacheHeaders> {
+    let path = resolve_static_file_path(root, stripped_path)?;
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+
+    let modified = metadata.modified().ok()?;
+    let modified_since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let modified_nanos = u128::from(modified_since_epoch.as_secs()) * 1_000_000_000
+        + u128::from(modified_since_epoch.subsec_nanos());
+    let etag =
+        HeaderValue::from_str(&format!("W/\"{:x}-{modified_nanos:x}\"", metadata.len())).ok()?;
+
+    let modified_at: DateTime<Utc> = modified.into();
+    let last_modified =
+        HeaderValue::from_str(&modified_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string()).ok()?;
+
+    Some(FileCacheHeaders {
+        etag,
+        last_modified,
+    })
+}
+
+fn resolve_static_file_path(root: &Path, stripped_path: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in Path::new(stripped_path.trim_start_matches('/')).components() {
+        match component {
+            Component::Normal(segment) => path.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(path)
+}
+
+fn accepts_not_modified(
+    method: &Method,
+    if_none_match: Option<&HeaderValue>,
+    cache_headers: &FileCacheHeaders,
+) -> bool {
+    (method == Method::GET || method == Method::HEAD)
+        && if_none_match
+            .map(|value| if_none_match_matches(value, &cache_headers.etag))
+            .unwrap_or(false)
+}
+
+fn if_none_match_matches(value: &HeaderValue, etag: &HeaderValue) -> bool {
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Ok(etag) = etag.to_str() else {
+        return false;
+    };
+    let weak_etag = strip_weak_etag(etag);
+
+    value.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || strip_weak_etag(candidate) == weak_etag
+    })
+}
+
+fn strip_weak_etag(etag: &str) -> &str {
+    etag.strip_prefix("W/").unwrap_or(etag)
+}
+
+fn insert_cache_headers(headers: &mut HeaderMap, cache_headers: &FileCacheHeaders) {
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=0"),
+    );
+    headers.insert(header::ETAG, cache_headers.etag.clone());
+    headers.insert(header::LAST_MODIFIED, cache_headers.last_modified.clone());
+}
+
+fn not_modified_response(cache_headers: &FileCacheHeaders) -> Response {
+    let mut response = Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .body(Body::empty())
+        .expect("static 304 response builds");
+    insert_cache_headers(response.headers_mut(), cache_headers);
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,10 +361,7 @@ mod tests {
 
     #[test]
     fn match_prefix_empty_matches_anything() {
-        assert_eq!(
-            match_prefix("", "/anything"),
-            Some("/anything".to_string())
-        );
+        assert_eq!(match_prefix("", "/anything"), Some("/anything".to_string()));
     }
 
     #[test]

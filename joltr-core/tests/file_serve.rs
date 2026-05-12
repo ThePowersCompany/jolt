@@ -24,7 +24,7 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{Request as AxumRequest, StatusCode};
+use axum::http::{header, Request as AxumRequest, StatusCode};
 use axum::response::Response;
 use joltr_core::FileServeLayer;
 use tower::{Layer, Service, ServiceExt};
@@ -86,6 +86,15 @@ fn get(path: &str) -> AxumRequest<Body> {
         .expect("test request builds")
 }
 
+fn get_with_if_none_match(path: &str, etag: &str) -> AxumRequest<Body> {
+    AxumRequest::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::IF_NONE_MATCH, etag)
+        .body(Body::empty())
+        .expect("test request builds")
+}
+
 #[tokio::test]
 async fn serves_file_when_path_matches_prefix() {
     let root = fresh_test_dir();
@@ -98,8 +107,92 @@ async fn serves_file_when_path_matches_prefix() {
         .expect("service is infallible");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), 1024).await.expect("body collects");
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
     assert_eq!(&body[..], b"hello world");
+}
+
+#[tokio::test]
+async fn served_file_includes_cache_headers() {
+    let root = fresh_test_dir();
+    write_file(&root, "hello.txt", b"hello world");
+
+    let svc = FileServeLayer::new("/static", &root).layer(SentinelInner);
+    let response = svc
+        .oneshot(get("/static/hello.txt"))
+        .await
+        .expect("service is infallible");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=0")
+    );
+
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("served file includes ETag");
+    assert!(etag.starts_with("W/\""));
+    assert!(etag.ends_with('"'));
+
+    let last_modified = response
+        .headers()
+        .get(header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .expect("served file includes Last-Modified");
+    assert!(last_modified.ends_with(" GMT"));
+}
+
+#[tokio::test]
+async fn matching_if_none_match_returns_304_without_body() {
+    let root = fresh_test_dir();
+    write_file(&root, "hello.txt", b"hello world");
+
+    let svc = FileServeLayer::new("/static", &root).layer(SentinelInner);
+    let first = svc
+        .oneshot(get("/static/hello.txt"))
+        .await
+        .expect("service is infallible");
+    let etag = first
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("first response includes ETag")
+        .to_string();
+
+    let svc = FileServeLayer::new("/static", &root).layer(SentinelInner);
+    let response = svc
+        .oneshot(get_with_if_none_match("/static/hello.txt", &etag))
+        .await
+        .expect("service is infallible");
+
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(etag.as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=0")
+    );
+    assert!(response.headers().contains_key(header::LAST_MODIFIED));
+
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
+    assert!(body.is_empty());
 }
 
 #[tokio::test]
@@ -131,7 +224,9 @@ async fn delegates_to_inner_when_path_does_not_match_prefix() {
     // request actually went through `inner.call`, not through ServeDir's
     // own miss-path branch (which would surface 404 with an empty body).
     assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
-    let body = to_bytes(response.into_body(), 1024).await.expect("body collects");
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
     assert_eq!(&body[..], SENTINEL_BODY);
 }
 
@@ -198,7 +293,9 @@ async fn query_string_survives_rewrite() {
         .expect("service is infallible");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), 1024).await.expect("body collects");
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body collects");
     assert_eq!(&body[..], b"hello");
 }
 

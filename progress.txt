@@ -373,3 +373,36 @@ Files changed:
 
 Next notes:
 - Phase 6 cookie support is complete. Remaining unfinished Phase 6 core work is static-file caching/compression/ranges (#7/#8) before the example app items.
+
+
+2026-05-12 PRD #7 - File serving: cache headers and ETag
+
+Completed:
+- Added cache metadata injection to `FileServeService`: successful static file responses now include `Cache-Control`, weak `ETag`, and `Last-Modified` headers.
+- Added `If-None-Match` handling for GET/HEAD requests; matching validators return `304 Not Modified` with cache headers and an empty body.
+- Added integration tests for cache headers and conditional 304 responses.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --test file_serve` -> 9 passed.
+- `cargo test -p joltr-core --lib file_serve` -> 11 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- Requested npm checks were not applicable: `**/package.json` search found no root or server npm project in this workspace.
+
+Key decisions:
+- Used a deterministic weak ETag derived from file length plus modified timestamp, avoiding file hashing and keeping the layer cheap.
+- Chose `Cache-Control: public, max-age=0` as a conservative default that permits storage but requires validation before reuse.
+- Metadata headers are added only after `ServeDir` returns 200, so missing files and traversal rejections keep their existing behavior.
+- `Last-Modified` formatting uses the existing workspace `chrono` dependency rather than adding a new date-formatting crate.
+
+Files changed:
+- `Cargo.lock`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/file_serve.rs`
+- `joltr-core/tests/file_serve.rs`
+- `prd.json` (item 7 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #8 can now build on this layer for precompressed gzip and byte ranges.
