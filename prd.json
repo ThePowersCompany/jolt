@@ -237,6 +237,15 @@
       "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
       "tests": ["joltr-types/tests/ts_export_integration.rs"],
       "passes": true
+    },
+    {
+      "id": "28",
+      "title": "TsExport tagged enum unions",
+      "phase": "Phase 5",
+      "description": "Support enums with data-carrying variants by rendering a TypeScript union of tagged object shapes. Keep existing simple unit-enum rendering unchanged.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
     }
   ]
 }

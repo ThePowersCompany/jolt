@@ -880,3 +880,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #28 remains the next TsExport core-polish item for data-carrying tagged enum unions.
+
+
+2026-05-12 PRD #28 - TsExport tagged enum unions
+
+Completed:
+- Added TsExport parsing for mixed and data-carrying enum variants, including named fields, tuple fields, and unit variants inside a tagged union.
+- Updated inventory submission so data-carrying enums register as `TsKind::Union` with `{ type: "Variant"; ... }` object arms, while all-unit enums keep the existing `TsKind::Enum` const-object renderer.
+- Added macro and joltr-types integration coverage for tagged union rendering.
+
+Verification:
+- `cargo test -p joltr-macros --lib ts_export` -> 67 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 8 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 272 passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used a fixed `type` discriminator for generated tagged object arms because the PRD did not introduce a discriminator attribute surface.
+- Rendered tuple variant fields as positional `_0`, `_1`, etc. so tuple-style data variants are not silently dropped.
+- Left `joltr-types/src/lib.rs` rendering logic unchanged because the existing `TsKind::Union` renderer already joins submitted object-arm strings correctly.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 28 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are JWT RSA/ECDSA support (#29/#30) and example app polish (#31/#32).

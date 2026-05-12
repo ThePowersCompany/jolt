@@ -33,7 +33,7 @@ use syn::{
 /// TypeScript type-mapping engine (166-168).
 ///
 /// JOLTR-RS-173: `variants` carries simple enum variant names when the derive
-/// is applied to a no-data enum. Empty for structs and rejected enum shapes.
+/// is applied to a no-data enum. Empty for structs and data-carrying enums.
 #[derive(Debug)]
 pub(crate) struct TsExportInput {
     pub(crate) ident: Ident,
@@ -41,6 +41,19 @@ pub(crate) struct TsExportInput {
     pub(crate) ts_generics: Vec<String>,
     pub(crate) fields: Vec<TsExportField>,
     pub(crate) variants: Vec<String>,
+    pub(crate) union_variants: Vec<TsUnionVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TsUnionVariant {
+    pub(crate) name: String,
+    pub(crate) fields: Vec<TsUnionField>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TsUnionField {
+    pub(crate) name: String,
+    pub(crate) ts_type: Option<String>,
 }
 
 /// Internal representation of one field on a `#[derive(TsExport)]` struct.
@@ -169,9 +182,8 @@ fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
 /// - **tuple struct** → rejected (TS property names come from field idents).
 /// - **simple enum** (no data on any variant) → accepted; `variants` populated,
 ///   `fields` empty (JOLTR-RS-173).
-/// - **data-carrying enum** (at least one variant with fields) → rejected with
-///   a span on the first data-carrying variant.  JOLTR-RS-174 will add support
-///   for tagged unions.
+/// - **data-carrying enum** (at least one variant with fields) → accepted as a
+///   tagged TypeScript union; `union_variants` populated.
 /// - **union** → rejected.
 pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportInput> {
     let ident = input.ident.clone();
@@ -186,26 +198,34 @@ pub(crate) fn parse_ts_export_input(input: DeriveInput) -> syn::Result<TsExportI
                 ts_generics,
                 fields,
                 variants: Vec::new(),
+                union_variants: Vec::new(),
             })
         }
         Data::Enum(e) => {
-            let (variants, reject) = parse_enum_variants(&e);
-            if let Some(err) = reject {
-                return Err(err);
-            }
+            let parsed_enum = parse_enum_variants(&e)?;
+            let (variants, union_variants) = match parsed_enum {
+                ParsedEnum::Simple(variants) => (variants, Vec::new()),
+                ParsedEnum::Union(union_variants) => (Vec::new(), union_variants),
+            };
             Ok(TsExportInput {
                 ident,
                 generics,
                 ts_generics,
                 fields: Vec::new(),
                 variants,
+                union_variants,
             })
         }
         Data::Union(u) => Err(syn::Error::new_spanned(
             u.union_token,
-            "#[derive(TsExport)] can only be applied to structs, not unions",
+            "#[derive(TsExport)] can only be applied to structs and enums, not unions",
         )),
     }
+}
+
+enum ParsedEnum {
+    Simple(Vec<String>),
+    Union(Vec<TsUnionVariant>),
 }
 
 fn ts_generic_params(generics: &Generics) -> Vec<String> {
@@ -219,27 +239,62 @@ fn ts_generic_params(generics: &Generics) -> Vec<String> {
         .collect()
 }
 
-/// Walk enum variants collecting names for simple (no-data) enums.
-///
-/// Returns `(variant_names, maybe_rejection)`.  When `maybe_rejection` is
-/// `Some(…)` the caller must surface the compile error because the enum
-/// includes at least one data-carrying variant (JOLTR-RS-174 territory).
-fn parse_enum_variants(e: &syn::DataEnum) -> (Vec<String>, Option<syn::Error>) {
-    let mut names = Vec::with_capacity(e.variants.len());
-    for variant in &e.variants {
-        if !variant.fields.is_empty() {
-            return (
-                Vec::new(),
-                Some(syn::Error::new_spanned(
-                    &variant.fields,
-                    "#[derive(TsExport)] on enums currently only supports simple \
-                     (no-data) variants; this variant carries fields",
-                )),
-            );
-        }
-        names.push(variant.ident.to_string());
+/// Walk enum variants. All-unit enums stay on the legacy enum renderer; mixed
+/// or fully data-carrying enums become tagged union arms.
+fn parse_enum_variants(e: &syn::DataEnum) -> syn::Result<ParsedEnum> {
+    let has_data = e.variants.iter().any(|variant| !variant.fields.is_empty());
+    if !has_data {
+        return Ok(ParsedEnum::Simple(
+            e.variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect(),
+        ));
     }
-    (names, None)
+
+    let mut variants = Vec::with_capacity(e.variants.len());
+    for variant in &e.variants {
+        let fields = match &variant.fields {
+            Fields::Unit => Vec::new(),
+            Fields::Named(named) => parse_union_named_fields(named),
+            Fields::Unnamed(unnamed) => unnamed
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(i, field)| {
+                    let ts_attr = parse_ts_field_attrs(&field.attrs);
+                    TsUnionField {
+                        name: ts_attr.rename.unwrap_or_else(|| format!("_{i}")),
+                        ts_type: rust_type_to_ts(&field.ty),
+                    }
+                })
+                .collect(),
+        };
+        variants.push(TsUnionVariant {
+            name: variant.ident.to_string(),
+            fields,
+        });
+    }
+
+    Ok(ParsedEnum::Union(variants))
+}
+
+fn parse_union_named_fields(named: &syn::FieldsNamed) -> Vec<TsUnionField> {
+    named
+        .named
+        .iter()
+        .map(|field| {
+            let field_ident = field
+                .ident
+                .as_ref()
+                .expect("Fields::Named guarantees every field has an ident");
+            let ts_attr = parse_ts_field_attrs(&field.attrs);
+            TsUnionField {
+                name: ts_attr.rename.unwrap_or_else(|| field_ident.to_string()),
+                ts_type: rust_type_to_ts(&field.ty),
+            }
+        })
+        .collect()
 }
 
 /// Parsed `#[ts(...)]` field-level attribute values.
@@ -391,9 +446,13 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
     };
     let ident = &parsed.ident;
 
-    let is_enum = !parsed.variants.is_empty();
+    let is_enum = !parsed.variants.is_empty() || !parsed.union_variants.is_empty();
     let field_count = parsed.fields.len();
-    let variant_count = parsed.variants.len();
+    let variant_count = if parsed.union_variants.is_empty() {
+        parsed.variants.len()
+    } else {
+        parsed.union_variants.len()
+    };
     let mapped_count = parsed.fields.iter().filter(|f| f.ts_type.is_some()).count();
 
     let mut field_type_markers = Vec::with_capacity(parsed.fields.len());
@@ -457,8 +516,19 @@ pub(crate) fn expand_ts_export(input: DeriveInput) -> TokenStream {
         }
     }
 
-    let mut variant_markers = Vec::with_capacity(parsed.variants.len());
-    for (i, v) in parsed.variants.iter().enumerate() {
+    let variant_names: Vec<&str> = if parsed.union_variants.is_empty() {
+        parsed.variants.iter().map(String::as_str).collect()
+    } else {
+        parsed
+            .union_variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect()
+    };
+
+    let mut variant_markers = Vec::with_capacity(variant_names.len());
+    for (i, v) in variant_names.iter().enumerate() {
+        let v = *v;
         let variant_const_name = quote::format_ident!("__JOLTR_TS_EXPORT_VARIANT_{i}");
         variant_markers.push(quote! {
             #[doc(hidden)]
@@ -533,7 +603,24 @@ fn generate_inventory_submit(parsed: &TsExportInput) -> TokenStream {
     let generic_literals = &parsed.ts_generics;
 
     let (kind_tokens, field_literals): (TokenStream, Vec<TokenStream>) =
-        if parsed.variants.is_empty() {
+        if !parsed.union_variants.is_empty() {
+            let fields = parsed
+                .union_variants
+                .iter()
+                .map(|variant| {
+                    let variant_name = &variant.name;
+                    let ts_type = render_tagged_union_arm(variant);
+                    quote! {
+                        ::joltr_types::TsField {
+                            name: #variant_name,
+                            ts_type: #ts_type,
+                            docs: ::core::option::Option::None,
+                        }
+                    }
+                })
+                .collect();
+            (quote! { ::joltr_types::TsKind::Union }, fields)
+        } else if parsed.variants.is_empty() {
             let fields = parsed
                 .fields
                 .iter()
@@ -585,6 +672,19 @@ fn generate_inventory_submit(parsed: &TsExportInput) -> TokenStream {
             }
         }
     }
+}
+
+fn render_tagged_union_arm(variant: &TsUnionVariant) -> String {
+    let mut arm = format!("{{ type: \"{}\";", variant.name);
+    for field in &variant.fields {
+        arm.push(' ');
+        arm.push_str(&field.name);
+        arm.push_str(": ");
+        arm.push_str(field.ts_type.as_deref().unwrap_or("any"));
+        arm.push(';');
+    }
+    arm.push_str(" }");
+    arm
 }
 
 #[cfg(test)]
@@ -718,10 +818,11 @@ mod tests {
         assert_eq!(parsed.ident, "Status");
         assert!(parsed.fields.is_empty());
         assert_eq!(parsed.variants, vec!["Active", "Inactive"]);
+        assert!(parsed.union_variants.is_empty());
     }
 
     #[test]
-    fn rejects_data_carrying_enum() {
+    fn accepts_data_carrying_enum_as_tagged_union() {
         let input = parse_derive(
             r#"
             enum Event {
@@ -730,12 +831,17 @@ mod tests {
             }
             "#,
         );
-        let err = parse_ts_export_input(input).expect_err("data-carrying enum must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("fields"),
-            "diagnostic must mention fields, got: {msg}"
+        let parsed = parse_ts_export_input(input).expect("data enum must be accepted");
+        assert!(parsed.variants.is_empty());
+        assert_eq!(parsed.union_variants.len(), 2);
+        assert_eq!(parsed.union_variants[0].name, "Login");
+        assert_eq!(parsed.union_variants[0].fields[0].name, "user");
+        assert_eq!(
+            parsed.union_variants[0].fields[0].ts_type.as_deref(),
+            Some("string")
         );
+        assert_eq!(parsed.union_variants[1].name, "Logout");
+        assert!(parsed.union_variants[1].fields.is_empty());
     }
 
     #[test]
@@ -745,10 +851,11 @@ mod tests {
             parse_ts_export_input(input).expect("enum with unit variants must be accepted");
         assert_eq!(parsed.variants.len(), 3);
         assert_eq!(parsed.variants, vec!["Red", "Green", "Blue"]);
+        assert!(parsed.union_variants.is_empty());
     }
 
     #[test]
-    fn enum_with_mixed_variants_rejected_on_first_data_field() {
+    fn enum_with_mixed_variants_becomes_tagged_union() {
         let input = parse_derive(
             r#"
             enum Mixed {
@@ -758,11 +865,29 @@ mod tests {
             }
             "#,
         );
-        let err = parse_ts_export_input(input).expect_err("mixed enum must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("fields"),
-            "error must mention fields, got: {msg}"
+        let parsed = parse_ts_export_input(input).expect("mixed enum must be accepted");
+        assert!(parsed.variants.is_empty());
+        assert_eq!(parsed.union_variants.len(), 3);
+        assert_eq!(parsed.union_variants[0].name, "A");
+        assert!(parsed.union_variants[0].fields.is_empty());
+        assert_eq!(parsed.union_variants[1].name, "B");
+        assert_eq!(parsed.union_variants[1].fields[0].name, "x");
+        assert_eq!(
+            parsed.union_variants[1].fields[0].ts_type.as_deref(),
+            Some("number")
+        );
+    }
+
+    #[test]
+    fn tuple_variant_fields_use_positional_names() {
+        let input = parse_derive("enum Event { Point(i32, i32) }");
+        let parsed = parse_ts_export_input(input).expect("tuple variant must be accepted");
+        assert_eq!(parsed.union_variants.len(), 1);
+        assert_eq!(parsed.union_variants[0].fields[0].name, "_0");
+        assert_eq!(parsed.union_variants[0].fields[1].name, "_1");
+        assert_eq!(
+            parsed.union_variants[0].fields[0].ts_type.as_deref(),
+            Some("number")
         );
     }
 
@@ -843,16 +968,24 @@ mod tests {
     }
 
     #[test]
-    fn expand_emits_compile_error_on_data_carrying_enum() {
+    fn expand_emits_union_metadata_for_data_carrying_enum() {
         let input = parse_derive("enum Bad { A { x: i32 }, B }");
         let out = expand_ts_export(input).to_string();
         assert!(
-            out.contains("compile_error"),
-            "parse failure must emit compile_error!, got: {out}"
+            out.contains("__JOLTR_TS_EXPORT_IS_ENUM") && out.contains("true"),
+            "data enum must still be marked as an enum, got: {out}"
         );
         assert!(
-            !out.contains("__JOLTR_TS_EXPORT_VARIANT_COUNT"),
-            "no partial codegen on parse failure, got: {out}"
+            out.contains("__JOLTR_TS_EXPORT_VARIANT_COUNT : usize = 2"),
+            "data enum must emit VARIANT_COUNT = 2, got: {out}"
+        );
+        assert!(
+            out.contains("__JOLTR_TS_EXPORT_VARIANT_0") && out.contains(r#"Some ("A")"#),
+            "variant 0 must emit Some(\"A\"), got: {out}"
+        );
+        assert!(
+            out.contains("__JOLTR_TS_EXPORT_VARIANT_1") && out.contains(r#"Some ("B")"#),
+            "variant 1 must emit Some(\"B\"), got: {out}"
         );
     }
 
@@ -1053,6 +1186,35 @@ mod tests {
         assert!(
             out.contains(r#"name : "Inactive""#),
             "variant 1 must appear as TsField.name=\"Inactive\", got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_emits_inventory_submit_for_tagged_union_enum() {
+        let input = parse_derive(
+            r#"
+            enum Event {
+                Login { user: String, remember: bool },
+                Logout,
+            }
+            "#,
+        );
+        let out = expand_ts_export(input).to_string();
+        assert!(
+            out.contains(":: joltr_types :: TsKind :: Union"),
+            "data enum must register as TsKind::Union, got: {out}"
+        );
+        assert!(
+            out.contains(r#"name : "Login""#),
+            "union arm must keep the variant name, got: {out}"
+        );
+        assert!(
+            out.contains(r#"{ type: \"Login\"; user: string; remember: boolean; }"#),
+            "Login arm must render as a tagged object shape, got: {out}"
+        );
+        assert!(
+            out.contains(r#"{ type: \"Logout\"; }"#),
+            "unit variant in a mixed enum must render as tag-only object shape, got: {out}"
         );
     }
 

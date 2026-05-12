@@ -67,6 +67,13 @@ struct PageExport<T> {
     next: Option<T>,
 }
 
+#[derive(TsExport)]
+#[allow(dead_code)]
+enum AuditEventExport {
+    Login { user: String, success: bool },
+    Logout,
+}
+
 // ── Binary subprocess test helpers ──
 
 /// Generate a unique tempfile path inside the workspace's `target/` directory.
@@ -240,6 +247,28 @@ fn render_includes_generic_struct_parameters() {
     assert!(
         out.contains("next: T | null;"),
         "Option<T> must render as `next: T | null;`, got:\n{out}"
+    );
+}
+
+#[test]
+fn render_includes_tagged_union_for_data_enum() {
+    let out = joltr_types::render();
+
+    assert!(
+        out.contains("export type AuditEventExport = "),
+        "data-carrying enum must emit a type union, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"{ type: "Login"; user: string; success: boolean; }"#),
+        "Login variant must render as a tagged object arm, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"{ type: "Logout"; }"#),
+        "unit variant in a mixed enum must render as a tag-only object arm, got:\n{out}"
+    );
+    assert!(
+        !out.contains("export const AuditEventExport"),
+        "data-carrying enum must not use the simple unit-enum const-object renderer, got:\n{out}"
     );
 }
 
