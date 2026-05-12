@@ -1126,3 +1126,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #36 can now use `joltr-basic-example:prd35` or rebuild the Dockerfile for the TypeScript container integration test.
+
+
+2026-05-12 PRD #36 - TypeScript container integration test
+
+Completed:
+- Added `examples/basic/integration` as an isolated npm/TypeScript integration test project.
+- Added `run.sh` to build or reuse the example Docker image, start the container on a random localhost port, wait for `/api/test/typed`, copy the image-generated `types.d.ts`, type-check against it, and run the TypeScript runtime response assertion.
+- Added `test.ts` runtime validation for the stable `TypedTestResponse` contract while importing the generated TypeScript type.
+
+Verification:
+- `examples/basic/integration/run.sh` -> passed; built `joltr-basic-example:integration`, copied `/workspace/types.d.ts`, type-checked, and verified `TypedTestResponse v1` from the running container.
+- `bash -n examples/basic/integration/run.sh` -> clean.
+- `npm --prefix examples/basic/integration run type-check` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Copied generated types into `target/joltr-basic-integration/types.d.ts` and mapped them through `tsconfig.json` so generated artifacts stay out of the source tree.
+- Built the Docker image by default but allowed `JOLTR_BASIC_SKIP_DOCKER_BUILD=1` / `JOLTR_BASIC_IMAGE=...` for faster local reuse.
+- Emitted CommonJS test output under `target/` to avoid Node module-boundary warnings.
+
+Files changed:
+- `examples/basic/integration/package.json` (new)
+- `examples/basic/integration/tsconfig.json` (new)
+- `examples/basic/integration/test.ts` (new)
+- `examples/basic/integration/run.sh` (new)
+- `prd.json` (item 36 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #37 can wire `examples/basic/integration/run.sh` into CI.

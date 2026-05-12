@@ -309,6 +309,15 @@
       "files": ["examples/basic/Dockerfile", "examples/basic/README.md", ".dockerignore"],
       "tests": ["docker build -f examples/basic/Dockerfile ."],
       "passes": true
+    },
+    {
+      "id": "36",
+      "title": "TypeScript container integration test",
+      "phase": "Finalization",
+      "description": "Add a local integration test script that builds or uses the example Docker image, starts the container, waits for readiness, calls the typed test endpoint, imports or type-checks against the generated types.d.ts, and verifies the runtime response shape in TypeScript.",
+      "files": ["examples/basic/integration/package.json", "examples/basic/integration/tsconfig.json", "examples/basic/integration/test.ts", "examples/basic/integration/run.sh"],
+      "tests": ["examples/basic/integration/run.sh"],
+      "passes": true
     }
   ]
 }

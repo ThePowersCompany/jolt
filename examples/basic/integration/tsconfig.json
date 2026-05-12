@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "generated-types": ["../../../target/joltr-basic-integration/types"]
+    },
+    "rootDir": ".",
+    "outDir": "../../../target/joltr-basic-integration/dist",
+    "skipLibCheck": true
+  },
+  "include": ["test.ts"]
+}

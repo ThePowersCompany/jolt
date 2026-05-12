@@ -1,0 +1,12 @@
+{
+  "name": "joltr-basic-example-integration",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "type-check": "npm exec --yes --package typescript@5.9.3 -- tsc --project tsconfig.json --noEmit",
+    "test": "npm exec --yes --package typescript@5.9.3 -- tsc --project tsconfig.json && node ../../../target/joltr-basic-integration/dist/test.js"
+  }
+}
