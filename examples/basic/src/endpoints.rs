@@ -1,8 +1,14 @@
+use axum::http::{header::CONTENT_TYPE, HeaderValue};
+use axum::response::Response as AxumResponse;
 use joltr_core::{
     endpoint, Endpoint, EndpointFuture, JsonBody, Method, Request, Response, StatusCode,
 };
+use joltr_templates::{TemplateEngine, TemplateInitError};
 use serde::Serialize;
 use serde_json::{json, Value};
+
+const TEMPLATES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/templates");
+const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -10,6 +16,95 @@ struct HealthResponse {
 }
 
 impl JsonBody for HealthResponse {}
+
+pub(crate) struct TemplateEndpoint {
+    engine: TemplateEngine,
+}
+
+impl TemplateEndpoint {
+    pub(crate) fn new() -> Result<Self, TemplateInitError> {
+        Ok(Self {
+            engine: TemplateEngine::new(TEMPLATES_DIR)?,
+        })
+    }
+}
+
+impl Endpoint for TemplateEndpoint {
+    fn path(&self) -> &str {
+        "/"
+    }
+
+    fn method(&self) -> Method {
+        Method::Get
+    }
+
+    fn handler(&self, _req: Request) -> EndpointFuture {
+        let response = render_index_response(&self.engine);
+        Box::pin(async move { response })
+    }
+}
+
+#[derive(Serialize)]
+struct IndexContext {
+    title: &'static str,
+    message: &'static str,
+    routes: Vec<RouteInfo>,
+}
+
+#[derive(Serialize)]
+struct RouteInfo {
+    method: &'static str,
+    path: &'static str,
+    description: &'static str,
+}
+
+fn index_context() -> IndexContext {
+    IndexContext {
+        title: "JoltR Basic Example",
+        message: "A small app showing HTTP, WebSocket, task, database, and template integrations.",
+        routes: vec![
+            RouteInfo {
+                method: "GET",
+                path: "/api/health",
+                description: "JSON health check",
+            },
+            RouteInfo {
+                method: "POST",
+                path: "/api/echo",
+                description: "Echo a JSON request body",
+            },
+            RouteInfo {
+                method: "GET",
+                path: "/api/items/:id?filter=active",
+                description: "Read path and query parameters",
+            },
+            RouteInfo {
+                method: "WS",
+                path: "/ws/chat",
+                description: "Authenticated WebSocket chat",
+            },
+        ],
+    }
+}
+
+fn render_index_response(engine: &TemplateEngine) -> AxumResponse {
+    match engine.render("index", &index_context()) {
+        Ok(body) => html_response(StatusCode::Ok, body),
+        Err(err) => Response::new(
+            StatusCode::InternalServerError,
+            format!("failed to render index template: {err}"),
+        )
+        .into(),
+    }
+}
+
+fn html_response(status: StatusCode, body: String) -> AxumResponse {
+    let mut response: AxumResponse = Response::new(status, body).into();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(HTML_CONTENT_TYPE));
+    response
+}
 
 #[derive(Default)]
 struct HealthEndpoint;
@@ -180,5 +275,35 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON body");
         assert_eq!(parsed["id"], "42");
         assert_eq!(parsed["filter"], "active");
+    }
+
+    #[tokio::test]
+    async fn template_endpoint_route_renders_index_html() {
+        let router = joltr_core::JoltRServer::new()
+            .endpoint(TemplateEndpoint::new().expect("template endpoint constructs"))
+            .into_router();
+        let req = AxumRequest::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .expect("request builds");
+
+        let response = router.oneshot(req).await.expect("request succeeds");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .expect("content type header is set"),
+            HTML_CONTENT_TYPE,
+        );
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body collects");
+        let html = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(html.contains("JoltR Basic Example"));
+        assert!(html.contains("/api/health"));
+        assert!(html.contains("/ws/chat"));
     }
 }

@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     JoltRServer::new()
         .port(DEFAULT_PORT)
         .cors(cors)
+        .endpoint(endpoints::TemplateEndpoint::new()?)
         .endpoint(endpoints::EchoEndpoint)
         .endpoint(endpoints::ItemEndpoint)
         .start(Default::default())

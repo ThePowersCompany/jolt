@@ -146,7 +146,7 @@
       "phase": "Phase 6",
       "description": "Add GET / that renders a Handlebars template with dynamic data. Add a templates/ directory with an index.hbs file. Demonstrate TemplateEngine usage.",
       "files": ["examples/basic/src/endpoints.rs", "examples/basic/templates/index.hbs"],
-      "passes": false
+      "passes": true
     }
   ]
 }

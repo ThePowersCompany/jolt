@@ -530,3 +530,36 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD item is template rendering (#17).
+
+
+2026-05-12 PRD #17 - Example app: template rendering endpoint
+
+Completed:
+- Added a `TemplateEndpoint` for `GET /` that loads `examples/basic/templates` with `TemplateEngine`, renders `index.hbs`, and returns HTML with dynamic route data.
+- Registered the template endpoint in `examples/basic/src/main.rs` before the API endpoints.
+- Added `examples/basic/templates/index.hbs` demonstrating Handlebars interpolation and route iteration.
+- Added a router test proving `GET /` returns HTML containing the rendered dynamic content.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 12 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Loaded the template engine at example startup through `TemplateEndpoint::new()` so a missing or invalid template directory fails early.
+- Kept HTML rendering in the example endpoint instead of changing the core `Response<String>` bridge; the endpoint converts to an axum response and sets `Content-Type: text/html; charset=utf-8` locally.
+- Used a small typed render context rather than ad hoc JSON so the example shows a maintainable TemplateEngine data shape.
+
+Files changed:
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `examples/basic/templates/index.hbs` (new)
+- `prd.json` (item 17 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete in the current worktree.
