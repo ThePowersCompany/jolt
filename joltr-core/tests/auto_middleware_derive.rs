@@ -247,3 +247,48 @@ fn extract_from_populates_body_query_request_fields() {
     assert_eq!(mw.req.path, "/users");
     assert_eq!(mw.req.method, Method::Post);
 }
+
+#[test]
+#[should_panic(expected = "body deserialization failed")]
+fn middleware_layer_runs_extraction_before_inner_service() {
+    use axum::http::HeaderMap;
+    use joltr_core::tower::{Layer, Service};
+    use std::convert::Infallible;
+    use std::future::ready;
+
+    let dummy_req = Request {
+        method: Method::Get,
+        path: "/dummy".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::new(),
+        body: Vec::new(),
+        cookies: vec![],
+        finished: false,
+    };
+    let mw = ExtractMw {
+        body: CreateUserRequest {
+            name: String::new(),
+            age: 0,
+        },
+        query_params: HashMap::new(),
+        req: dummy_req,
+    };
+    let inner = joltr_core::tower::service_fn(|_: Request| {
+        panic!("inner service must not run when extraction rejects the request body");
+        #[allow(unreachable_code)]
+        ready(Ok::<_, Infallible>(()))
+    });
+    let mut wrapped = mw.layer(inner);
+
+    let bad_req = Request {
+        method: Method::Post,
+        path: "/users".to_string(),
+        headers: HeaderMap::new(),
+        query_params: HashMap::new(),
+        body: b"{not valid json".to_vec(),
+        cookies: vec![],
+        finished: false,
+    };
+
+    let _ = <_ as Service<Request>>::call(&mut wrapped, bad_req);
+}

@@ -174,6 +174,15 @@
       "files": ["joltr-core/src/server.rs"],
       "tests": ["joltr-core/src/tests.rs"],
       "passes": true
+    },
+    {
+      "id": "24",
+      "title": "AutoMiddleware generated layer performs extraction",
+      "phase": "Phase 2",
+      "description": "Wire the generated tower service so the middleware extraction helper actually runs in request handling before delegating to the inner service, rather than only emitting ordering markers.",
+      "files": ["joltr-macros/src/auto_middleware.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
     }
   ]
 }

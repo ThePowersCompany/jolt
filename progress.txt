@@ -654,3 +654,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #20 can add explicit startup-error assertions for missing, unreadable, or malformed TLS cert/key files.
+
+
+2026-05-12 PRD #24 - AutoMiddleware generated layer performs extraction
+
+Completed:
+- Updated `#[derive(AutoMiddleware)]` service codegen so field-bearing middleware attempts a `joltr_core::Request` downcast and runs `__jolt_extract_from` before delegating to the inner tower service.
+- Added macro token coverage for the helper call ordering.
+- Added an integration regression test proving invalid body extraction panics before the inner service can run.
+
+Verification:
+- `cargo fmt --package joltr-macros --package joltr-core` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 7 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed; skipped the pre-existing WebSocket timeout case.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept the existing generic tower service shape and used an `Any` downcast so prior non-JoltR request tests still compile while real `joltr_core::Request` handling now performs extraction.
+- Ran extraction for any field-bearing middleware, including request-only fields, because the helper owns the per-field dispatch contract.
+- Left typed `QueryParams<T>` and by-ref `&Request` placeholders unchanged; those remain scoped to PRD #22 and PRD #23.
+
+Files changed:
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `prd.json` (item 24 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #25 can build on this call site to honor `RequestExt::is_finished()` before extraction and delegation.

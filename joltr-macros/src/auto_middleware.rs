@@ -621,6 +621,22 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
             let _: &::core::primitive::str = #tag;
         }
     });
+    let request_bound = if parsed.fields.is_empty() {
+        quote! {}
+    } else {
+        quote! { __Req: ::core::any::Any, }
+    };
+    let runtime_extraction = if parsed.fields.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            if let ::core::option::Option::Some(__jolt_req) =
+                (&__req as &dyn ::core::any::Any).downcast_ref::<::joltr_core::Request>()
+            {
+                let _ = #ident::__jolt_extract_from(__jolt_req);
+            }
+        }
+    };
     quote! {
         #[doc(hidden)]
         pub struct #service_ident<__S> {
@@ -649,6 +665,7 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
         impl<__S, __Req> ::joltr_core::tower::Service<__Req> for #service_ident<__S>
         where
             __S: ::joltr_core::tower::Service<__Req>,
+            #request_bound
         {
             type Response = <__S as ::joltr_core::tower::Service<__Req>>::Response;
             type Error = <__S as ::joltr_core::tower::Service<__Req>>::Error;
@@ -664,12 +681,10 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
             fn call(&mut self, __req: __Req) -> Self::Future {
                 // JOLTR-RS-052: canonical chain steps for this derive, one
                 // statement per active step. The marker statements are stable
-                // splice points; later PRD items will replace them with calls
-                // into `<Ident>::__jolt_extract_from` (JOLTR-RS-053) and the
-                // user's middleware logic once the wrapper-vs-Request-type
-                // tension is resolved (the wrapper is generic over `__Req`,
-                // but extraction needs `&::joltr_core::Request` specifically).
+                // ordering witnesses. Field-bearing middleware now runs the
+                // extraction helper when the tower request is a JoltR Request.
                 #(#chain_stmts)*
+                #runtime_extraction
                 <__S as ::joltr_core::tower::Service<__Req>>::call(&mut self.inner, __req)
             }
         }
@@ -2245,6 +2260,39 @@ mod tests {
         assert!(
             cors_pos < inner_call_pos,
             "chain marker must precede inner.call, rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn expand_layer_impl_runs_extraction_before_inner_call_for_fields() {
+        // PRD #24: field-bearing middleware must run the generated extraction
+        // helper before handing the request to the wrapped service. The helper
+        // only accepts `joltr_core::Request`, so the generic tower service uses
+        // an `Any` downcast and executes the helper on that request shape.
+        let input = parse_derive(
+            r#"
+            struct WithBody {
+                body: CreateUserRequest,
+            }
+            "#,
+        );
+        let parsed = parse_auto_middleware_input(input).expect("parses");
+        let rendered = expand_layer_impl(&parsed).to_string();
+        let extract_pos = rendered
+            .find("WithBody :: __jolt_extract_from (__jolt_req)")
+            .expect("extraction helper call present");
+        let inner_call_pos = rendered
+            .find(
+                ":: joltr_core :: tower :: Service < __Req >> :: call (& mut self . inner , __req)",
+            )
+            .expect("inner.call delegation present");
+        assert!(
+            extract_pos < inner_call_pos,
+            "extraction must run before inner.call, rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("__Req : :: core :: any :: Any"),
+            "field-bearing middleware must bound request type for downcast, rendered: {rendered}"
         );
     }
 
