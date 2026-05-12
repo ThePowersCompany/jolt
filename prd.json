@@ -130,7 +130,7 @@
       "phase": "Phase 6",
       "description": "Add ws! /ws/chat with WebSocketHandler trait impl. Demonstrate on_open, on_message (broadcast via PubSub), on_close. Use AuthWsJwtLayer for token auth.",
       "files": ["examples/basic/src/chat.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "16",
@@ -330,6 +330,42 @@
     },
     {
       "id": "38",
+      "title": "WebSocket integration sends on_open message",
+      "phase": "Finalization",
+      "description": "Fix the WebSocket upgrade/session path so a handler's on_open callback can send an initial message to the connected client before normal message exchange continues. Preserve invalid-token rejection behavior.",
+      "files": ["joltr-core/src/websocket.rs", "joltr-macros/src/ws.rs"],
+      "tests": ["cargo test -p joltr-core --test ws_integration"],
+      "passes": true
+    },
+    {
+      "id": "39",
+      "title": "WebSocket lifecycle ordering regression test",
+      "phase": "Finalization",
+      "description": "Add or tighten a regression test that proves WebSocket callbacks run in the documented order for an authenticated connection: on_open sends welcome, client message reaches on_message, response is delivered, and close/shutdown callbacks run without dropping queued sends.",
+      "files": ["joltr-core/tests/ws_integration.rs", "joltr-core/src/websocket.rs"],
+      "tests": ["cargo test -p joltr-core --test ws_integration valid_token_upgrade_and_message_exchange"],
+      "passes": false
+    },
+    {
+      "id": "40",
+      "title": "Refresh proc macro status docs",
+      "phase": "Finalization",
+      "description": "Update stale phase/status documentation in joltr-macros so AutoMiddleware, PatchQuery, TsExport, and ws! docs describe the implemented behavior instead of early placeholder/current-phase notes.",
+      "files": ["joltr-macros/src/lib.rs", "joltr-macros/src/auto_middleware.rs", "joltr-macros/src/patch_query.rs", "joltr-macros/src/ts_export.rs", "joltr-macros/src/ws.rs"],
+      "tests": ["cargo test -p joltr-macros", "cargo test -p joltr-core --test auto_middleware_derive --test patch_query_derive", "cargo test -p joltr-types --test ts_export_integration"],
+      "passes": false
+    },
+    {
+      "id": "41",
+      "title": "Remove workspace test warning",
+      "phase": "Finalization",
+      "description": "Remove the unused ParseMethodError import reported by cargo test so the full workspace test run is clean of warnings introduced by the Rust port test suite.",
+      "files": ["joltr-core/src/tests.rs"],
+      "tests": ["cargo test --workspace"],
+      "passes": false
+    },
+    {
+      "id": "42",
       "title": "Final Rust port verification docs",
       "phase": "Finalization",
       "description": "Document the final local verification path for the Rust port: cargo check/test, example Docker build, generated TypeScript types, and the TypeScript integration test. Include the expected endpoint URL and response contract for the example mini project.",

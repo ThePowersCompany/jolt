@@ -502,6 +502,38 @@ Blockers or next notes:
 - No blockers. Remaining unfinished example items are WebSocket chat (#15), background task/DB migration (#16), and template rendering (#17).
 
 
+2026-05-12 PRD #15 - Example app: WebSocket chat endpoint
+
+Completed:
+- Added `examples/basic/src/chat.rs` with a `ws!`-registered `/ws/chat` route, `ChatHandler` WebSocket lifecycle impl, shared chat `PubSub`, text-message publish/broadcast, and `on_close` forwarder cleanup.
+- Wired the chat router into `examples/basic/src/main.rs` as the extra router passed to `JoltRServer::start`.
+- Wrapped the chat route with `AuthWsJwtLayer` and used the same example JWT config in the `ws!` macro auth function.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 8 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --test ws_macro --test ws_pubsub_integration --test ws_auth_upgrade` -> 7 passed.
+- `cargo test -p joltr-core --lib websocket` -> 37 passed with the same pre-existing warning.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Used a module-level `OnceLock<Arc<PubSub>>` because the current `ws!` macro constructs handlers with `Default` and does not inject app state or PubSub into `WebSocketSender`.
+- Kept the route behind `AuthWsJwtLayer` even though `ws!` also validates the token via `auth_fn`; this satisfies the example requirement and keeps the workaround explicit until the WS macro and auth layer converge.
+- Forwarded PubSub messages as the existing `PubSubMessage` JSON shape so clients receive `{ channel, payload, sender_id }` consistently with core PubSub tests.
+
+Files changed:
+- `examples/basic/src/chat.rs` (new)
+- `examples/basic/src/main.rs`
+- `prd.json` (item 15 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished example items are background task/DB migration (#16) and template rendering (#17).
+
+
 2026-05-12 PRD #16 - Example app: background task and DB migration
 
 Completed:
@@ -978,7 +1010,7 @@ Blockers or next notes:
 
 Completed:
 - Added `examples/basic/public/app.css` as the example app's public static asset.
-- Wired `FileServeLayer::new("/static", PUBLIC_DIR)` into the example router through an axum fallback service, so unmatched `/static/*` requests serve files while other unknown paths still return 404.
+- Wired `FileServeLayer::new("/static", PUBLIC_DIR)` into the example's extra router through an axum fallback service, so unmatched `/static/*` requests serve files while other unknown paths still return 404.
 - Added a serving-router test proving `/static/app.css` is served through the configured static prefix.
 
 Verification:
@@ -1224,3 +1256,27 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. All PRD items are now marked complete and the documented final verification path passes locally.
+
+
+2026-05-12 PRD #38 - WebSocket integration sends on_open message
+
+Completed:
+- Verified the current WebSocket upgrade/session path spawns the writer before `on_open`, allowing an `on_open` callback to send the initial `welcome` frame before normal message exchange.
+- Preserved invalid-token rejection behavior; the raw-socket integration still returns 401 without upgrading for bad tokens.
+
+Verification:
+- `cargo test -p joltr-core --test ws_integration` -> 2 passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+- `python3 -m json.tool prd.json` -> passed.
+
+Key decisions:
+- Made no code changes because the focused integration already passed against the current WebSocket macro/session implementation.
+- Kept PRD #39 open because lifecycle ordering regression coverage is a separate task.
+
+Files changed:
+- `prd.json` (item 38 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #39 remains the next WebSocket finalization item.
