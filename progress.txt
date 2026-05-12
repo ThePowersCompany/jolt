@@ -1280,3 +1280,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #39 remains the next WebSocket finalization item.
+
+
+2026-05-12 PRD #39 - WebSocket lifecycle ordering regression test
+
+Completed:
+- Tightened `valid_token_upgrade_and_message_exchange` to assert the authenticated WebSocket lifecycle order: `set_claims`, `on_open`, `on_ready`, text `on_message`, close `on_message`, `on_close`, and `on_shutdown`.
+- Fixed the raw upgrade response reader so it stops exactly at the HTTP header terminator and does not consume the first WebSocket frame sent by `on_open`.
+- Updated generated `ws!` shutdown to signal the writer task, close and drain the writer receiver, close the sink, and await the writer before `on_shutdown` instead of aborting the writer and risking queued frame loss.
+
+Verification:
+- `cargo test -p joltr-core --test ws_integration valid_token_upgrade_and_message_exchange` -> failed before the fix, then passed.
+- `cargo test -p joltr-core --test ws_integration` -> 2 passed.
+- `cargo test -p joltr-macros --lib ws` -> 17 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept the regression at the raw socket boundary so it verifies the real `ws!` upgrade/session path rather than a helper-only unit path.
+- Used a byte-exact HTTP response read to avoid discarding immediate WebSocket frames when the server writes the 101 response and `welcome` frame in the same TCP packet.
+- Drained the writer channel on shutdown with `UnboundedReceiver::close()` so already queued handler sends can flush while later sends fail instead of keeping shutdown open indefinitely.
+
+Files changed:
+- `joltr-core/tests/ws_integration.rs`
+- `joltr-macros/src/ws.rs`
+- `prd.json` (item 39 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are proc-macro status docs (#40) and the workspace warning cleanup (#41).

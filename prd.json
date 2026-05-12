@@ -344,7 +344,7 @@
       "description": "Add or tighten a regression test that proves WebSocket callbacks run in the documented order for an authenticated connection: on_open sends welcome, client message reaches on_message, response is delivered, and close/shutdown callbacks run without dropping queued sends.",
       "files": ["joltr-core/tests/ws_integration.rs", "joltr-core/src/websocket.rs"],
       "tests": ["cargo test -p joltr-core --test ws_integration valid_token_upgrade_and_message_exchange"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "40",

@@ -279,21 +279,39 @@ pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
                         let (mut __tx, mut __rx) = __socket.split();
                         let (__sender, __writer_rx) =
                             ::joltr_core::WebSocketSender::channel();
+                        let (__writer_shutdown_tx, __writer_shutdown_rx) =
+                            ::tokio::sync::oneshot::channel::<()>();
                         // Writer task: reads frames from the mpsc channel
                         // (fed by handler callbacks) and forwards them into
-                        // the axum sink. When the channel closes (either
-                        // because the WebSocketSender was dropped or
-                        // explicitly closed), the task exits gracefully.
+                        // the axum sink. Shutdown closes the receiver, drains
+                        // already queued frames, then closes the sink.
                         let __writer = ::tokio::spawn(async move {
                             let mut __writer_rx = __writer_rx;
-                            while let ::std::option::Option::Some(
-                                __msg,
-                            ) = __writer_rx.recv().await
-                            {
-                                if __tx.send(__msg).await.is_err() {
-                                    break;
+                            let mut __writer_shutdown_rx = __writer_shutdown_rx;
+                            loop {
+                                ::tokio::select! {
+                                    __msg = __writer_rx.recv() => {
+                                        let ::std::option::Option::Some(__msg) = __msg else {
+                                            break;
+                                        };
+                                        if __tx.send(__msg).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    _ = &mut __writer_shutdown_rx => {
+                                        __writer_rx.close();
+                                        while let ::std::option::Option::Some(__msg) =
+                                            __writer_rx.recv().await
+                                        {
+                                            if __tx.send(__msg).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        break;
+                                    }
                                 }
                             }
+                            let _ = __tx.close().await;
                         });
                         // Construct the handler and drive the lifecycle.
                         let mut __handler = <#handler_type as ::std::default::Default>::default();
@@ -323,7 +341,8 @@ pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
                             }
                         }
                         __handler.on_close().await;
-                        __writer.abort();
+                        let _ = __writer_shutdown_tx.send(());
+                        let _ = __writer.await;
                         __handler.on_shutdown().await;
                     },
                 )

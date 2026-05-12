@@ -9,10 +9,15 @@ use tokio::net::TcpListener;
 use joltr_core::{ws, AuthError, JwtClaims, WebSocketHandler, WebSocketSender, WsMessage};
 
 static RECEIVED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static LIFECYCLE: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
 static WS_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn received() -> &'static Mutex<Vec<String>> {
     RECEIVED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn lifecycle() -> &'static Mutex<Vec<&'static str>> {
+    LIFECYCLE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn ws_test_lock() -> &'static tokio::sync::Mutex<()> {
@@ -23,19 +28,40 @@ fn ws_test_lock() -> &'static tokio::sync::Mutex<()> {
 struct EchoHandler;
 
 impl WebSocketHandler for EchoHandler {
+    fn set_claims(&mut self, _claims: JwtClaims) {
+        lifecycle().lock().unwrap().push("set_claims");
+    }
+
     async fn on_open(&mut self, sender: WebSocketSender) {
+        lifecycle().lock().unwrap().push("on_open");
         let _ = sender.send_text("welcome");
+    }
+
+    async fn on_ready(&mut self, _sender: WebSocketSender) {
+        lifecycle().lock().unwrap().push("on_ready");
     }
 
     async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender) {
         match &msg {
             WsMessage::Text(text) => {
+                lifecycle().lock().unwrap().push("on_message:text");
                 received().lock().unwrap().push(text.clone());
                 let _ = sender.send_text(text);
+                let _ = sender.close();
             }
-            WsMessage::Close(_) => {}
+            WsMessage::Close(_) => {
+                lifecycle().lock().unwrap().push("on_message:close");
+            }
             _ => {}
         }
+    }
+
+    async fn on_close(&mut self) {
+        lifecycle().lock().unwrap().push("on_close");
+    }
+
+    async fn on_shutdown(&mut self) {
+        lifecycle().lock().unwrap().push("on_shutdown");
     }
 }
 
@@ -60,6 +86,7 @@ async fn valid_token_upgrade_and_message_exchange() {
     let _guard = ws_test_lock().lock().await;
     let _ = tracing_subscriber::fmt().try_init();
     received().lock().unwrap().clear();
+    lifecycle().lock().unwrap().clear();
 
     let handler = ws!(
         "/ws",
@@ -116,12 +143,28 @@ async fn valid_token_upgrade_and_message_exchange() {
         "handler must have received the message"
     );
 
+    let close_frame = recv_frame_raw(&mut stream).await;
+    assert_eq!(
+        close_frame,
+        Some(vec![0x88, 0x00]),
+        "expected queued close frame from on_message before shutdown"
+    );
+
     send_close_frame(&mut stream).await;
 
-    let close_frame = recv_frame_raw(&mut stream).await;
-    assert!(
-        close_frame.is_none() || close_frame == Some(vec![0x88, 0x00]),
-        "expected close frame from server after client close"
+    let calls = wait_for_lifecycle_shutdown().await;
+    assert_eq!(
+        calls,
+        vec![
+            "set_claims",
+            "on_open",
+            "on_ready",
+            "on_message:text",
+            "on_message:close",
+            "on_close",
+            "on_shutdown",
+        ],
+        "websocket lifecycle callbacks must run in documented order"
     );
 }
 
@@ -349,11 +392,14 @@ async fn read_response(stream: &mut tokio::net::TcpStream, buf: &mut [u8]) -> us
             break total;
         };
 
-        match tokio::time::timeout(remaining, stream.read(&mut buf[total..])).await {
-            Ok(Ok(0)) | Ok(Err(_)) if total > 0 && contains_empty_line(&buf[..total]) => {
-                break total
+        match tokio::time::timeout(remaining, stream.read_exact(&mut buf[total..total + 1])).await {
+            Ok(Ok(_)) => {
+                total += 1;
+                if contains_empty_line(&buf[..total]) {
+                    break total;
+                }
             }
-            Ok(Ok(0)) => break total,
+            Ok(Err(_)) if total > 0 && contains_empty_line(&buf[..total]) => break total,
             Ok(Err(e)) if e.kind() == ErrorKind::WouldBlock => {
                 if total > 0 && contains_empty_line(&buf[..total]) {
                     break total;
@@ -362,13 +408,23 @@ async fn read_response(stream: &mut tokio::net::TcpStream, buf: &mut [u8]) -> us
                 continue;
             }
             Ok(Err(_)) | Err(_) => break total,
-            Ok(Ok(n)) => {
-                total += n;
-                if contains_empty_line(&buf[..total]) {
-                    break total;
-                }
-            }
         }
+    }
+}
+
+async fn wait_for_lifecycle_shutdown() -> Vec<&'static str> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let calls = lifecycle().lock().unwrap().clone();
+        if calls.contains(&"on_shutdown") {
+            return calls;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return calls;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
