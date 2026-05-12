@@ -6,7 +6,10 @@ use joltr_core::{
     CorsConfig, FileServeLayer, JoltRServer, Method, TlsConfig,
 };
 use joltr_db::{DbConfig, JoltRDb};
-use std::{io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 mod endpoints;
 mod tasks;
@@ -16,9 +19,20 @@ const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
 const PUBLIC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
 const TLS_CERT_CHAIN_ENV: &str = "JOLTR_BASIC_TLS_CERT_CHAIN";
 const TLS_PRIVATE_KEY_ENV: &str = "JOLTR_BASIC_TLS_PRIVATE_KEY";
+const GENERATE_TYPES_ARG: &str = "--generate-types";
+const TYPES_OUT_ENV: &str = "JOLTR_TYPES_OUT";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == GENERATE_TYPES_ARG) {
+        let out_path = write_types_file(&resolve_types_out_path())?;
+        println!(
+            "joltr-basic-example: wrote TypeScript types to {}",
+            out_path.display()
+        );
+        return Ok(());
+    }
+
     migrate_database().await?;
 
     let mut scheduler = tasks::scheduler();
@@ -48,6 +62,34 @@ fn configure_tls_from_env(server: JoltRServer) -> io::Result<JoltRServer> {
         path_from_env(TLS_CERT_CHAIN_ENV),
         path_from_env(TLS_PRIVATE_KEY_ENV),
     )
+}
+
+fn resolve_types_out_path() -> PathBuf {
+    if let Ok(path) = std::env::var(TYPES_OUT_ENV) {
+        return PathBuf::from(path);
+    }
+
+    workspace_root().join("types.d.ts")
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| panic!("example manifest directory has no workspace root parent"))
+        .to_path_buf()
+}
+
+fn write_types_file(out_path: &Path) -> io::Result<PathBuf> {
+    if let Some(parent) = out_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(out_path, joltr_types::render())?;
+    Ok(out_path.to_path_buf())
 }
 
 fn path_from_env(name: &str) -> Option<PathBuf> {
@@ -181,6 +223,33 @@ mod tests {
         assert!(missing_key.to_string().contains(TLS_CERT_CHAIN_ENV));
         assert!(missing_key.to_string().contains(TLS_PRIVATE_KEY_ENV));
         assert_eq!(missing_cert.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn generated_types_file_includes_typed_test_response_contract() {
+        let out_path = tempfile_in_target("types");
+
+        let written_path = write_types_file(&out_path).expect("types file writes");
+        let contents = fs::read_to_string(&written_path).expect("types file is readable");
+
+        assert!(contents.contains("export interface TypedTestResponse {"));
+        assert!(contents.contains("contract_version: number;"));
+        assert!(contents.contains("service: string;"));
+        assert!(contents.contains("ok: boolean;"));
+        assert!(contents.contains("features: string[];"));
+
+        let _ = fs::remove_file(written_path);
+    }
+
+    fn tempfile_in_target(suffix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+
+        workspace_root()
+            .join("target")
+            .join(format!("joltr-basic-example-{nanos}-{suffix}.d.ts"))
     }
 }
 

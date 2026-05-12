@@ -291,6 +291,15 @@
       "files": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
       "tests": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
       "passes": true
+    },
+    {
+      "id": "34",
+      "title": "Example app emits TypeScript types",
+      "phase": "Finalization",
+      "description": "Wire the example app so its TsExport-derived endpoint response types can be rendered into a generated types.d.ts artifact during build or test. The generated file must include the test endpoint response type used by the TypeScript integration test.",
+      "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs", "examples/basic/src/endpoints.rs", "joltr-types/src/main.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs", "examples/basic/src/main.rs"],
+      "passes": true
     }
   ]
 }

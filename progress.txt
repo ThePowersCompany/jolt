@@ -1069,3 +1069,30 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #34 can now wire this TsExport-derived response into generated `types.d.ts` output.
+
+
+2026-05-12 PRD #34 - Example app emits TypeScript types
+
+Completed:
+- Added `--generate-types` to `joltr-basic-example`; it renders the example binary's linked `TsExport` inventory with `joltr_types::render()` and writes `types.d.ts` to `JOLTR_TYPES_OUT` or the workspace root.
+- Added a focused test that writes a temporary generated file and asserts it includes the `TypedTestResponse` contract used by the integration endpoint.
+
+Verification:
+- `cargo test -p joltr-basic-example generated_types_file_includes_typed_test_response_contract` -> 1 passed.
+- `JOLTR_TYPES_OUT="target/joltr-basic-example-generated-types.d.ts" cargo run -q -p joltr-basic-example -- --generate-types` -> wrote a file containing `export interface TypedTestResponse`.
+- `cargo test -p joltr-basic-example && cargo test -p joltr-types && cargo fmt --check && cargo check --workspace --all-targets` -> passed; workspace check still reports the pre-existing `ParseMethodError` unused-import warning.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Generated from the example binary instead of the standalone `joltr-types` binary because inventory registrations are scoped to the linked binary, and the standalone binary does not link app-local derives.
+- Used an explicit `--generate-types` mode so normal server startup, migrations, tasks, and TLS behavior remain unchanged.
+- Reused `JOLTR_TYPES_OUT` for path override to match the existing `joltr-types` binary convention.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `prd.json` (item 34 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #35 can package the example; PRD #36 can call `cargo run -p joltr-basic-example -- --generate-types` or the compiled binary's `--generate-types` mode before TypeScript checks.
