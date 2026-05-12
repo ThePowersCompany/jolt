@@ -167,6 +167,15 @@
       "passes": true
     },
     {
+      "id": "20",
+      "title": "TLS rejects invalid certificate configuration",
+      "phase": "Phase 6",
+      "description": "Surface a startup error when TLS cert or key files are missing, unreadable, or malformed. Add tests that pin the error path without binding a long-lived server.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/tests/tls.rs"],
+      "passes": true
+    },
+    {
       "id": "21",
       "title": "Server threads build owned Tokio runtime",
       "phase": "Phase 1",

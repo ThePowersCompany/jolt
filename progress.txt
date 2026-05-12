@@ -686,3 +686,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #25 can build on this call site to honor `RequestExt::is_finished()` before extraction and delegation.
+
+
+2026-05-12 PRD #20 - TLS rejects invalid certificate configuration
+
+Completed:
+- Added explicit TLS cert/key path validation before rustls config loading.
+- Startup now returns clear errors for missing files, unreadable files, non-file paths, and malformed PEM material.
+- Added `joltr-core/tests/tls.rs` integration coverage through `JoltRServer::start` without keeping a server bound.
+
+Verification:
+- `cargo fmt --package joltr-core -- --check` -> clean after formatting.
+- `cargo test -p joltr-core --test tls` -> 4 passed.
+- `cargo test -p joltr-core --lib server::` -> 20 passed with the pre-existing `ParseMethodError` unused-import warning.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Validated path readability before calling `RustlsConfig::from_pem_file` so missing and unreadable cert/key files fail before any bind attempt.
+- Mapped PEM parsing failures to `InvalidInput` with TLS-specific context, while preserving filesystem error kinds for missing and permission failures.
+- Used a Unix permission-bit check in addition to opening the file so unreadable-file coverage is stable even in privileged test environments.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `joltr-core/tests/tls.rs` (new)
+- `prd.json` (item 20 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are AutoMiddleware extraction/short-circuit work (#22/#23/#25), TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).

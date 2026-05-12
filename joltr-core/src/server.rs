@@ -19,7 +19,7 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::Router;
@@ -300,7 +300,54 @@ where
 }
 
 async fn rustls_config_from_tls_config(tls: &TlsConfig) -> io::Result<RustlsConfig> {
-    RustlsConfig::from_pem_file(&tls.cert_chain_path, &tls.private_key_path).await
+    ensure_tls_file_readable(&tls.cert_chain_path, "TLS certificate chain").await?;
+    ensure_tls_file_readable(&tls.private_key_path, "TLS private key").await?;
+    RustlsConfig::from_pem_file(&tls.cert_chain_path, &tls.private_key_path)
+        .await
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid TLS certificate/key configuration: {err}"),
+            )
+        })
+}
+
+async fn ensure_tls_file_readable(path: &Path, label: &str) -> io::Result<()> {
+    let metadata = tokio::fs::metadata(path).await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{label} path '{}' is not readable: {err}", path.display()),
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} path '{}' must be a file", path.display()),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o444 == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{label} path '{}' is not readable", path.display()),
+            ));
+        }
+    }
+
+    tokio::fs::File::open(path)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("{label} path '{}' is not readable: {err}", path.display()),
+            )
+        })
 }
 
 #[cfg(test)]
