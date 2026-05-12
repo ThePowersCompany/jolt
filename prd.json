@@ -34,7 +34,7 @@
       "description": "Implement Cookie::parse_all(header_value) that parses the Cookie request header (semicolon-separated name=value pairs) into Vec<Cookie>. Add Request::cookies() convenience method that parses from the Cookie header.",
       "files": ["joltr-core/src/cookie.rs", "joltr-core/src/request.rs"],
       "tests": ["joltr-core/tests/cookie.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "5",

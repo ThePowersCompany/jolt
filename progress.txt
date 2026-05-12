@@ -314,3 +314,33 @@ Files changed:
 Next notes:
 - PRD #4 can now build request-cookie parsing separately from this response-cookie parser.
 - PRD #5 can continue using the builder/display path; no response helper changes were made here.
+
+
+2026-05-12 PRD #4 — Cookie request header parsing
+
+Completed:
+- Added `Cookie::parse_all(header_value) -> Vec<Cookie>` for semicolon-separated Cookie request headers.
+- Added `Request::cookies()` to parse cookies from the request `Cookie` header.
+- Added cookie integration tests for normal parsing, invalid segment skipping, value preservation after `=`, and Request header parsing.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 10 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no repo-root `package.json` and no `server/package.json`.
+
+Key decisions:
+- `Cookie::parse_all` returns a best-effort `Vec<Cookie>` and skips malformed segments, matching the existing request-cookie behavior instead of introducing a new error type.
+- Values are split on the first `=` only, so cookie values can contain additional equals signs.
+- `Request::cookies()` parses from headers each call and leaves the existing `Request::cookies` field / `Request::cookie()` behavior unchanged.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/src/request.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 4 → passes: true)
+- `progress.txt`
+
+Next notes:
+- PRD #5 can now use the existing `SetCookie` builder/display path for response helpers.

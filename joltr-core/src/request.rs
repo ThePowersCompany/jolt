@@ -41,6 +41,13 @@ impl Request {
         self.cookies.iter().find(|c| c.name == name)
     }
 
+    /// Parse all cookies from the Cookie request header.
+    pub fn cookies(&self) -> Vec<Cookie> {
+        self.header("Cookie")
+            .map(Cookie::parse_all)
+            .unwrap_or_default()
+    }
+
     /// Whether middleware has marked this request as finished, signaling
     /// downstream layers to skip further handler dispatch.
     pub fn has_finished(&self) -> bool {

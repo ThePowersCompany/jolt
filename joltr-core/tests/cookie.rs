@@ -1,4 +1,14 @@
-use joltr_core::{SameSite, SetCookie};
+use std::collections::HashMap;
+
+use axum::http::{HeaderMap, HeaderValue};
+use joltr_core::{Cookie, Method, Request, SameSite, SetCookie};
+
+fn cookie(name: &str, value: &str) -> Cookie {
+    Cookie {
+        name: name.to_string(),
+        value: value.to_string(),
+    }
+}
 
 #[test]
 fn set_cookie_new_renders_name_value() {
@@ -78,4 +88,52 @@ fn set_cookie_parse_rejects_invalid_required_parts() {
     assert!(SetCookie::parse("session=abc; SameSite=Maybe").is_err());
     assert!(SetCookie::parse("session=abc; Max-Age=soon").is_err());
     assert!(SetCookie::parse("session=abc; Secure=true").is_err());
+}
+
+#[test]
+fn cookie_parse_all_reads_semicolon_separated_name_value_pairs() {
+    let cookies = Cookie::parse_all("sid=abc123; theme=dark; token=a=b=c");
+
+    assert_eq!(
+        cookies,
+        vec![
+            cookie("sid", "abc123"),
+            cookie("theme", "dark"),
+            cookie("token", "a=b=c")
+        ]
+    );
+}
+
+#[test]
+fn cookie_parse_all_trims_pairs_and_skips_invalid_segments() {
+    let cookies = Cookie::parse_all(" sid = abc123 ; Secure ; =missing ; empty= ; theme = dark ");
+
+    assert_eq!(
+        cookies,
+        vec![
+            cookie("sid", "abc123"),
+            cookie("empty", ""),
+            cookie("theme", "dark")
+        ]
+    );
+}
+
+#[test]
+fn request_cookies_parse_cookie_header() {
+    let mut headers = HeaderMap::new();
+    headers.insert("Cookie", HeaderValue::from_static("sid=abc123; theme=dark"));
+    let req = Request {
+        method: Method::Get,
+        path: "/".to_string(),
+        headers,
+        query_params: HashMap::new(),
+        body: Vec::new(),
+        cookies: Vec::new(),
+        finished: false,
+    };
+
+    assert_eq!(
+        req.cookies(),
+        vec![cookie("sid", "abc123"), cookie("theme", "dark")]
+    );
 }

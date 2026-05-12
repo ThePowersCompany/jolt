@@ -8,6 +8,31 @@ pub struct Cookie {
     pub value: String,
 }
 
+impl Cookie {
+    pub fn parse_all(header_value: &str) -> Vec<Self> {
+        header_value
+            .split(';')
+            .filter_map(|pair| {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    return None;
+                }
+
+                let (name, value) = pair.split_once('=')?;
+                let name = name.trim();
+                if name.is_empty() {
+                    return None;
+                }
+
+                Some(Self {
+                    name: name.to_string(),
+                    value: value.trim().to_string(),
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
     Lax,
