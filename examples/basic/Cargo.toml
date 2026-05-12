@@ -6,8 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+axum = { workspace = true }
 joltr-core = { path = "../../joltr-core" }
 joltr-db = { path = "../../joltr-db" }
 joltr-templates = { path = "../../joltr-templates" }
 joltr-utils = { path = "../../joltr-utils" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }

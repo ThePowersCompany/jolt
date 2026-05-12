@@ -122,7 +122,7 @@
       "phase": "Phase 6",
       "description": "Add GET /api/health (JSON { status: ok }), POST /api/echo (returns request body as JSON), GET /api/items/:id (query param filter). Demonstrate #[endpoint], body parsing, query params, path segments.",
       "files": ["examples/basic/src/endpoints.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "15",

@@ -469,3 +469,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #14 can now add health, echo, and parameterized endpoints inside the scaffold.
+
+
+2026-05-12 PRD #14 - Example app: health, echo, and parameterized endpoint
+
+Completed:
+- Added `examples/basic/src/endpoints.rs` with `GET /api/health` via `#[endpoint]`, `POST /api/echo` returning the parsed JSON request body, and `GET /api/items/:id` returning the final path segment plus optional `filter` query param.
+- Wired the request-driven echo and item endpoints into `examples/basic/src/main.rs`.
+- Added focused unit/router tests for the health response, echo JSON parsing, item path/query extraction, and the dynamic item route.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-basic-example` -> 4 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `**/package.json` search found no npm project; guarded `npm run type-check` and guarded server type-check commands were no-ops.
+
+Key decisions:
+- Used the `#[endpoint]` macro for the stateless health endpoint and manual `Endpoint` impls for echo/item because those examples need direct access to `Request` for body, query, and path-segment parsing.
+- Kept item path handling simple by parsing the final path segment from `Request::path`; route matching remains `"/api/items/:id"` as specified.
+- Added `axum` as a direct example dependency because the current `#[endpoint]` macro expansion references `::axum`.
+
+Files changed:
+- `Cargo.lock`
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 14 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished example items are WebSocket chat (#15), background task/DB migration (#16), and template rendering (#17).

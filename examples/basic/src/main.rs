@@ -1,5 +1,7 @@
 use joltr_core::{CorsConfig, JoltRServer, Method};
 
+mod endpoints;
+
 const DEFAULT_PORT: u16 = 3000;
 
 #[tokio::main]
@@ -15,6 +17,8 @@ async fn main() -> std::io::Result<()> {
     JoltRServer::new()
         .port(DEFAULT_PORT)
         .cors(cors)
+        .endpoint(endpoints::EchoEndpoint)
+        .endpoint(endpoints::ItemEndpoint)
         .start(Default::default())
         .await
 }
