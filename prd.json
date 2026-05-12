@@ -362,7 +362,7 @@
       "description": "Remove the unused ParseMethodError import reported by cargo test so the full workspace test run is clean of warnings introduced by the Rust port test suite.",
       "files": ["joltr-core/src/tests.rs"],
       "tests": ["cargo test --workspace"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "42",

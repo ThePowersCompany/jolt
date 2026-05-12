@@ -5,7 +5,7 @@
 //! relevant slice.
 
 mod method {
-    use crate::{Method, ParseMethodError};
+    use crate::Method;
     use std::str::FromStr;
 
     const ALL_METHODS: &[(Method, &str)] = &[

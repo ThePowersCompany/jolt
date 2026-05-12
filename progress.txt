@@ -1311,3 +1311,26 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished items are proc-macro status docs (#40) and the workspace warning cleanup (#41).
+
+
+2026-05-12 PRD #41 - Remove workspace test warning
+
+Completed:
+- Removed the unused `ParseMethodError` import from `joltr-core/src/tests.rs` so the workspace test suite no longer emits that warning.
+
+Verification:
+- `cargo test --workspace` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+- `python3 -m json.tool prd.json` -> passed.
+
+Key decisions:
+- Kept the change to the exact unused import instead of touching the broader dirty test module.
+
+Files changed:
+- `joltr-core/src/tests.rs`
+- `prd.json` (item 41 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #40 remains the only unfinished item.
