@@ -1036,3 +1036,36 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. All PRD items are now marked complete.
+
+
+2026-05-12 PRD #33 - Example app exposes typed test endpoint
+
+Completed:
+- Added `GET /api/test/typed` via the `#[endpoint]` macro with a deterministic `TypedTestResponse` JSON body.
+- Derived `TsExport` on the response type so later TypeScript generation/integration items have a concrete contract to emit and assert.
+- Added focused endpoint and serving-router tests for the stable runtime response shape.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 19 passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo fmt --check` -> clean.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used stable scalar and array fields (`contract_version`, `service`, `ok`, `features`) so a TypeScript integration test can assert both runtime JSON and generated type shape without external services.
+- Kept the endpoint macro-registered like the existing health endpoint instead of manually wiring it through `main`, preserving the example's macro demonstration.
+- Added direct `joltr-macros` and `joltr-types` dependencies to the example because `TsExport` is not re-exported from `joltr-core` and the derive emits `::joltr_types` paths.
+
+Files changed:
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 33 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #34 can now wire this TsExport-derived response into generated `types.d.ts` output.

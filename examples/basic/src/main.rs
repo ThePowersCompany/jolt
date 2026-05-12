@@ -95,6 +95,7 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use joltr_core::tower::ServiceExt;
+    use serde_json::Value;
 
     #[tokio::test]
     async fn serving_router_serves_public_asset_from_static_prefix() {
@@ -116,6 +117,30 @@ mod tests {
             .expect("body collects");
         let body = std::str::from_utf8(&body).expect("asset is utf-8");
         assert!(body.contains(".joltr-basic-example"));
+    }
+
+    #[tokio::test]
+    async fn serving_router_exposes_typed_test_endpoint() {
+        let router = JoltRServer::new().build_serving_router(static_assets_router());
+
+        let response = router
+            .oneshot(
+                AxumRequest::builder()
+                    .uri("/api/test/typed")
+                    .body(Body::empty())
+                    .expect("typed endpoint request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        assert_eq!(response.status(), AxumStatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body collects");
+        let parsed: Value = serde_json::from_slice(&body).expect("valid JSON body");
+        assert_eq!(parsed["contract_version"], 1);
+        assert_eq!(parsed["service"], "joltr-basic-example");
+        assert_eq!(parsed["ok"], true);
     }
 
     #[test]

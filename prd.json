@@ -282,6 +282,15 @@
       "files": ["examples/basic/src/main.rs", "examples/basic/README.md"],
       "tests": ["examples/basic/src/main.rs"],
       "passes": true
+    },
+    {
+      "id": "33",
+      "title": "Example app exposes typed test endpoint",
+      "phase": "Finalization",
+      "description": "Add a deterministic test endpoint to examples/basic that uses JoltR endpoint macros and returns a typed JSON response derived with TsExport. The endpoint should be safe for CI and return stable fields that a TypeScript integration test can assert.",
+      "files": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
+      "tests": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
+      "passes": true
     }
   ]
 }

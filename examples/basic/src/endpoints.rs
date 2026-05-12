@@ -17,6 +17,16 @@ struct HealthResponse {
 
 impl JsonBody for HealthResponse {}
 
+#[derive(Debug, PartialEq, Serialize, joltr_macros::TsExport)]
+pub(crate) struct TypedTestResponse {
+    contract_version: u32,
+    service: String,
+    ok: bool,
+    features: Vec<String>,
+}
+
+impl JsonBody for TypedTestResponse {}
+
 pub(crate) struct TemplateEndpoint {
     engine: TemplateEngine,
 }
@@ -77,6 +87,11 @@ fn index_context() -> IndexContext {
                 method: "GET",
                 path: "/api/items/:id?filter=active",
                 description: "Read path and query parameters",
+            },
+            RouteInfo {
+                method: "GET",
+                path: "/api/test/typed",
+                description: "Stable typed response for integration tests",
             },
             RouteInfo {
                 method: "WS",
@@ -162,6 +177,17 @@ struct ItemResponse {
 
 impl JsonBody for ItemResponse {}
 
+#[derive(Default)]
+struct TypedTestEndpoint;
+
+#[endpoint("/api/test/typed")]
+impl TypedTestEndpoint {
+    #[get]
+    fn typed_test(&self) -> Response<TypedTestResponse> {
+        Response::new(StatusCode::Ok, typed_test_body())
+    }
+}
+
 fn echo_body(req: &Request) -> (StatusCode, Value) {
     match req.json::<Value>() {
         Ok(body) => (StatusCode::Ok, body),
@@ -179,6 +205,15 @@ fn item_body(req: &Request) -> ItemResponse {
     ItemResponse {
         id: item_id_from_path(&req.path).to_string(),
         filter: req.query("filter").map(str::to_string),
+    }
+}
+
+fn typed_test_body() -> TypedTestResponse {
+    TypedTestResponse {
+        contract_version: 1,
+        service: "joltr-basic-example".to_string(),
+        ok: true,
+        features: vec!["endpoint-macro".to_string(), "ts-export".to_string()],
     }
 }
 
@@ -255,6 +290,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn typed_test_endpoint_returns_stable_body() {
+        let response = TypedTestEndpoint.typed_test();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.body, typed_test_body());
+    }
+
     #[tokio::test]
     async fn item_endpoint_route_returns_path_segment_and_filter_query_param() {
         let router = joltr_core::JoltRServer::new()
@@ -304,6 +347,30 @@ mod tests {
         let html = std::str::from_utf8(&body).expect("body is utf8");
         assert!(html.contains("JoltR Basic Example"));
         assert!(html.contains("/api/health"));
+        assert!(html.contains("/api/test/typed"));
         assert!(html.contains("/ws/chat"));
+    }
+
+    #[tokio::test]
+    async fn typed_test_endpoint_route_returns_stable_json_contract() {
+        let router = joltr_core::JoltRServer::new().into_router();
+        let req = AxumRequest::builder()
+            .method("GET")
+            .uri("/api/test/typed")
+            .body(Body::empty())
+            .expect("request builds");
+
+        let response = router.oneshot(req).await.expect("request succeeds");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body collects");
+        let parsed: Value = serde_json::from_slice(&body).expect("valid JSON body");
+        assert_eq!(parsed["contract_version"], 1);
+        assert_eq!(parsed["service"], "joltr-basic-example");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["features"][0], "endpoint-macro");
+        assert_eq!(parsed["features"][1], "ts-export");
     }
 }
