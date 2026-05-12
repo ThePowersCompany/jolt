@@ -1,0 +1,13 @@
+[package]
+name = "joltr-basic-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+joltr-core = { path = "../../joltr-core" }
+joltr-db = { path = "../../joltr-db" }
+joltr-templates = { path = "../../joltr-templates" }
+joltr-utils = { path = "../../joltr-utils" }
+tokio = { workspace = true }

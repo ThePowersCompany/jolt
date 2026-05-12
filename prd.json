@@ -114,7 +114,7 @@
       "phase": "Phase 6",
       "description": "Create examples/basic/ with Cargo.toml depending on joltr-core, joltr-db, joltr-templates, joltr-utils. Add a main.rs that starts a JoltRServer with CORS config and tracing.",
       "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "14",

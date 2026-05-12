@@ -438,3 +438,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD items are the example app tasks (#13-#17).
+
+
+2026-05-12 PRD #13 - Example app: scaffold examples/basic crate
+
+Completed:
+- Added `examples/basic` as a workspace member and binary crate.
+- Added `examples/basic/Cargo.toml` depending on `joltr-core`, `joltr-db`, `joltr-templates`, and `joltr-utils`.
+- Added `examples/basic/src/main.rs` that starts `JoltRServer` on port 3000 with explicit CORS config; request tracing is provided by `JoltRServer::start`.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-basic-example` -> passed, 0 tests.
+- Root/server npm type-checks were guarded no-ops: `**/package.json` search found no npm project and no `server/` package in this workspace.
+
+Key decisions:
+- Added the example crate to the workspace so normal workspace checks compile it.
+- Kept the scaffold minimal and endpoint-free because PRD #14 owns the first API routes.
+- Used `Default::default()` for the extra axum router so the example does not need to expose axum in its source.
+
+Files changed:
+- `Cargo.lock`
+- `Cargo.toml`
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 13 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #14 can now add health, echo, and parameterized endpoints inside the scaffold.
