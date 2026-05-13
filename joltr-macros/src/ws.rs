@@ -1,31 +1,19 @@
-//! `ws!` function-like proc-macro — phase29 entry point.
+//! `ws!` function-like proc-macro.
 //!
-//! Phase29 ladder:
-//! - JOLTR-RS-122: parse the `ws!(path, HandlerType, subprotocol = "proto",
-//!   auth_fn = fn_name)` call form and emit a witness expression.
-//! - JOLTR-RS-123: tighten the `auth_fn` signature check and route Err to 401.
-//! - JOLTR-RS-124 (this iteration): replace the witness-struct return with the
-//!   real axum WS upgrade-handler — extract subprotocol, validate token via
-//!   auth_fn, drive the [`joltr_core::WebSocketHandler`] lifecycle through 120's
-//!   `WsMessage` variants. The expansion is an async closure that axum can
-//!   wire directly as a route handler:
-//!   1. compile-time-checks handler type (`WebSocketHandler + Default + Send`)
-//!      and auth_fn (`fn(&str) -> Result<JwtClaims, AuthError>`),
-//!   2. at runtime, extracts the JWT from `Sec-WebSocket-Protocol:
-//!      joltr-jwt, <token>` via [`joltr_core::extract_ws_jwt_token`],
-//!   3. validates the token via `#auth_fn`; on Err returns 401,
-//!   4. on Ok, upgrades the WebSocket and spawns a writer task that forwards
-//!      mpsc-sent frames into the axum sink,
-//!   5. drives the handler lifecycle: set_claims → on_open → on_ready →
-//!      on_message loop → on_close → on_shutdown.
-//! - JOLTR-RS-125: phase29 closing integration test (full connect / send /
-//!   receive roundtrip against a running axum server).
+//! The macro parses `ws!(path, HandlerType, subprotocol = "proto", auth_fn = fn)`
+//! and emits an axum-compatible async route handler. The expansion:
+//! 1. compile-time-checks `HandlerType: WebSocketHandler + Default + Send`,
+//! 2. compile-time-checks `auth_fn: Fn(&str) -> Result<JwtClaims, AuthError>`,
+//! 3. extracts a JWT from `Sec-WebSocket-Protocol: joltr-jwt, <token>`,
+//! 4. returns `401 Unauthorized` for missing/invalid tokens or auth failures,
+//! 5. upgrades the WebSocket and spawns a writer task for handler sends,
+//! 6. drives `set_claims -> on_open -> on_ready -> on_message* -> on_close`,
+//! 7. signals the writer, drains queued frames, closes the sink, and waits for
+//!    the writer before `on_shutdown` returns.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
-//! against a `proc_macro2::TokenStream` directly. Mirrors the same split
-//! established by [`crate::auto_middleware::parse_auto_middleware_input`]
-//! (JOLTR-RS-046) and [`crate::patch_query::parse_patch_query_input`]
-//! (JOLTR-RS-110).
+//! against a `proc_macro2::TokenStream` directly, matching the other macro
+//! modules' parser/codegen split.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -34,10 +22,8 @@ use syn::{Ident, LitStr, Path, Token, Type};
 
 /// Parsed shape of a `ws!(...)` invocation.
 ///
-/// All four fields are required at JOLTR-RS-122. Later slices may add optional
-/// fields (e.g. a `state = state_type` parameter to thread an `Arc<AppState>`
-/// into the handler constructor) but the four anchored here form the minimum
-/// invocation for the route + auth + upgrade pipeline.
+/// All four fields are required. Unknown named arguments are rejected so the
+/// route + auth + upgrade pipeline has a single stable invocation shape.
 #[derive(Debug)]
 pub(crate) struct WsMacroInput {
     pub(crate) path: LitStr,
@@ -159,17 +145,15 @@ impl Parse for WsMacroInput {
 /// Parses via [`WsMacroInput`]'s `Parse` impl and emits an async-closure
 /// expression that axum can wire as a route handler. On parse failure the
 /// emission is a single `compile_error!` token (with the span the parser
-/// attached) — no partial codegen. Mirrors
-/// [`crate::patch_query::expand_patch_query`]'s contract from JOLTR-RS-110.
+/// attached) — no partial codegen.
 ///
 /// The emitted closure:
 /// 1. extract JWT from `Sec-WebSocket-Protocol: joltr-jwt, <token>` via
-///    [`joltr_core::extract_ws_jwt_token`] (JOLTR-RS-075),
-/// 2. validate the token via `#auth_fn` (JOLTR-RS-123 signature), returning
-///    401 on rejection,
+///    [`joltr_core::extract_ws_jwt_token`],
+/// 2. validate the token via `#auth_fn`, returning 401 on rejection,
 /// 3. upgrade the WebSocket and drive the [`joltr_core::WebSocketHandler`]
-///    lifecycle (JOLTR-RS-118..121) through on_open → on_ready → on_message
-///    loop → on_close → on_shutdown.
+///    lifecycle through set_claims → on_open → on_ready → on_message loop →
+///    on_close → writer drain → on_shutdown.
 pub(crate) fn expand_ws_macro(input: TokenStream) -> TokenStream {
     let parsed: WsMacroInput = match syn::parse2(input) {
         Ok(p) => p,

@@ -1334,3 +1334,35 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. PRD #40 remains the only unfinished item.
+
+
+2026-05-12 PRD #40 - Refresh proc macro status docs
+
+Completed:
+- Refreshed `joltr-macros` public/module docs for AutoMiddleware, PatchQuery, TsExport, and `ws!` so they describe the implemented behavior instead of early phase/current-slice placeholders.
+- Updated AutoMiddleware internals docs around ordering markers, field-bearing service extraction, typed query handling, by-ref request borrowing, and finished-request short-circuiting.
+- Updated PatchQuery, TsExport, and `ws!` docs to cover current SQL placeholder generation, link-time TypeScript inventory registration, tagged enum unions, and WebSocket lifecycle/writer-drain behavior.
+
+Verification:
+- `cargo test -p joltr-macros` -> 272 unit tests passed; doc tests passed with 2 ignored.
+- `cargo test -p joltr-core --test auto_middleware_derive --test patch_query_derive` -> 11 AutoMiddleware tests and 17 PatchQuery tests passed.
+- `cargo test -p joltr-types --test ts_export_integration` -> 8 passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept this as a documentation-only PRD slice: no macro expansion logic or public API behavior was changed.
+- Preserved historical test comments where they pin regression context, but removed stale phase/status language from public and module-level docs.
+- Described `#[ts(flatten)]` honestly as preserved metadata rather than implemented cross-type flattening.
+
+Files changed:
+- `joltr-macros/src/lib.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-macros/src/patch_query.rs`
+- `joltr-macros/src/ts_export.rs`
+- `joltr-macros/src/ws.rs`
+- `prd.json` (item 40 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.

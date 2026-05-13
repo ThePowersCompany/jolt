@@ -1,29 +1,20 @@
-//! `#[derive(PatchQuery)]` proc-macro derive — phase26 field parsing + phase27 codegen.
+//! `#[derive(PatchQuery)]` proc-macro derive.
 //!
-//! Phase26 ladder:
-//! - JOLTR-RS-110: parse the struct's named fields and their types into
-//!   [`PatchQueryInput`]. The derive emits a hidden marker
-//!   (`__JOLTR_PATCH_QUERY_FIELD_COUNT: usize`) so an integration test can
-//!   verify the derive compiled and parsed the field count without depending
-//!   on later codegen.
-//! - JOLTR-RS-111: parse the struct-level `#[patch("users")]` attribute to
-//!   extract the target table name.
-//! - JOLTR-RS-112: detect `Optional<T>` fields via [`optional_inner_type`],
-//!   extract the inner `T`, emit `__JOLTR_PATCH_QUERY_OPTIONAL_COUNT`.
-//! - JOLTR-RS-113: graduate the per-field representation to [`PatchField`] —
-//!   the canonical internal representation carrying `name`, `column_name`,
-//!   `is_optional`, `inner_type`.
+//! The derive parses named structs into [`PatchQueryInput`], accepts a
+//! struct-level `#[patch("table_name")]` helper attribute, detects `Optional<T>`
+//! fields via [`optional_inner_type`], and stores each field as a [`PatchField`]
+//! carrying the Rust field name, SQL column name, optional-state flag, and inner
+//! optional type.
 //!
-//! Phase27 ladder:
-//! - JOLTR-RS-114: generate `fn to_patch_query(&self,
-//!   id_column: &str, id_value: &impl ToSql) -> (String, Vec<&dyn ToSql>)`
-//!   that walks each field and builds the SET clause via [`generate_to_patch_query`].
-//! - JOLTR-RS-115 (this iteration): emit `$N` parameter notation
-//!   (`column = $1` instead of bare `column = 1`) in both the Optional::Some
-//!   arm and the plain-field branch, and in the WHERE clause.
-//! - JOLTR-RS-116: validate the parameterized query uses `$1, $2, ...`
-//!   bindings exclusively (never string-interpolated values).
-//! - JOLTR-RS-117: closing test bundle for phase27.
+//! Expansion emits hidden marker consts for field count, optional-field count,
+//! and table name. When a table name is present, it also emits
+//! `to_patch_query(&self, id_column, id_value) -> (String, Vec<&dyn ToSql>)` via
+//! [`generate_to_patch_query`]. The generated SQL uses PostgreSQL-style `$N`
+//! placeholders for bound values in both the `SET` clause and final `WHERE`
+//! clause.
+//!
+//! Plain fields are always included in `SET`; `Optional::Some` binds a value,
+//! `Optional::Null` writes `NULL`, and `Optional::NotProvided` skips the field.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -74,12 +65,9 @@ pub(crate) fn optional_inner_type(ty: &Type) -> Option<&Type> {
 
 /// Parsed shape of a `#[derive(PatchQuery)]` input.
 ///
-/// JOLTR-RS-110 captures the struct identifier and per-field metadata. JOLTR-RS-111
-/// adds the struct-level `#[patch("table_name")]` attribute extraction into
-/// [`table_name`]. JOLTR-RS-112 added `Optional<T>` field detection.
-/// JOLTR-RS-113 graduates the per-field representation from `PatchQueryField` to
-/// [`PatchField`], the canonical internal representation consumed by later
-/// codegen slices (114+).
+/// Captures the struct identifier, parsed fields, and optional table name from
+/// `#[patch("table_name")]`. The fields are already normalized into
+/// [`PatchField`] values consumed by `to_patch_query` codegen.
 #[derive(Debug)]
 pub(crate) struct PatchQueryInput {
     pub(crate) ident: Ident,
@@ -89,12 +77,10 @@ pub(crate) struct PatchQueryInput {
 
 /// Internal representation of one field on a `#[derive(PatchQuery)]` struct.
 ///
-/// JOLTR-RS-113: the canonical IR carrying everything codegen (114+) needs:
+/// Canonical IR carrying everything `to_patch_query` codegen needs:
 ///
 /// - [`name`]: the Rust field ident, preserved for `quote!` interpolation.
-/// - [`column_name`]: the SQL column name. Initially the snake_case rendering
-///   of `name`; a future `#[patch(column = "...")]` field-level attribute will
-///   override this independently.
+/// - [`column_name`]: the SQL column name derived from the Rust field ident.
 /// - [`is_optional`]: `true` when the field's type is `Optional<T>` (tri-state
 ///   enum), `false` otherwise. Classified by [`optional_inner_type`].
 /// - [`inner_type`]: when `is_optional` is `true`, the inner `T` of
@@ -115,10 +101,9 @@ pub(crate) struct PatchField {
 /// - Must be a `struct`. Enums and unions are rejected with a span pointing
 ///   at the offending keyword.
 /// - Named-fields struct → captured field-by-field.
-/// - Unit struct → accepted with an empty field list. A patch-target with no
-///   updatable columns is degenerate but not malformed; later slices will
-///   surface a clearer error at codegen time (an UPDATE with no SET clause
-///   is a SQL error, not a parse error).
+/// - Unit struct → accepted with an empty field list. If a table name is also
+///   present, generated code returns the existing empty-update placeholder
+///   string instead of building a malformed `SET` clause.
 /// - Tuple struct → rejected. The SET clause's column names come from the
 ///   struct's named fields; positional fields can't carry that meaning, so
 ///   accepting them would force a separate naming rule that doesn't compose
@@ -269,8 +254,7 @@ pub(crate) fn expand_patch_query(input: DeriveInput) -> TokenStream {
     }
 }
 
-/// Generate the `fn to_patch_query(…) -> (String, Vec<&dyn ToSql>)` method
-/// for JOLTR-RS-114.
+/// Generate the `fn to_patch_query(…) -> (String, Vec<&dyn ToSql>)` method.
 ///
 /// For each field in the struct:
 /// - If `Optional<T>`: generate a `match &self.{name}` with three arms:

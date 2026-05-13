@@ -353,7 +353,7 @@
       "description": "Update stale phase/status documentation in joltr-macros so AutoMiddleware, PatchQuery, TsExport, and ws! docs describe the implemented behavior instead of early placeholder/current-phase notes.",
       "files": ["joltr-macros/src/lib.rs", "joltr-macros/src/auto_middleware.rs", "joltr-macros/src/patch_query.rs", "joltr-macros/src/ts_export.rs", "joltr-macros/src/ws.rs"],
       "tests": ["cargo test -p joltr-macros", "cargo test -p joltr-core --test auto_middleware_derive --test patch_query_derive", "cargo test -p joltr-types --test ts_export_integration"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "41",

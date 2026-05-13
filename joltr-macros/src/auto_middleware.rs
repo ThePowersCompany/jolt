@@ -1,77 +1,26 @@
-//! `#[derive(AutoMiddleware)]` proc-macro derive — phase10 field parsing.
+//! `#[derive(AutoMiddleware)]` proc-macro derive.
 //!
-//! Phase10 ladder:
-//! - JOLTR-RS-046: parsed the struct's fields and their types into
-//!   [`AutoMiddlewareInput`] + [`AutoMiddlewareField`]. The derive emits a
-//!   minimal hidden marker so an integration test can verify the derive
-//!   compiled and parsed without depending on later codegen.
-//! - JOLTR-RS-047: classify each parsed field with a [`FieldKind`]. The
-//!   body-candidate rule fires when `field.ident == "body"` per the spec; the
-//!   field's type is captured verbatim so the body-extraction codegen in 053
-//!   can name `T` in `__req.json::<T>()`.
-//! - JOLTR-RS-048: mark query-extraction fields. Two rules, evaluated in this
-//!   order: (a) any field whose type's last path segment is `QueryParams` is
-//!   [`FieldKind::QueryParams`] regardless of name (covers `QueryParams<T>` and
-//!   `crate::api::QueryParams<T>`); (b) a field NAMED `query_params` AND typed
-//!   `HashMap<String, String>` (last path segment `HashMap` with two `String`
-//!   generic args, covering bare `HashMap` and `std::collections::HashMap`
-//!   variants) is also [`FieldKind::QueryParams`].
-//! - JOLTR-RS-049: mark request-injection fields. Type-based rule, regardless
-//!   of name: any field whose type is `Request` or `&Request` (with or without
-//!   an explicit lifetime) is [`FieldKind::Request`]. Mutable references
-//!   (`&mut Request`) are NOT matched — middleware injection is the
-//!   shared-reference shape per the spec, and excluding mut refs keeps the
-//!   surface narrow. Path qualification on the inner type is allowed
-//!   (`crate::Request`, `&::joltr_core::Request`) via last-path-segment
-//!   matching. The Request rule lives between QueryParams and the body-name
-//!   rule so a hypothetical `body: &Request` classifies as Request, pinning
-//!   type-before-name precedence consistently with 048's QueryParams rule.
-//! - JOLTR-RS-050: detect the struct-level `#[cors]` attribute and stash it as
-//!   [`AutoMiddlewareInput::cors`]. The derive opts the compiler into
-//!   recognising `#[cors]` as a helper attribute via
-//!   `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`. The
-//!   expansion emits a second hidden marker `__JOLTR_AUTO_MIDDLEWARE_CORS: bool`
-//!   so an integration test (and 051+'s layer codegen) can observe whether the
-//!   CORS layer should be wired in.
-//! - JOLTR-RS-051: emit a real `::joltr_core::tower::Layer` impl on the user's
-//!   struct via [`expand_layer_impl`]. The layer's `Service` is a generated
-//!   wrapper struct `__JoltRAutoMiddleware<Ident>Service<S>` that delegates
-//!   `poll_ready` and `call` to the inner service. The 046 + 050 marker
-//!   consts are kept alongside the new impl as parse-witnesses; they're cheap
-//!   (`usize` and `bool`), already wired into the integration tests in
-//!   `auto_middleware_derive.rs`, and trivially removable once 053+'s codegen
-//!   has its own observable surface.
-//! - JOLTR-RS-052: emit the canonical middleware step ordering inside the
-//!   wrapper's `call()` body via [`middleware_chain`] + [`MiddlewareStep`]. The
-//!   chain's canonical order is
-//!   `auth → cors → log → parse-query → parse-body → user → handler`; 052
-//!   handles `cors` (per `parsed.cors`), `parse-query` (per any
-//!   [`FieldKind::QueryParams`] field), and `parse-body` (per any
-//!   [`FieldKind::Body`] field). Each present step renders as a stable
-//!   string-literal marker statement (`let _: &str = "joltr::middleware::step::<name>";`)
-//!   inside `call()`, in canonical order, BEFORE the existing delegating
-//!   `<__S as Service<__Req>>::call(&mut self.inner, __req)`. The marker
-//!   statements survive tokenisation (unlike `//` comments) so 053 has a
-//!   stable splice point per step, and unit tests can pin the ordering by
-//!   substring position. Auth, log, and user-defined steps are NOT emitted at
-//!   052 — auth/log require attribute parsing landing in JOLTR-RS-056+, and
-//!   user-defined middleware composition lands later still.
-//! - JOLTR-RS-053 (this iteration): emit a per-derive
-//!   `__jolt_extract_from(req: &::joltr_core::Request) -> Self` method on the
-//!   user's middleware struct via [`expand_extraction`]. The method constructs
-//!   `Self { ... }` with each field initialised by an expression matched to its
-//!   [`FieldKind`]: Body via `req.json::<T>()`, HashMap-shaped QueryParams via
-//!   `req.query_params.clone()`, by-value Request via `<Request as Clone>::clone(req)`,
-//!   and Other via `<T as Default>::default()`. Typed `QueryParams<T>` originally
-//!   emitted an `unimplemented!(...)` placeholder until typed parsing landed;
-//!   by-ref `&Request` borrows the active request once the user's lifetime
-//!   generics are threaded through the helper impl. The 052 chain markers in `call()` stay as marker
-//!   statements — replacing them with calls into `__jolt_extract_from` would
-//!   either break 051's generic-over-`__Req` design (the wrapper's `call` is
-//!   generic over `__Req`, but extraction needs `&::joltr_core::Request`
-//!   specifically) or require lifetime threading on Self construction. The
-//!   extraction helper is the standalone observable surface JOLTR-RS-054 will
-//!   exercise at runtime to verify per-field population.
+//! The derive parses named structs into [`AutoMiddlewareInput`], classifies each
+//! field with [`FieldKind`], records the helper attribute `#[cors]`, and emits a
+//! `tower::Layer` implementation backed by a generated wrapper service.
+//!
+//! Field classification is syntax based. `QueryParams<T>` fields, path-qualified
+//! `QueryParams<T>` fields, and `query_params: HashMap<String, String>` fields
+//! are query extractors. `Request`, `&Request`, and path-qualified request
+//! references are request injectors. A field named `body` is a JSON body
+//! extractor. Every remaining field is initialized with `Default::default()`.
+//!
+//! The generated wrapper preserves the canonical middleware step-order markers
+//! for CORS, query extraction, and body extraction. For middleware structs with
+//! fields, `call()` also checks for a finished `RequestExt` shortcut response,
+//! downcasts real `joltr_core::Request` values, runs `__jolt_try_extract_from`,
+//! returns the framework's 400 query-error response when typed query extraction
+//! fails, and otherwise delegates to the inner service.
+//!
+//! The generated extraction helpers populate body fields with `Request::json`,
+//! typed `QueryParams<T>` fields with `parse_query::deserialize_query`, raw query
+//! maps by cloning, by-value requests by cloning, and by-ref request fields by
+//! borrowing the active request with the user's lifetime.
 //!
 //! The parse entry point is split out from `lib.rs` so it can be unit-tested
 //! against a `proc_macro2::TokenStream` / parsed `syn::DeriveInput`
@@ -86,22 +35,18 @@ use syn::{
 
 /// Parsed shape of a `#[derive(AutoMiddleware)]` input.
 ///
-/// JOLTR-RS-046 captured the struct identifier and per-field metadata; 047-049
-/// extended [`AutoMiddlewareField`] with kind classification (body, query,
-/// req); 050 added struct-level attribute parsing for `#[cors]` via
-/// [`AutoMiddlewareInput::cors`]; 052 reads both `cors` and `fields[].kind`
-/// inside [`middleware_chain`] to decide which middleware-ordering steps to
-/// splice into the generated `call()` body. The struct ident is kept verbatim
-/// from the source so codegen can emit `impl <ident>` blocks targeting the
-/// user's type.
+/// Captures the user struct identifier, generics, classified fields, and the
+/// struct-level `#[cors]` marker. Codegen uses this single IR to emit marker
+/// consts, extraction helpers, a `tower::Layer` impl, and the generated service
+/// wrapper that runs extraction before delegating to the inner service.
 #[derive(Debug)]
 pub(crate) struct AutoMiddlewareInput {
     pub(crate) ident: Ident,
     pub(crate) generics: Generics,
     pub(crate) fields: Vec<AutoMiddlewareField>,
-    /// `true` iff the struct carries a bare `#[cors]` attribute. 052 reads
-    /// this in [`middleware_chain`] to splice the cors step into the
-    /// generated call chain. The attribute is opted-in as a derive helper via
+    /// `true` iff the struct carries a bare `#[cors]` attribute. The generated
+    /// call chain uses this to splice the CORS ordering marker. The attribute
+    /// is opted-in as a derive helper via
     /// `#[proc_macro_derive(AutoMiddleware, attributes(cors))]` in `lib.rs`;
     /// without that opt-in the compiler would reject `#[cors]` as an unknown
     /// macro at the user's source site before the derive ever runs.
@@ -113,17 +58,11 @@ pub(crate) struct AutoMiddlewareInput {
 /// `req` etc., and the type lets them inspect for `&Request`, `QueryParams<T>`,
 /// or `HashMap<String, String>` shapes.
 ///
-/// JOLTR-RS-047 added [`FieldKind`] classification at parse time so later phase10
-/// passes can iterate the parsed input once, dispatch on `kind`, and emit the
-/// per-kind extraction code in 053. The `ty` stays verbatim because codegen
-/// will splice it into `__req.json::<#ty>()` (Body) and similar shapes.
-///
-/// As of JOLTR-RS-053, all three fields are consumed by codegen: [`kind`] is
-/// read by [`middleware_chain`] (052) and [`expand_extraction`] (053) to
-/// dispatch on the field's framework meaning; [`ident`] is spliced into the
-/// `Self { #ident: ... }` literal that the extraction helper builds; [`ty`] is
-/// spliced into `__req.json::<#ty>()` (Body) and `<#ty as Default>::default()`
-/// (Other) so per-kind codegen names the right type.
+/// All three fields are consumed by codegen: [`kind`] drives ordering markers
+/// and extraction dispatch, [`ident`] is spliced into the generated `Self {
+/// #ident: ... }` literal, and [`ty`] is spliced into per-kind extraction
+/// expressions such as `__req.json::<#ty>()`, typed query deserialization, and
+/// `<#ty as Default>::default()`.
 #[derive(Debug, Clone)]
 pub(crate) struct AutoMiddlewareField {
     pub(crate) ident: Ident,
@@ -161,27 +100,18 @@ pub(crate) struct AutoMiddlewareField {
 /// JOLTR-RS-043's progress notes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FieldKind {
-    /// Body-candidate. The spec triggers JSON body parsing when a field named
-    /// `body: T` is present; codegen in 053 will emit `__req.json::<T>()` and
-    /// assign the result into the `body` field of the constructed middleware.
+    /// Body-candidate. A field named `body: T` is populated with
+    /// `__req.json::<T>()`.
     Body,
-    /// Query-params extraction. The spec triggers query-string parsing when
-    /// the field is typed `QueryParams<T>` (any name, any path qualification)
-    /// or named `query_params` and typed `HashMap<String, String>`; codegen in
-    /// 053 will emit the appropriate `__req.query_params::<T>()` (for the
-    /// typed shape) or a raw-map copy (for the HashMap shape).
+    /// Query-params extraction. `QueryParams<T>` fields deserialize the parsed
+    /// query map into `T`; raw `HashMap<String, String>` fields clone the map.
     QueryParams,
-    /// Request injection. The spec triggers per-request reference injection
-    /// when a field is typed `Request` or `&Request` (any name, any path
-    /// qualification, with or without lifetime); codegen in 053 will pass the
-    /// active `&Request` (cloned by value if the user wrote bare `Request`)
-    /// into the constructed middleware. Mutable refs (`&mut Request`) are not
-    /// matched — middleware injection is the shared-reference shape.
+    /// Request injection. Bare `Request` fields clone the active request;
+    /// shared `&Request` fields borrow it. Mutable refs (`&mut Request`) are
+    /// not matched because middleware injection is the shared-reference shape.
     Request,
-    /// Catch-all for fields with no framework-special meaning. After phase10
-    /// closes, an `Other` field is one the user added that doesn't trigger any
-    /// framework extraction — codegen treats it as `Default::default()`
-    /// per-request.
+    /// Catch-all for fields with no framework-special meaning. Codegen treats
+    /// each such field as `Default::default()` per request.
     Other,
 }
 
@@ -364,49 +294,33 @@ fn single_generic_inner(segment: &syn::PathSegment) -> Option<&Type> {
     None
 }
 
-/// One step in the canonical middleware call chain emitted into the wrapper
-/// service's `call()` body (JOLTR-RS-052).
+/// One canonical ordering marker emitted into the wrapper service's `call()`
+/// body.
 ///
-/// The PRD's chain order is `auth → cors → log → parse-query → parse-body →
-/// user-defined middlewares → handler`. 052 emits only the steps that are
-/// (a) present on the parsed input AND (b) implementable today; auth/log/user
-/// require future PRD items (auth + log are likely 056+ attributes; user-defined
-/// middleware composition is later still). The handler step is the existing
-/// `<__S as Service<__Req>>::call(&mut self.inner, __req)` delegation, which
-/// stays as the terminal expression of `call()` — 052's emission is purely
-/// additive in front of it.
+/// The PRD's chain order is `auth -> cors -> log -> parse-query -> parse-body ->
+/// user-defined middlewares -> handler`. This enum represents the subset whose
+/// presence can be inferred from the derive input: CORS, query parsing, and body
+/// parsing. The handler step is the final inner-service delegation.
 ///
 /// Variants are listed in canonical order; [`middleware_chain`] preserves
 /// that order when assembling the per-derive chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MiddlewareStep {
-    /// Fires iff `parsed.cors` (struct-level `#[cors]` attribute, 050). 053
-    /// will replace the marker statement with the cors short-circuit + header
-    /// injection logic that 056-058 will define on `CorsConfig`.
+    /// Fires iff `parsed.cors` (struct-level `#[cors]` attribute).
     Cors,
-    /// Fires iff any field is [`FieldKind::QueryParams`] (048). 053 will
-    /// replace the marker statement with the query-extraction calls — one
-    /// `__req.query_params::<T>()` per `QueryParams<T>`-typed field, plus a
-    /// raw-map copy for any `query_params: HashMap<String, String>`-typed
-    /// field. Multiple QueryParams fields collapse into a single chain entry;
-    /// 053 emits one extraction expression per matching field inside this
-    /// single step.
+    /// Fires iff any field is [`FieldKind::QueryParams`]. Multiple query fields
+    /// collapse into a single ordering marker; field-level extraction runs in
+    /// [`expand_extraction`].
     ParseQuery,
-    /// Fires iff any field is [`FieldKind::Body`] (047). 053 will replace the
-    /// marker statement with `__req.json::<T>()` for the (single) body field
-    /// — the spec defines `body: T` as the body-extraction shape. Multiple
-    /// `body`-named fields would already be a parse error from `Fields::Named`
-    /// (Rust forbids duplicate field names), so a single chain entry is
-    /// sufficient.
+    /// Fires iff any field is [`FieldKind::Body`]. Rust forbids duplicate field
+    /// names, so a single `body` field is the only body-extraction shape.
     ParseBody,
 }
 
 impl MiddlewareStep {
     /// Stable token-tag for the step. Embedded as a string literal in the
     /// generated `call()` body so unit tests can witness the per-derive chain
-    /// shape and ordering by substring position. JOLTR-RS-053 will replace
-    /// each marker statement with the real extraction body; until then the
-    /// marker IS the observable surface of the chain.
+    /// shape and ordering by substring position.
     ///
     /// The `joltr::middleware::step::` prefix namespaces the marker so a
     /// substring search can't collide with unrelated string literals a user
@@ -424,24 +338,24 @@ impl MiddlewareStep {
 /// Build the canonical middleware step chain for `parsed`.
 ///
 /// Steps are emitted in the canonical PRD order
-/// (`auth → cors → log → parse-query → parse-body → user → handler`); 052
-/// implements the cors / parse-query / parse-body subset, in that order.
+/// (`auth -> cors -> log -> parse-query -> parse-body -> user -> handler`),
+/// limited to the CORS/query/body subset inferred by this derive.
 ///
 /// Activation rules:
 /// - [`MiddlewareStep::Cors`]: `parsed.cors == true`.
 /// - [`MiddlewareStep::ParseQuery`]: any `parsed.fields[i].kind == QueryParams`.
 /// - [`MiddlewareStep::ParseBody`]: any `parsed.fields[i].kind == Body`.
 ///
-/// Each step appears at most once in the returned vector — multiple fields of
-/// the same kind coalesce to a single chain entry, and 053's per-field
-/// extraction codegen will fan out the field-level work inside the single
-/// step. The chain order is independent of the field declaration order on
-/// the source struct: a struct that lists `body` before `query_params` still
-/// gets `[ParseQuery, ParseBody]` (canonical), not `[ParseBody, ParseQuery]`.
+/// Each step appears at most once in the returned vector. Multiple fields of
+/// the same kind coalesce to a single marker, while per-field extraction is
+/// handled separately by [`expand_extraction`]. The chain order is independent
+/// of the field declaration order on the source struct: a struct that lists
+/// `body` before `query_params` still gets `[ParseQuery, ParseBody]`
+/// (canonical), not `[ParseBody, ParseQuery]`.
 ///
 /// An empty chain (no `#[cors]` and no Body/QueryParams fields) returns an
-/// empty `Vec` — the wrapper's `call()` body is then a pure delegation to
-/// the inner service, identical to 051's pre-chain shape.
+/// empty `Vec`. Zero-field middleware keeps the direct inner-service future;
+/// field-bearing middleware still runs the finished-request/extraction path.
 pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareStep> {
     let mut chain = Vec::new();
     if parsed.cors {
@@ -465,26 +379,21 @@ pub(crate) fn middleware_chain(parsed: &AutoMiddlewareInput) -> Vec<MiddlewareSt
 /// Parses via [`parse_auto_middleware_input`] and emits, in order:
 ///
 /// 1. A hidden marker impl carrying `__JOLTR_AUTO_MIDDLEWARE_FIELD_COUNT: usize`
-///    (046) and `__JOLTR_AUTO_MIDDLEWARE_CORS: bool` (050) so the integration
-///    tests in `joltr-core/tests/auto_middleware_derive.rs` can witness that
-///    parsing observed the right field count and cors flag.
+///    and `__JOLTR_AUTO_MIDDLEWARE_CORS: bool` so the integration tests in
+///    `joltr-core/tests/auto_middleware_derive.rs` can witness that parsing
+///    observed the right field count and CORS flag.
 /// 2. A `#[doc(hidden)]` wrapper service struct
-///    `__JoltRAutoMiddleware<Ident>Service<S>` (051) holding the inner service.
-/// 3. An `impl<S> ::joltr_core::tower::Layer<S> for <Ident>` (051) that pulls
-///    the wrapper service over the inner.
-/// 4. An `impl<S, Req> ::joltr_core::tower::Service<Req> for <wrapper><S>` (051)
-///    that delegates `poll_ready` and `call` to the inner service. As of 052,
-///    `call()` splices in canonical-order step markers (cors, parse-query,
-///    parse-body) for steps that fire on the parsed input. The terminal
-///    `inner.call(__req)` delegation stays as the handler step.
-/// 5. A per-derive `__jolt_extract_from(&::joltr_core::Request) -> Self` method
-///    (053) on the user's struct, using the user's request lifetime for
-///    by-ref `&Request` fields, that constructs `Self { ... }` with each
-///    field initialised by an expression matched to its [`FieldKind`]. This is
-///    the standalone observable surface JOLTR-RS-054 will exercise to verify
-///    per-field extraction; later PRD items will splice the call into the
-///    wrapper service's `call()` body once the wrapper-vs-Request-type design
-///    tension is resolved (see [`expand_extraction`] for details).
+///    `__JoltRAutoMiddleware<Ident>Service<S>` holding the inner service.
+/// 3. An `impl<S> ::joltr_core::tower::Layer<S> for <Ident>` that wraps the
+///    inner service.
+/// 4. An `impl<S, Req> ::joltr_core::tower::Service<Req> for <wrapper><S>` that
+///    delegates `poll_ready`. Zero-field middleware delegates `call()` directly;
+///    field-bearing middleware boxes the inner future, honors finished-request
+///    shortcut responses, emits canonical-order markers, runs extraction for
+///    real `joltr_core::Request` values, and delegates to the inner service.
+/// 5. Per-derive `__jolt_extract_from` and `__jolt_try_extract_from` methods on
+///    the user's struct, using the user's request lifetime for by-ref
+///    `&Request` fields and constructing `Self { ... }` from the parsed request.
 ///
 /// On parse failure the emission is a single `compile_error!` token (with the
 /// span the parser attached) — no marker impl, no partial codegen. This keeps
@@ -527,112 +436,29 @@ fn service_ident_for(ident: &Ident) -> Ident {
     format_ident!("__JoltRAutoMiddleware{}Service", ident)
 }
 
-/// Emit the `tower::Layer` + wrapper-service portion of the derive expansion
-/// (JOLTR-RS-051 + JOLTR-RS-052).
+/// Emit the `tower::Layer` + wrapper-service portion of the derive expansion.
 ///
-/// Shape of the emission:
+/// The generated wrapper is a sibling free-standing struct named with the user
+/// type (`__JoltRAutoMiddleware<Ident>Service<S>`) so multiple derives in one
+/// module do not collide. The wrapper stores only the inner service; middleware
+/// field values are extracted per request and are not persisted on the wrapper.
 ///
-/// ```ignore
-/// #[doc(hidden)]
-/// pub struct __JoltRAutoMiddleware<Ident>Service<S> {
-///     inner: S,
-/// }
+/// Zero-field middleware keeps the simplest tower shape: `poll_ready` and
+/// `call` delegate directly and `type Future` is the inner service's future.
+/// Field-bearing middleware uses a boxed future so `call` can short-circuit
+/// finished `RequestExt` responses, emit the canonical ordering markers,
+/// downcast real `joltr_core::Request` values, run `__jolt_try_extract_from`,
+/// return query parse failures as the framework's bad-request response, and
+/// then await the inner service future.
 ///
-/// impl<S: ::core::clone::Clone> ::core::clone::Clone for ... { ... }
+/// The string-literal step markers remain in the generated `call()` body. They
+/// are valid for any `__Req`, survive tokenization, do not affect runtime
+/// behavior, and let tests pin the canonical CORS/query/body ordering without
+/// coupling the assertions to the extraction implementation.
 ///
-/// #[automatically_derived]
-/// impl<__S> ::joltr_core::tower::Layer<__S> for <Ident> {
-///     type Service = __JoltRAutoMiddleware<Ident>Service<__S>;
-///     fn layer(&self, inner: __S) -> Self::Service {
-///         __JoltRAutoMiddleware<Ident>Service { inner }
-///     }
-/// }
-///
-/// #[automatically_derived]
-/// impl<__S, __Req> ::joltr_core::tower::Service<__Req>
-///     for __JoltRAutoMiddleware<Ident>Service<__S>
-/// where
-///     __S: ::joltr_core::tower::Service<__Req>,
-/// {
-///     type Response = <__S as ...::Service<__Req>>::Response;
-///     type Error    = <__S as ...::Service<__Req>>::Error;
-///     type Future   = <__S as ...::Service<__Req>>::Future;
-///     fn poll_ready(&mut self, cx) -> Poll<Result<(), Self::Error>> { ... }
-///     fn call(&mut self, req) -> Self::Future {
-///         // 052: per-derive chain steps in canonical order, one stmt per active step.
-///         let _: &::core::primitive::str = "joltr::middleware::step::cors";
-///         let _: &::core::primitive::str = "joltr::middleware::step::parse_query";
-///         let _: &::core::primitive::str = "joltr::middleware::step::parse_body";
-///         <__S as ...::Service<__Req>>::call(&mut self.inner, __req)
-///     }
-/// }
-/// ```
-///
-/// Decisions pinned at 051 (split out so 052/053's iterations can find them):
-///
-/// 1. **Wrapper service is a SIBLING free-standing struct**, not an inner
-///    module or associated type. Free-standing items can carry their own
-///    `impl` blocks with `where` clauses; an inner `mod` would force the
-///    `Service` impl into the same module and add a path qualifier at every
-///    call site. Naming via [`service_ident_for`] (`__JoltRAutoMiddleware<Ident>Service`)
-///    embeds the user's ident so two derives in the same scope can't collide.
-/// 2. **Wrapper holds only `inner: __S`.** The user's middleware data
-///    (extracted body / query / req) is per-request and constructed inside
-///    `call()` via `Default::default()` in 053 — it does NOT live on the
-///    wrapper. Keeping the wrapper minimal at 051 means 052/053 only need to
-///    extend `call()`, not re-shape the wrapper's storage.
-/// 3. **Generic over `__S` (the inner service) and `__Req` (the request
-///    type).** The spec leans on `tower::Layer`'s usual signature where the
-///    inner is a generic `S: Service<Request>`. Generic-over-`__Req` lets the
-///    layer slot into either a `Service<axum::extract::Request>` stack
-///    (production) or a `Service<()>` stack (tests / type-level assertions),
-///    without forcing a specific request type at the proc-macro layer.
-/// 4. **`call` and `poll_ready` delegate to the inner service.** The
-///    terminal expression of `call()` is
-///    `<__S as Service<__Req>>::call(&mut self.inner, __req)`. JOLTR-RS-052's
-///    chain markers are statement-level splices BEFORE that terminal
-///    delegation; JOLTR-RS-053 will replace each marker with per-field
-///    extraction (`__req.json::<T>()` / `__req.query_params::<T>()` /
-///    `&__req`).
-/// 5. **Wrapper derives `Clone` via a hand-written impl when `__S: Clone`.**
-///    Tower stacks routinely clone services per-connection; a wrapper that
-///    can't clone breaks composition. The hand-written impl avoids the
-///    `#[derive(Clone)]`-needs-PhantomData-or-bounds-on-the-struct dance for
-///    a generic with no field of that type. (Here `__S` IS a field type, so
-///    `#[derive(Clone)]` would in theory work — but the hand-written impl is
-///    explicit about the bound, lets us add `Sync`/`Send` bounds later
-///    without re-deriving, and matches the rest of the proc-macro emission
-///    style.)
-///
-/// Decisions pinned at 052:
-///
-/// 6. **Chain steps are statement-level string-literal markers, not function
-///    calls.** Each active step renders as
-///    `let _: &::core::primitive::str = "joltr::middleware::step::<name>";`.
-///    The marker:
-///      - is valid Rust regardless of `__Req`'s shape (no method calls on the
-///        request, no trait bounds beyond `Service<__Req>`),
-///      - survives tokenisation (unlike `//` comments, which `quote!` strips),
-///      - doesn't trigger `unused_variables` (wildcard `_` pattern) or
-///        `clippy::let_unit_value` (bound type is `&str`, not `()`),
-///      - leaves the wrapper's `Self::Future` type unchanged (still the
-///        inner service's `Future`; no `Box<dyn Future>` rewrap).
-///
-///    The marker is the splice point 053 targets — replacing the entire
-///    `let _: ... = "...";` statement with the real step body keeps the
-///    surrounding `call()` shape stable.
-/// 7. **Multiple matching fields collapse to a single chain step.** The
-///    `middleware_chain` builder pushes each step variant at most once even
-///    if many fields match (e.g. two `QueryParams<T>` fields). 053 will
-///    iterate `parsed.fields.iter().filter(|f| f.kind == ...)` inside the
-///    single step to emit per-field extraction. Keeping coalescing here
-///    means the chain ordering surface stays per-step (not per-field), which
-///    matches the PRD's chain shape exactly.
-/// 8. **Empty chain renders as the 051 pre-chain shape.** A derive with no
-///    `#[cors]` and no Body/QueryParams fields produces an empty
-///    `middleware_chain`, so `call()` is just the bare delegation — bit-for-bit
-///    identical to 051's emission. That preserves the existing
-///    integration-test contract for `UnitMiddleware`.
+/// The wrapper has a hand-written `Clone` impl when `__S: Clone`, matching tower
+/// service composition expectations while keeping the generated struct storage
+/// minimal and explicit.
 fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
     let ident = &parsed.ident;
     let (_, ty_generics, _) = parsed.generics.split_for_impl();
@@ -760,58 +586,50 @@ fn expand_layer_impl(parsed: &AutoMiddlewareInput) -> TokenStream {
     }
 }
 
-/// Emit the per-derive extraction helper (JOLTR-RS-053).
+/// Emit the per-derive extraction helpers.
 ///
 /// Renders, for the user's middleware struct `<Ident>`, an impl preserving the
-/// user's generics with `pub fn __jolt_extract_from(__req: &Request) -> Self`.
-/// When a by-ref request field is present, the helper parameter uses that field's
-/// lifetime so the returned `Self` can borrow the request. The body constructs
-/// `Self { #ident: <init>, ... }` with one init expression per parsed field,
-/// matched to its [`FieldKind`]:
+/// user's generics with `__jolt_extract_from` and `__jolt_try_extract_from`.
+/// When a by-ref request field is present, the helper parameter uses that
+/// field's lifetime so the returned `Self` can borrow the request. The body
+/// constructs `Self { #ident: <init>, ... }` with one init expression per parsed
+/// field, matched to its [`FieldKind`]:
 ///
 /// | FieldKind                            | init expression                                       |
 /// | ------------------------------------ | ----------------------------------------------------- |
 /// | `Body`                               | `__req.json::<#ty>().expect("…")`                     |
 /// | `QueryParams` (HashMap shape)        | `::core::clone::Clone::clone(&__req.query_params)`    |
-/// | `QueryParams` (typed `<T>` shape)    | `::core::unimplemented!("…JOLTR-RS-055+…")`            |
+/// | `QueryParams` (typed `<T>` shape)    | deserialize query map into `T`, then `From<T>`          |
 /// | `Request` (by-value bare `Request`)  | `<::joltr_core::Request as Clone>::clone(__req)`       |
 /// | `Request` (by-ref `&Request`)        | `__req`                                                |
 /// | `Other`                              | `<#ty as ::core::default::Default>::default()`        |
 ///
-/// The helper is `#[doc(hidden)]` and prefixed with the macro-internal
-/// double-underscore convention — users shouldn't reach for it directly. It IS
-/// `pub` because the wrapper service in [`expand_layer_impl`] sits in a
-/// sibling impl block and a future PRD will call into it from there; without
-/// `pub` the wrapper couldn't name the method.
+/// The helpers are `#[doc(hidden)]` and prefixed with the macro-internal
+/// double-underscore convention. They are `pub` because the wrapper service in
+/// [`expand_layer_impl`] sits in a sibling impl block and calls
+/// `__jolt_try_extract_from` before delegating to the inner service.
 ///
-/// Decisions pinned at 053 (split out so future iterations can find them):
+/// Implementation notes:
 ///
-/// 1. **Helper method, not inline splice into `call()`.** The wrapper service's
-///    `call()` is generic over `__Req` (per 051). Inlining `__req.json::<T>()`
-///    would require `__Req: ::joltr_core::Request`, breaking 051's
-///    `Service<()>` test surface. The standalone helper takes
-///    `&::joltr_core::Request` directly, lets unit + integration tests call it
-///    without going through the tower stack, and keeps the wrapper's generic
-///    surface intact. Replacing the 052 chain markers with calls into the
-///    helper is deferred to whichever PRD resolves the wrapper-vs-Request-type
-///    design (likely after JOLTR-RS-055-058 lands a JoltR-aware tower layer).
+/// 1. **Helper method plus wrapper downcast, not direct `__Req` calls.** The
+///    wrapper service remains generic over `__Req`; when the runtime request is
+///    actually `joltr_core::Request`, `call()` downcasts and invokes
+///    `__jolt_try_extract_from`. This preserves the generic tower surface while
+///    still running real extraction in JoltR request stacks.
 /// 2. **`Self { #ident: <init>, ... }` literal, not `Self::default()` +
 ///    field assignments.** Three considered shapes: (a) `let mut __mw =
 ///    Self::default(); __mw.body = ...; __mw` — rejected because it requires
 ///    the user's struct to impl `Default`, which forces a `#[derive(Default)]`
 ///    that wouldn't fit a struct with a `req: Request` field (Request doesn't
 ///    impl Default). (b) Per-field assignment via builder — overkill for one
-///    callsite. (c) Struct literal with per-field init exprs (current choice)
-///    — naming each field explicitly compose-checks against the struct's
+///    callsite. (c) Struct literal with per-field init exprs, which is used
+///    here because naming each field explicitly compose-checks against the struct's
 ///    declared fields at the macro expansion site, and only requires Default
 ///    on each `Other`-kinded field's type (matching the spec for Other).
 /// 3. **`Body` extraction uses `.expect(...)` not `.unwrap_or_default()`.**
 ///    The latter would require `T: Default` on the body type; the former
-///    surfaces a clear panic if the body fails to deserialize. JOLTR-RS-062
-///    will replace this with proper Result-based error handling once the
-///    framework's typed-error surface lands; for now `.expect` matches the
-///    spec's "extract body into struct" verbiage without an extra Default
-///    bound on user types.
+///    surfaces a clear panic if the body fails to deserialize and avoids an
+///    extra `Default` bound on user body types.
 /// 4. **By-ref `&Request` borrows the helper argument.** The generated helper
 ///    impl preserves the user's generics and, when a request-reference field is
 ///    present, uses that lifetime on the `__req` parameter so `Self` can hold
@@ -839,13 +657,14 @@ fn expand_extraction(parsed: &AutoMiddlewareInput) -> TokenStream {
     quote! {
         #[automatically_derived]
         impl #impl_generics #ident #ty_generics #where_clause {
-            /// JOLTR-RS-053: per-derive extraction helper. Constructs an
-            /// instance of this middleware struct from a
-            /// `&::joltr_core::Request` by running per-field extraction (body,
-            /// query params, request injection) per the rules in `FieldKind`.
+            /// Per-derive extraction helper. Constructs an instance of this
+            /// middleware struct from a `&::joltr_core::Request` by running
+            /// per-field extraction (body, query params, request injection) per
+            /// the rules in `FieldKind`.
             ///
-            /// `#[doc(hidden)]` because it's macro-internal. JOLTR-RS-054 will
-            /// exercise this method at runtime to verify per-field population.
+            /// `#[doc(hidden)]` because it's macro-internal; the generated
+            /// wrapper service calls `__jolt_try_extract_from` for fallible
+            /// request extraction.
             #[doc(hidden)]
             pub fn __jolt_extract_from(__req: #request_ref_ty) -> Self {
                 match Self::__jolt_try_extract_from(__req) {
@@ -919,9 +738,8 @@ fn raw_query_params_init_expr(field_ty: &Type) -> TokenStream {
 }
 
 /// Choose the per-field extraction expression for `field`. Split out from
-/// [`expand_extraction`] so unit tests can exercise the dispatch directly and
-/// so future PRD items have a single place to update (the table above mirrors
-/// the match arms here).
+/// [`expand_extraction`] so unit tests can exercise the dispatch directly; the
+/// table above mirrors the match arms here.
 fn field_init_expr(field: &AutoMiddlewareField) -> TokenStream {
     let f_ty = &field.ty;
     match field.kind {
@@ -1161,8 +979,8 @@ mod tests {
     fn parses_body_field_with_primitive_type_as_body_kind() {
         // A `body: String` field is still a body-candidate. Detection is
         // name-based, not type-based — the spec says ANY `body: T` field
-        // triggers body parsing. The codegen in 053 will emit
-        // `__req.json::<String>()`, which is valid (serde_json deserializes
+        // triggers body parsing. Codegen emits `__req.json::<String>()`, which
+        // is valid (serde_json deserializes
         // into String for a JSON string body).
         let input = parse_derive(
             r#"
@@ -2351,9 +2169,9 @@ mod tests {
     fn expand_layer_impl_chain_markers_precede_inner_call_delegation() {
         // The terminal expression of call() is still
         // `<__S as Service<__Req>>::call(&mut self.inner, __req)`. The chain
-        // markers must appear BEFORE that delegation in source order — they're
-        // statements (`let _: &str = ...;`) that 053 will replace with the
-        // real step bodies executed before the inner call.
+        // markers must appear BEFORE that delegation in source order. They are
+        // stable statements (`let _: &str = ...;`) used to witness ordering;
+        // extraction runs through the field-bearing request path.
         let input = parse_derive(
             r#"
             #[cors]
@@ -2540,8 +2358,7 @@ mod tests {
         // Body kind → init expression is `__req.json::<T>().expect(...)`. The
         // PRD-mandated "extracts body into struct" verification: a `body: T`
         // field gets deserialized via serde_json with the user's T spliced
-        // into the turbofish. JOLTR-RS-062 will replace the .expect with typed
-        // Result handling; until then a panic on bad-body is acceptable.
+        // into the turbofish; invalid body payloads currently panic here.
         let input = parse_derive(
             r#"
             struct WithBody {
@@ -2557,7 +2374,7 @@ mod tests {
         );
         assert!(
             rendered.contains(". expect ("),
-            "body extraction must use .expect for now (JOLTR-RS-062 future Result handling), rendered: {rendered}"
+            "body extraction must use .expect, rendered: {rendered}"
         );
     }
 

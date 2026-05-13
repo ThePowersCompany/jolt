@@ -1,22 +1,20 @@
-//! `#[derive(TsExport)]` proc-macro derive — phase39 field parsing + phase40 attribute analysis.
+//! `#[derive(TsExport)]` proc-macro derive.
 //!
-//! Phase39 ladder:
-//! - JOLTR-RS-165 (this iteration): parse the struct's named fields and their
-//!   types into [`TsExportInput`]. The derive emits a hidden marker
-//!   (`__JOLTR_TS_EXPORT_FIELD_COUNT: usize`) so an integration test can
-//!   verify the derive compiled and parsed the field count without depending
-//!   on later codegen.
-//! - JOLTR-RS-166: map Rust types to TypeScript types
-//!   (String→string, i32→number, etc.)
-//! - JOLTR-RS-167: map generics (Option<T>→T|null, Json<T>→T, etc.)
-//! - JOLTR-RS-168: generate the `export interface StructName { ... }`
-//!   TypeScript definition string.
+//! The derive parses named/unit structs, simple enums, and data-carrying enums
+//! into [`TsExportInput`]. It emits hidden marker consts for tests and submits a
+//! structured `joltr_types::TsTypeDef` into the link-time inventory rendered by
+//! the `joltr-types` crate.
 //!
-//! Phase40 ladder:
-//! - JOLTR-RS-169: `#[ts(rename = "newName")]` support on fields.
-//! - JOLTR-RS-170: `#[ts(flatten)]` field inlining.
-//! - JOLTR-RS-171: JSDoc comment generation from doc comments.
-//! - JOLTR-RS-172: closing attribute test bundle.
+//! Type mapping supports Rust primitives, `Vec<T>`, `JsonArray<T>`, `Option<T>`,
+//! `Optional<T>`, transparent `Json<T>`, type generic parameters, and
+//! user-defined path references. Simple enums render as const-object enums;
+//! data-carrying enums render as tagged TypeScript union arms.
+//!
+//! Field-level `#[ts(rename = "...")]` changes the submitted property name and
+//! doc comments are preserved as field JSDoc metadata. `#[ts(flatten)]` is kept
+//! on hidden marker consts, but inventory submission leaves the field as a
+//! normal property because the macro cannot inspect another type's exported
+//! fields during expansion.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -28,12 +26,10 @@ use syn::{
 
 /// Parsed shape of a `#[derive(TsExport)]` input.
 ///
-/// JOLTR-RS-165 captures the struct identifier and per-field Rust name + type.
-/// Later items add per-field attributes (rename, flatten, doc) and the
-/// TypeScript type-mapping engine (166-168).
-///
-/// JOLTR-RS-173: `variants` carries simple enum variant names when the derive
-/// is applied to a no-data enum. Empty for structs and data-carrying enums.
+/// Captures the source type identifier, Rust generics, TypeScript generic
+/// parameter names, struct fields, simple enum variants, and tagged-union enum
+/// variants. Only one of `fields`, `variants`, or `union_variants` is populated
+/// for a successful parse.
 #[derive(Debug)]
 pub(crate) struct TsExportInput {
     pub(crate) ident: Ident,
@@ -58,14 +54,9 @@ pub(crate) struct TsUnionField {
 
 /// Internal representation of one field on a `#[derive(TsExport)]` struct.
 ///
-/// JOLTR-RS-165: carries the Rust-level representation.
-/// JOLTR-RS-166: carries `ts_type` — the resolved TypeScript type string
-///   computed by [`rust_type_to_ts`]. `None` for unsupported/unrecognised
-///   Rust types.
-/// Later items add:
-/// - `ts_name`: overridden TS property name (169: `#[ts(rename = "...")]`)
-/// - `flatten`: whether to inline the field's properties (170: `#[ts(flatten)]`)
-/// - `doc`: JSDoc string extracted from /// doc comments (171)
+/// Carries the Rust-level field representation plus the TypeScript metadata
+/// derived from it: resolved TS type, optional renamed property name, flatten
+/// marker, and extracted field doc comment.
 #[derive(Debug, Clone)]
 pub(crate) struct TsExportField {
     #[allow(dead_code)]
@@ -80,14 +71,10 @@ pub(crate) struct TsExportField {
 
 /// Map a Rust type to its TypeScript equivalent.
 ///
-/// JOLTR-RS-166 baseline:
 /// - `String` / `str` → `"string"`
 /// - `i32` / `i64` / `u32` / `u64` / `f32` / `f64` / `usize` / `isize` → `"number"`
 /// - `bool` → `"boolean"`
 /// - `Vec<T>` → `"{T_ts}[]"`
-///
-/// JOLTR-RS-177 (PRD #12) additions — JSON-wrapper and nullable shapes that
-/// flow through joltr-core's request/response surface:
 /// - `Option<T>` → `"{T_ts} | null"`
 /// - `Optional<T>` → `"{T_ts} | null"` (tri-state on the wire collapses to
 ///   the same nullable shape in TS; the `NotProvided` arm is the absence of
@@ -426,16 +413,21 @@ fn parse_struct_fields(data: &DataStruct, owner: &Ident) -> syn::Result<Vec<TsEx
 ///
 /// Parses via [`parse_ts_export_input`] and emits:
 ///
-/// *Structs (phase39+)*:
+/// *Structs*:
 /// 1. `__JOLTR_TS_EXPORT_IS_ENUM: bool = false`
-/// 2. `__JOLTR_TS_EXPORT_FIELD_COUNT: usize` (JOLTR-RS-165)
-/// 3. `__JOLTR_TS_EXPORT_MAPPED_FIELD_COUNT: usize` (JOLTR-RS-166)
+/// 2. `__JOLTR_TS_EXPORT_FIELD_COUNT: usize`
+/// 3. `__JOLTR_TS_EXPORT_MAPPED_FIELD_COUNT: usize`
 /// 4. Per-field type / name / flatten / doc markers.
 ///
-/// *Simple enums (phase41)*:
-/// 1. `__JOLTR_TS_EXPORT_IS_ENUM: bool = true` (JOLTR-RS-173)
+/// *Enums*:
+/// 1. `__JOLTR_TS_EXPORT_IS_ENUM: bool = true`
 /// 2. `__JOLTR_TS_EXPORT_VARIANT_COUNT: usize`
-/// 3. `__JOLTR_TS_EXPORT_VARIANT_<N>: Option<&'static str>` per variant.
+/// 3. `__JOLTR_TS_EXPORT_VARIANT_<N>: Option<&'static str>` per simple or
+///    tagged-union variant.
+///
+/// All successful derives also emit an inventory registration for `joltr-types`:
+/// structs submit `TsKind::Interface`, simple enums submit `TsKind::Enum`, and
+/// data-carrying enums submit `TsKind::Union` with tagged object arms.
 ///
 /// On parse failure the emission is a single `compile_error!` token — no
 /// partial codegen.
