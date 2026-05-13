@@ -1393,3 +1393,28 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), example container integration (#46), and final branch diff review (#47).
+
+
+2026-05-12 PRD #46 - Run example container integration
+
+Completed:
+- Ran the existing example TypeScript/container integration script against the current Docker image path.
+- Confirmed the script builds the example image, starts the container, waits for `/api/test/typed`, copies generated `types.d.ts`, type-checks the TypeScript integration package, and verifies the runtime response contract.
+- No code changes were needed for the Dockerfile, generated types path, or typed endpoint path.
+
+Verification:
+- `examples/basic/integration/run.sh` -> passed; verified `TypedTestResponse v1` from the running container.
+- Guarded `npm run type-check` -> skipped: no repo-root `package.json`.
+- Guarded `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+- `python3 -m json.tool prd.json >/dev/null` -> passed.
+
+Key decisions:
+- Treated the passing integration script as the PRD implementation result rather than changing already-working code.
+- Kept generated `types.d.ts` out of the source tree; the script copies it to `target/joltr-basic-integration/types.d.ts` for TypeScript checks.
+
+Files changed:
+- `prd.json` (item 46 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), and final branch diff review (#47).

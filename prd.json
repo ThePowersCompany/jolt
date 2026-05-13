@@ -407,7 +407,7 @@
       "description": "Run the example TypeScript/container integration script and fix only failures in the example Docker, generated types, or typed endpoint path. This is the final non-Rust verification slice for the Rust port.",
       "files": ["examples/basic/Dockerfile", "examples/basic/integration/run.sh", "examples/basic/integration/test.ts", "types.d.ts"],
       "tests": ["examples/basic/integration/run.sh"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "47",
