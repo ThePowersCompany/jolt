@@ -10,7 +10,7 @@ const ListenerSettings = zap.HttpListenerSettings;
 const HttpListener = zap.HttpListener;
 const StatusCode = zap.StatusCode;
 
-const JoltServer = @import("../main.zig").JoltServer;
+const JoltRServer = @import("../main.zig").JoltRServer;
 
 const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const stringify = @import("../utils/json.zig").stringify;
@@ -20,7 +20,7 @@ pub fn MiddlewareContext(comptime Context: type) type {
     return struct {
         ctx: *Context,
         alloc: Allocator,
-        server: *JoltServer,
+        server: *JoltRServer,
         req: Request,
     };
 }
@@ -67,7 +67,7 @@ pub fn Response(comptime ReturnType: type) type {
 }
 
 pub const RequestHandler = struct {
-    handle_fn: *const fn (Allocator, *JoltServer, Request, ErrorHandlerFn) anyerror!void,
+    handle_fn: *const fn (Allocator, *JoltRServer, Request, ErrorHandlerFn) anyerror!void,
 
     pub fn init(comptime auto: anytype, comptime last_fn: anytype) !RequestHandler {
         const info: std.builtin.Type = @typeInfo(@TypeOf(last_fn));
@@ -102,7 +102,7 @@ pub const RequestHandler = struct {
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(alloc: Allocator, server: *JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+            pub fn handle(alloc: Allocator, server: *JoltRServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
                 var context: Context = undefined;
                 var middleware_context: MiddlewareContext(Context) = .{
                     .ctx = &context,
@@ -188,7 +188,7 @@ pub const RequestHandler = struct {
     pub fn handle(
         self: RequestHandler,
         allocator: Allocator,
-        server: *JoltServer,
+        server: *JoltRServer,
         req: Request,
         sendErrorResponse: ErrorHandlerFn,
     ) void {
@@ -212,13 +212,13 @@ pub const RequestHandlers = struct {
 };
 
 pub const Endpoint = struct {
-    server: *JoltServer,
+    server: *JoltRServer,
     path: []const u8,
     handlers: RequestHandlers,
     sendErrorResponse: ErrorHandlerFn,
 
     pub fn init(
-        server: *JoltServer,
+        server: *JoltRServer,
         path: []const u8,
         sendErrorResponse: ErrorHandlerFn,
         handlers: RequestHandlers,

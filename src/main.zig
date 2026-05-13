@@ -63,7 +63,7 @@ pub const ServerOpts = struct {
 
 pub const EndpointDef = struct { []const u8, type };
 
-pub const JoltServer = struct {
+pub const JoltRServer = struct {
     const Self = @This();
 
     alloc: Allocator,
@@ -224,7 +224,7 @@ pub fn main() !void {
     const auto = @import("./middleware/auto.zig").auto;
 
     const alloc = std.heap.raw_c_allocator;
-    var server: JoltServer = try JoltServer.init(alloc, .{
+    var server: JoltRServer = try JoltRServer.init(alloc, .{
         .port = 3333,
         .threads = 2,
     });

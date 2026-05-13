@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "joltr-core",
+    "joltr-macros",
+    "joltr-db",
+    "joltr-utils",
+    "joltr-templates",
+    "joltr-types",
+    "examples/basic",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+axum = { version = "0.7", features = ["ws", "macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "uuid"] }
+jsonwebtoken = "9"
+handlebars = "6"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+rustls = "0.23"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+pbkdf2 = "0.12"
+rand = "0.8"
+dashmap = "6"
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+inventory = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+http-body-util = "0.1"
+slab = "0.4"

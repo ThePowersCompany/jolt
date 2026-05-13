@@ -1,0 +1,1507 @@
+2026-05-11 PRD #9 — Unified error type: JoltRError trait with Into<Response>
+
+Completed:
+- Added joltr-core/src/error.rs with `JoltRError` trait (status(), message(), default to_response()) and `ErrorBody { error: String, status: u16 }` JSON body (impl JsonBody).
+- Registered module in joltr-core/src/lib.rs and re-exported `ErrorBody`, `JoltRError` at crate root.
+- Added joltr-core/tests/error.rs with 4 tests: status/body field mapping, axum JSON bridge + Content-Type, 500 mapping, and a custom to_response override attaching WWW-Authenticate.
+
+Verification:
+- cargo check --workspace → clean.
+- cargo test -p joltr-core --test error → 4 passed.
+- cargo test -p joltr-core --test endpoint_integration --test inventory_registration → all passed (sanity sweep on the existing surface most likely to be affected by the new lib.rs re-exports).
+
+Key decisions:
+- Chose default-method `to_response(&self) -> Response<ErrorBody>` over a blanket `From<E: JoltRError> for axum::response::Response`. Rationale: a blanket impl risks coherence conflicts with axum's own IntoResponse blanket impls and with the existing `From<Response<T>> for axum::response::Response` bridge, and `to_response()` composes cleanly with that bridge anyway. The endpoint macro (PRD #10) can emit `Err(e) => e.to_response().into()` without further glue.
+- `ErrorBody` implements `JsonBody` so the existing `Response<T>` → `axum::response::Response` JSON path is reused — no new serialization code.
+- Trait method takes `&self` (not `self`) so a single error value can be inspected by error_handler hooks before conversion, and so `to_response` can be called from `Display`-only matches without consuming the error.
+- Did not require `std::error::Error` / `Display` on the trait — keeps the trait usable for enum-only error types without forcing a `thiserror` dep at the joltr-core layer.
+
+Files changed:
+- joltr-core/src/error.rs (new)
+- joltr-core/src/lib.rs (mod + re-export)
+- joltr-core/tests/error.rs (new)
+- prd.json (item 9 → passes: true)
+
+Next notes:
+- PRD #10 (default error handler in `#[endpoint]` macro) is unblocked. The macro should detect `Result<Response<T>, E>` return types and emit `match` arms that call `err.to_response()` and forward via the existing IntoResponse bridge.
+- Optional follow-up: provide a `#[derive(JoltRError)]` (joltr-macros) for enum errors with `#[joltr_error(status = 404, message = "...")]` per-variant attrs. Not in scope here.
+
+
+2026-05-11 PRD #10 — Default error handler in `#[endpoint]` macro
+
+Completed:
+- Extended joltr-macros/src/endpoint.rs:
+  - `DiscoveredMethod` carries a new `error_handler: Option<syn::Path>` field captured from a per-method `#[error_handler(fn_path)]` magic-marker attribute.
+  - `parse_error_handler_attr` recognizes a bare `error_handler` ident (path-style `#[crate::error_handler(...)]` is intentionally not matched), parses the inner tokens as a `syn::Path`, and surfaces a span-pointed diagnostic when the args are not a function path (e.g. a string literal).
+  - `scan_methods` rejects duplicate `#[error_handler]` attrs on the same method.
+  - New `ReturnKind { Response, ResultResponse }` returned by `validate_signature` / `validate_return_type`; `validate_methods` uses it to reject `#[error_handler]` on bare `Response<T>` handlers (unreachable glue).
+  - `strip_verb_attrs` extended to also strip `#[error_handler(...)]` so the re-emitted impl block does not surface an unknown attribute to rustc.
+  - `generate_handler_wrappers` delegates per-method body emission to `generate_wrapper_dispatch`, which:
+    - For `Response<T>`: keeps the JOLTR-RS-043 single-line `IntoResponse::into_response(__result)` shape unchanged (no branch).
+    - For `Result<Response<T>, E>` with no `#[error_handler]`: emits `match __result { Ok(__ok) => IntoResponse::into_response(__ok), Err(__err) => IntoResponse::into_response(<_ as ::joltr_core::JoltRError>::to_response(&__err)) }`.
+    - For `Result<Response<T>, E>` with `#[error_handler(my_fn)]`: emits the same match with `my_fn(__err)` (owned, matches Rust's `match` arm ownership) in the Err arm — no implicit `E: JoltRError` bound.
+- Added 9 new unit tests in joltr-macros/src/endpoint.rs (token-shape regression set):
+  - `scan_methods` captures simple and path-style `error_handler` args, rejects duplicates and string-literal args.
+  - `validate_methods` rejects `#[error_handler]` on `Response<T>` returns and accepts it on `Result<Response<T>, E>` returns.
+  - `strip_verb_attrs` also removes `#[error_handler(...)]`.
+  - `generate_handler_wrappers` emits match arms + `JoltRError::to_response(&__err)` by default, swaps to `my_handler(__err)` when the attribute is set, and leaves `Response<T>` wrappers branchless.
+- Added joltr-core/tests/endpoint_error.rs with 3 end-to-end integration tests through `JoltRServer::into_router()`:
+  - `default_err_branch_returns_json_error_body` — `Err(NotFound)` → 404 JSON `{ error, status: 404 }`.
+  - `default_ok_branch_still_returns_user_body` — regression: `Ok(Response<Greeting>)` still serializes the user body as JSON 200.
+  - `custom_error_handler_replaces_default_bridge` — `#[error_handler(map_custom_err)]` on a non-`JoltRError` error returns 418 with the custom body.
+
+Verification:
+- cargo check --workspace → clean.
+- cargo test -p joltr-macros --lib → 249 passed (up from 240; 9 new PRD #10 unit tests).
+- cargo test -p joltr-core --test endpoint_error → 3 passed.
+- cargo test -p joltr-core --test endpoint_integration --test error --test inventory_registration → 9 passed (regression sweep on the surface most likely affected by the wrapper-body refactor).
+
+Key decisions:
+- Custom error handler fn takes the error by value (`fn(E) -> impl IntoResponse`), not by reference. Rationale: a `match __result { Err(__err) => fn(__err) }` arm owns the binding, so passing by value gives the user fn full control (move semantics, destructuring) without the macro needing to introduce a temporary or a borrow. Users who want `fn(&E)` can write a one-line shim.
+- Re-derive `ReturnKind` at codegen time inside `generate_wrapper_dispatch` instead of threading it through `DiscoveredMethod`. Rationale: the data is cheap to re-derive from `sig.output` and keeping the struct shallow avoids a parallel-state hazard if a future PRD changes the validation pass without updating the codegen consumers.
+- Required `JoltRError` bound is implicit — the macro never spells `where E: JoltRError`; rustc surfaces a "trait bound not satisfied" diagnostic at the wrapper site if the user's error type doesn't implement the trait. Mirrors the JOLTR-RS-043 decision to let rustc enforce `Self: Default` rather than have the macro emit an explicit `where` clause.
+- `#[error_handler(...)]` is stripped from the re-emitted impl rather than registered as its own proc-macro. Mirrors the verb-marker (`#[get]`, `#[post]`, ...) strategy from 039 — keeps the magic surface narrow to inside `#[endpoint]`.
+- Wrapper body for bare `Response<T>` is unchanged (no `match`, no `JoltRError` reference). This pins that the PRD #10 changes pay nothing at the codegen level for handlers that don't have an `Err` branch.
+
+Files changed:
+- joltr-macros/src/endpoint.rs (DiscoveredMethod field, attr parser, validation, strip, wrapper-body split, +9 unit tests)
+- joltr-core/tests/endpoint_error.rs (new, 3 integration tests)
+- prd.json (item 10 → passes: true)
+
+Next notes:
+- PRD #9's optional follow-up (`#[derive(JoltRError)]` for enum errors with per-variant `#[joltr_error(status = N, message = "...")]`) remains the natural next polish — would let users skip the manual `match` in `status()`/`message()` and would compose cleanly with the macro-emitted default Err branch landed here.
+- The custom-handler path lets the user return any `impl IntoResponse`. If a future PRD wants a stricter contract (e.g. always `Response<ErrorBody>` so error responses are uniformly observable), we can tighten by replacing `IntoResponse::into_response(my_fn(__err))` with an explicit cast — backwards-compatible for users who already return `Response<ErrorBody>`.
+
+
+2026-05-11 PRD #11 — TsExport: joltr-types binary crate (scaffold)
+
+Completed:
+- Added `joltr-types` as a new workspace member (root Cargo.toml `members` list).
+- `joltr-types/Cargo.toml` — `[[bin]] name = "joltr-types", path = "src/main.rs"`. Single runtime dep on `inventory` (workspace). No lib target yet; that arrives with PRD #12.
+- `joltr-types/src/main.rs` — end-to-end pipeline:
+  - `pub struct TsTypeDef { name, body }` placeholder + `inventory::collect!(TsTypeDef)` collection point.
+  - `HEADER` const matches the legacy Zig generator's `// === DO NOT MODIFY ===` marker so editors/tooling that key off that string keep working across the port.
+  - `render()` walks `inventory::iter::<TsTypeDef>` in insertion order, prefixed by `HEADER`.
+  - `resolve_out_path()` honours `JOLTR_TYPES_OUT` first (test sandbox), otherwise writes to `<workspace_root>/types.d.ts` derived from `env!("CARGO_MANIFEST_DIR").parent()`.
+  - `main()` writes the rendered string and logs the byte count + destination.
+- `joltr-types/tests/ts_export_integration.rs` — 2 integration tests that spawn `CARGO_BIN_EXE_joltr-types` with `JOLTR_TYPES_OUT` redirected into `target/joltr-types-test-<nanos>-<suffix>.d.ts`:
+  - `binary_writes_header_to_redirected_output` — exit 0, file contents start with the canonical header.
+  - `binary_emits_one_entry_per_inventory_submission` — pins the pre-#12 invariant that the body is exactly the header (no submissions yet); this test will fail loudly when PRD #12 wires `#[derive(TsExport)]` into `inventory::submit!`, surfacing the integration moment.
+
+Verification:
+- cargo check --workspace → clean (only new `joltr-types` checked).
+- cargo build --workspace → clean (binary + lib targets all link).
+- cargo test -p joltr-types → 2 passed (both integration tests).
+- cargo test -p joltr-core --test inventory_registration → 9 passed (regression sweep: the new crate adds a second `inventory::collect!` site in the workspace; this confirms the existing endpoint registry collection is unaffected).
+- Smoke run: `JOLTR_TYPES_OUT=/tmp/... cargo run -q -p joltr-types` wrote 92 bytes (header only) — pipeline functional.
+
+Key decisions:
+- Output path is overridable via `JOLTR_TYPES_OUT` env var. Rationale: a `cargo test` of the binary would otherwise clobber the developer's workspace-level `types.d.ts` (which is `.gitignore`d but still locally meaningful). The env override keeps the integration test hermetic and discoverable on failure (artifacts land in `target/`, not auto-deleted on assertion failure so they can be inspected).
+- `TsTypeDef` placeholder is `name + body: &'static str` rather than the richer `kind + fields + generics + docs` shape PRD #12 specifies. Rationale: PRD #11's file list is only `Cargo.toml + src/main.rs` (no `lib.rs`); putting a richer struct in `main.rs` would mean #12 has to delete it and recreate it in `lib.rs`. Keeping the placeholder minimal makes #12's move feel like a refactor rather than a rewrite, and the rendering surface in `render()` is small enough to swap in one edit.
+- Binary-only crate (no `[lib]` target yet) — `inventory::submit!` from external crates can't target a symbol that's binary-private, so PRD #12 will add `joltr-types/src/lib.rs` and re-home `TsTypeDef` + `inventory::collect!` there. Calling this out so #12 doesn't get surprised by having to add a `[lib]` target alongside touching `lib.rs`.
+- Workspace root resolved via `env!("CARGO_MANIFEST_DIR").parent()` instead of walking up looking for a `Cargo.toml` with `[workspace]`. Rationale: `joltr-types` lives one level deep in the workspace by convention (mirrors `joltr-core`, `joltr-macros`, ...); a parent-of-manifest-dir hop is deterministic and cheap, and the layout move would itself be a workspace-wide refactor that would change this anyway.
+- The second integration test (`binary_emits_one_entry_per_inventory_submission`) is intentionally a tripwire for PRD #12. When #12 adds the first `inventory::submit!` from the `#[derive(TsExport)]` proc-macro, this test will fail — that's the signal to update the assertion alongside #12's macro changes, which keeps the inventory plumbing visibly tested rather than silently empty.
+
+Files changed:
+- Cargo.toml (workspace `members` list: + `joltr-types`)
+- joltr-types/Cargo.toml (new)
+- joltr-types/src/main.rs (new)
+- joltr-types/tests/ts_export_integration.rs (new)
+- prd.json (item 11 → passes: true)
+
+Next notes:
+- PRD #12 is now unblocked: add `joltr-types/src/lib.rs` exposing the full `TsTypeDef { name, kind: Interface|Enum|Union, fields, generics, docs }` plus the `inventory::collect!` collection point; flip `main.rs` to import from the lib; update `joltr-macros/src/ts_export.rs` to emit `inventory::submit!` per derive site; and update the empty-registry tripwire test to assert the new expected output.
+- The placeholder `body: &'static str` field will go away — #12's rendering happens inside `joltr-types` rather than at submit time, so the macro only ships the structured data, not pre-rendered strings.
+
+
+2026-05-11 PRD #12 — TsExport: inventory registry and type rendering
+
+Completed:
+- `joltr-types/src/lib.rs` (new) — the rich registry + rendering surface:
+  - `TsTypeDef { name, kind, fields, generics, docs }` plus `TsField { name, ts_type, docs }` and `TsKind { Interface, Enum, Union }`. All `&'static`-only so the value satisfies `inventory`'s const-construction requirement.
+  - Single `inventory::collect!(TsTypeDef)` site — workspace-wide collection point. Defining it once in the lib means every binary that links the lib observes the same registry.
+  - `pub use inventory;` so the macro can emit `::joltr_types::inventory::submit!` without forcing every user crate to add `inventory` to its own Cargo.toml (mirrors joltr-core's `pub use inventory`).
+  - `render()` walks the registry and renders `HEADER` + one entry per `TsTypeDef`. Per-kind rendering helpers:
+    - `Interface` → `export interface Name<G> { field: T; … }` (single-line `{}` for empty bodies).
+    - `Enum` → `export const Name = { Variant: "Variant", … } as const;` followed by `export type Name = typeof Name[keyof typeof Name];` — the legacy Zig generator's emit shape.
+    - `Union` → `export type Name = arm | arm | …;` (or `never` when empty).
+  - JSDoc emission: type-level docs render as `/** … */` above the declaration; field-level docs render `/** … */` above the field line.
+- `joltr-types/src/main.rs` — thinned to glue. Removed the placeholder `TsTypeDef`, `HEADER`, and `render` defined inline; the binary now calls `joltr_types::render()` and writes to the resolved output path. `resolve_out_path()` stays local (env override + workspace-root fallback).
+- `joltr-types/Cargo.toml` — added `[lib] path = "src/lib.rs"` alongside the existing `[[bin]]`. Added `joltr-macros` dev-dep so integration tests can derive `TsExport` on fixture types.
+- `joltr-macros/src/ts_export.rs`:
+  - `rust_type_to_ts` extended with JSON-wrapper + nullable mappings: `Option<T>` and `Optional<T>` → `"{T_ts} | null"`, `Json<T>` → inner T (transparent), `JsonArray<T>` → `"{T_ts}[]"`. Existing Vec mapping refactored to share the new `single_generic_inner(segment)` helper. Inner-unmapped semantics preserved (None propagates) — matches existing `Vec<UnknownType>` contract.
+  - New `generate_inventory_submit(parsed)` emits one `::joltr_types::inventory::submit! { ::joltr_types::TsTypeDef { … } }` block per derive site, at module scope (appended to the existing impl-block emission). Field-name comes from `#[ts(rename = "...")]` when present, otherwise the Rust ident. Unmapped field types fall back to `"any"` (TS top type) so the emitted TS stays syntactically valid.
+  - Enum variants register as `TsField { name: <variant>, ts_type: "", docs: None }` with `kind: TsKind::Enum`.
+  - `expand_ts_export` appends the submit block to the existing impl emission. No partial codegen on parse failure (existing contract preserved).
+- `joltr-types/tests/ts_export_integration.rs` — restructured into two halves:
+  - Binary subprocess tests (unchanged contract): `binary_writes_header_to_redirected_output` and `binary_with_no_local_derives_emits_only_the_header` (renamed from `binary_emits_one_entry_per_inventory_submission` with updated docstring — the joltr-types binary's own link unit has no derives, so the empty-registry assertion still holds).
+  - In-process library tests (new): `#[derive(TsExport)] struct UserExport { id, name, tags: Vec<String>, nickname: Option<String> }` + `#[derive(TsExport)] enum StatusExport { Active, Inactive }` followed by three tests calling `joltr_types::render()` directly to verify the macro → submit → render integration path end-to-end (interface fields, enum const-object + type alias, header lead-in).
+- 13 new `joltr-macros` unit tests in `ts_export::tests`:
+  - 8 type-mapping tests: `Option<String>` / `Option<i32>` / `Optional<String>` / `JsonArray<String>` / `Json<i32>` / `JsonArray<Json<i32>>` / `Option<Vec<String>>` / `Option<MyStruct>` (unknown → None).
+  - 5 inventory-submit token-shape tests: struct emits Interface + name/type pair; enum emits Enum + variant names; `#[ts(rename)]` controls submit-time property name; unmapped field type falls back to `"any"`; compile-error on tuple-struct emits no submit block.
+
+Verification:
+- `cargo check --workspace --all-targets` → clean (one pre-existing unused-import warning in joltr-core/src/tests.rs unrelated to this PRD).
+- `cargo test -p joltr-macros --lib` → **262 passed** (up from 249; 13 new PRD #12 unit tests).
+- `cargo test -p joltr-types` → **12 passed** (7 lib unit + 5 integration). The 5 integration tests cover both the binary subprocess path and the in-process `render()` path; binary tests run a fresh subprocess and confirm the binary's link unit is empty.
+- `cargo test -p joltr-core --tests` → all pass (regression sweep on the surface most likely affected by macro-emission shape changes — every joltr-core integration test re-derives endpoint/auto-middleware/patch-query macros and would surface a regression first).
+- Smoke run: `JOLTR_TYPES_OUT=/tmp/... cargo run -q -p joltr-types` wrote 92 bytes (header only) — confirms the binary's own link unit has no derives and the pipeline still functions.
+
+Key decisions:
+- TsExport macro emits `::joltr_types::inventory::submit!` (going through joltr-types directly), NOT `::joltr_core::joltr_types::...`. Rationale: PRD #12's listed files are `joltr-types/src/lib.rs` + `joltr-macros/src/ts_export.rs` only. Re-exporting `joltr_types` through `joltr-core` (mirroring how `#[endpoint]` resolves `::joltr_core::inventory`) would require touching joltr-core/Cargo.toml + joltr-core/src/lib.rs. Going through joltr-types directly keeps the change inside the PRD's stated scope; user crates that derive TsExport must add `joltr-types` as a dep. A future polish PRD can add the joltr-core re-export.
+- `inventory::collect!(TsTypeDef)` lives in `joltr-types/src/lib.rs` (not main.rs). Rationale: the `inventory` collection site has to be inside a library — `inventory::submit!` from another crate cannot target a binary-private symbol. Splitting lib + bin in #12 makes the collection point reachable from both the joltr-types binary AND from integration tests that link the lib directly (which is what makes the new in-process render tests possible).
+- TsTypeDef uses `&'static [TsField]` (not `Vec<TsField>` or a `Box<[…]>`). Rationale: `inventory::submit!` requires `const`-constructible values; a borrowed slice from a `const`-bound `&[…]` literal satisfies this and incurs zero runtime allocation per derive site. All field strings are `&'static str` for the same reason.
+- Unmapped field types fall back to `"any"` (TS top type) at submit time. Rationale: a parse-time bare-ident fallback (e.g. `MyStruct` → `"MyStruct"`) would silently break when the user hasn't also derived TsExport on the referent. `"any"` is loud (visible in the generated `.d.ts`) and syntactically valid, so it surfaces the gap without making the whole derive a hard error. A future PRD can promote bare idents once cross-derive type resolution exists.
+- `#[ts(flatten)]` is intentionally a no-op at submit time. Rationale: a faithful flatten requires looking up the flattened type's structure, which the macro can't do at expand-time (the referent's TsExport markers aren't visible across crates without name resolution we don't have). The existing `__JOLTR_TS_EXPORT_flatten_<N>` markers are preserved for future use; for now flattened fields submit as ordinary properties so the derive doesn't silently drop them.
+- Type-level docs are unconditionally `None` in the emitted TsTypeDef. Rationale: the current parser only collects field-level `///` doc comments; adding struct/enum-level doc parsing is a one-line follow-up that's out of #12's listed file scope. The renderer already handles `Some(_)` correctly so adding it later is a parser-only change.
+- `Optional<T>` and `Option<T>` collapse to the same `T | null` shape. Rationale: `joltr_core::Optional` is tri-state on the wire (Some/Null/NotProvided) but its serde behavior already maps NotProvided to the absence of the property at the JSON level — TS callers see the optional-field semantics through the property-optional convention, not through a third union arm. Distinguishing them in TS would force every consumer to handle three states for an arm that serde itself elides.
+
+Files changed:
+- joltr-types/Cargo.toml (added [lib], joltr-macros dev-dep)
+- joltr-types/src/lib.rs (new — TsTypeDef + TsKind + TsField + inventory::collect! + render + 7 unit tests)
+- joltr-types/src/main.rs (thinned to glue — delegates to joltr_types::render)
+- joltr-types/tests/ts_export_integration.rs (restructured — binary subprocess + in-process library tests, 5 total)
+- joltr-macros/src/ts_export.rs (rust_type_to_ts JSON-wrapper + nullable mappings, generate_inventory_submit, +13 unit tests)
+- prd.json (item 12 → passes: true)
+
+Next notes:
+- PRD #13 (Example app scaffold) is now unblocked end-to-end through Phase 5 — joltr-types ships a real type registry that the example app could pipe into a generated frontend types.d.ts.
+- Polish follow-ups to consider before #13:
+  - Re-export `joltr_types` from `joltr-core` (`pub use joltr_types;` + a `joltr-types` workspace dep) so users only declare one dep. Would also let the TsExport macro shift to `::joltr_core::joltr_types::...` paths.
+  - Parse struct/enum-level `///` docs into the new `docs` field — currently always `None`. Parser change in `joltr-macros/src/ts_export.rs::parse_ts_export_input`.
+  - Bare-ident fallback for unmapped types (instead of `"any"`) so user types compose. Needs care: probably gated on "is the referent in scope as a TsExport derive?" — link-time would be ideal but is hard at macro time, so it may just be opt-in via an attribute.
+  - Wire user app crates into the joltr-types binary's dep graph (so its inventory iteration actually sees user derives). Likely requires a small Cargo feature / build.rs convention.
+
+
+2026-05-11 PRD #6 — Static file serving layer (FileServeLayer / FileServeService)
+
+Completed:
+- joltr-core/src/file_serve.rs (new) — `FileServeLayer` + `FileServeService<S>`:
+  - `FileServeLayer::new(prefix, root)` normalizes the prefix at construction (adds leading `/` if missing, strips trailing `/`s; empty stays empty for the "serve everything from root" mode) and stores the root `PathBuf`.
+  - `Layer::layer` builds a fresh `tower_http::services::ServeDir` per produced service so services don't share mutable filesystem state.
+  - `Service<AxumRequest>` impl matches prefix, rewrites the request URI's path to the suffix (preserving query string), and dispatches via `serve_dir.oneshot(req)` — the canonical tower readiness pattern in an async block. Paths outside the prefix delegate to the wrapped inner service.
+  - `match_prefix` enforces a "next-segment boundary" rule (`/static` must match `/static` or `/static/...`, not `/staticky/...`) so sibling routes aren't accidentally stolen.
+  - 404 for missing files is delegated to `ServeDir`'s own miss-path branch; path traversal (`..` segments) is rejected by `ServeDir`'s `build_and_validate_path`.
+  - 11 unit tests in-file cover normalize_prefix, match_prefix, and rewrite_uri edge cases.
+- joltr-core/src/lib.rs — `pub mod file_serve;` + crate-root re-export `pub use file_serve::{FileServeLayer, FileServeService};` so user crates `use joltr_core::FileServeLayer;`.
+- joltr-core/tests/file_serve.rs (new) — 7 end-to-end integration tests via `tower::ServiceExt::oneshot`:
+  - `serves_file_when_path_matches_prefix` — 200 + file bytes.
+  - `returns_404_for_missing_file_under_prefix` — 404 from ServeDir's miss branch.
+  - `delegates_to_inner_when_path_does_not_match_prefix` — request reaches the sentinel inner (418 + recognizable body), proving it wasn't swallowed by ServeDir.
+  - `sibling_prefix_is_not_a_match` — `/staticky/foo` against a `/static` mount delegates (no URI rewrite).
+  - `path_traversal_does_not_escape_root` — `GET /static/../inside.txt` → 404, but the legitimate `/static/inside.txt` still serves OK (regression guard on the same layer).
+  - `query_string_survives_rewrite` — `?v=42` carried through the rewrite, file still resolves.
+  - `prefix_without_leading_slash_is_normalized` — `FileServeLayer::new("static", ...)` matches `/static/...` requests.
+
+Verification:
+- This is a pure Rust workspace (no `server/` dir, no `package.json`). Verification is the Rust equivalent of the prompt's npm checks: cargo check on the workspace + cargo test.
+- `cargo check --workspace --all-targets` → clean (one pre-existing unused-import warning in joltr-core/src/tests.rs unrelated to this PRD).
+- `cargo test -p joltr-core --lib file_serve` → 11 passed (new unit tests).
+- `cargo test -p joltr-core --test file_serve` → 7 passed (new integration tests).
+- `cargo test -p joltr-core --tests` → all green: 288 lib tests (joltr-core lib), 7 file_serve, 9 inventory, 17 patch_query, 6 endpoint, 3 endpoint_error, 4 error, 1 auto_middleware, 2+2+4+1 ws-related. Regression sweep confirms the new module + re-exports don't disturb existing surface.
+
+Key decisions:
+- Layer/Service shape mirrors `CorsLayer`/`CorsService` (JOLTR-RS-056) rather than mounting `ServeDir` as a sibling axum route. Rationale: a tower layer composes uniformly with the rest of the JoltR middleware stack (`AuthJwtLayer`, `CorsLayer`, `BodyLogLayer`) via `tower::ServiceBuilder`, and the PRD names `FileServeLayer`/`FileServeService` explicitly. Routing through axum's `nest_service` would skip the JoltR layer ordering contract and split the static-asset surface across two layering systems.
+- URI rewrite (strip prefix) at call time rather than mounting `ServeDir` per-prefix internally. Rationale: `ServeDir` resolves the request path relative to its root and does NOT know about the mount prefix — rewriting once at the layer's `call` boundary keeps `ServeDir` ignorant of routing concerns and lets the same `serve_dir` instance handle every request. Query string is preserved unchanged in case a future PRD (#7 cache headers) wants to read it.
+- Inner service swap (`std::mem::replace(&mut self.inner, cloned)`) is unconditional, even on the prefix-match branch where the inner isn't called. Rationale: matches the CorsService discipline so a caller invoking `poll_ready` → `call` → `poll_ready` always operates on a freshly-cloned slot regardless of which branch the previous `call` took. This pins one swap-discipline rule for every layer rather than two.
+- `serve_dir.oneshot(req)` (vs. manual `poll_ready` then `call`). Rationale: `oneshot` is the standard tower pattern when calling a service inside an async block where we don't hold a `Context`; it handles readiness polling correctly without us having to fabricate a context. Cheaper than re-implementing the dance, and `ServeDir` with no fallback is always ready so the readiness poll is effectively a no-op.
+- `match_prefix` rejects "sibling prefix" hits (path `/staticky` against prefix `/static`) by requiring the suffix to be empty or start with `/`. Rationale: a literal `starts_with` would silently route `/staticky/foo` to `<root>/y/foo`, which is both surprising and a footgun for callers naming routes that share a literal prefix. The explicit segment-boundary check is one extra comparison and pins the spec'd "/static/*" expectation.
+- Empty prefix supported as "serve every request from the root." Rationale: zero special API surface — falls out of the `match_prefix` empty-string branch — and lets advanced callers stack `FileServeLayer` as a catch-all without inventing a separate "no prefix" constructor. Not currently exercised in tests beyond the unit-level matcher; users opting into this should be aware their inner service won't receive any requests.
+- PRD #7 (cache headers + ETag + Last-Modified) and PRD #8 (gzip + Range) are explicitly out of scope here. `ServeDir` in tower-http 0.6 already emits `Content-Length` / `Content-Type` and supports `Range` and `Accept-Encoding: gzip` opt-ins via `precompressed_gzip()`; #7 will add `Cache-Control`/`ETag` injection (probably as a post-call response header pass), and #8 will toggle the precompression mode + verify range/traversal coverage. No layer-internal pieces from this PRD need to change for either — both are additive on top of the existing dispatch.
+- Path traversal protection is delegated to `ServeDir`. Rationale: tower-http's `build_and_validate_path` (mod.rs:455) rejects any `Component::ParentDir`/`RootDir`/`Prefix` segment in the requested path before opening the file. Re-implementing the check in JoltR would be a second source of truth for the same security property; delegating keeps the security boundary in one well-tested place.
+
+Files changed:
+- joltr-core/src/file_serve.rs (new — FileServeLayer + FileServeService + 11 unit tests)
+- joltr-core/src/lib.rs (mod registration + crate-root re-exports)
+- joltr-core/tests/file_serve.rs (new — 7 integration tests)
+- prd.json (item 6 → passes: true)
+
+Next notes:
+- PRD #7 (cache headers + ETag + Last-Modified + If-None-Match → 304) is now unblocked. Likely shape: a post-call hook in `FileServeService::call` that inspects the request's `If-None-Match` and rewrites the response into a 304 when the inner ETag matches, otherwise injects `Cache-Control`/`ETag`/`Last-Modified` from the resolved file's metadata. The hook lives between `serve_dir.oneshot(req)` and the final `Ok(response.map(Body::new))`.
+- PRD #8 (gzip + Range) is partly free from `ServeDir`'s built-ins: `ServeDir::new(root).precompressed_gzip()` is the canonical toggle. The FileServeLayer constructor will need a `with_precompressed_gzip()` builder method, and tests will need to stage `.gz` companion files. `Range` handling and 206 responses are already implemented by `ServeDir`; the test surface just needs to assert them.
+- One pre-existing unused-import warning in `joltr-core/src/tests.rs:8` (`ParseMethodError`) is unrelated to this PRD; flagging it here so a polish pass can sweep it later.
+
+
+2026-05-12 PRD #3 — SetCookie builder and to_header
+
+Completed:
+- Added `SameSite` and `SetCookie` response-cookie types in `joltr-core/src/cookie.rs`.
+- Added `SetCookie::new(name, value)` plus chainable `.path()`, `.domain()`, `.secure()`, `.http_only()`, `.same_site()`, `.max_age()`, and `.expires()` methods.
+- Implemented `Display` for `SetCookie` and `SameSite`; `SetCookie::to_header()` delegates to the display rendering.
+- Re-exported `SameSite` and `SetCookie` from the `joltr_core` crate root.
+- Added `joltr-core/tests/cookie.rs` with 3 integration tests for the base header, full builder output order, and SameSite rendering.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 3 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skips one pre-existing WebSocket integration test that timed out twice when running the full suite unfiltered.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no `package.json` or `server/package.json`.
+
+Key decisions:
+- Stored `expires` as a `String` and left date validation/parsing for PRD #2, which owns `SetCookie::parse`.
+- Rendered attributes in the PRD order: `Path`, `Domain`, `Secure`, `HttpOnly`, `SameSite`, `Max-Age`, `Expires`.
+- Kept rendering dependency-free and did not add escaping or cookie-value normalization in this builder-only slice.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/src/lib.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 3 → passes: true)
+
+Next notes:
+- PRD #2 can now add `SetCookie::parse(header_value)` against the concrete `SetCookie`/`SameSite` shape.
+- PRD #5 can use `SetCookie::to_header()` when appending `Set-Cookie` response headers.
+
+
+2026-05-12 PRD #1 — Redirect helper
+
+Completed:
+- Added `Redirect::new(location, status)` in `joltr-core/src/response.rs` with `location()` / `status()` accessors.
+- Added `Response::redirect(location, status) -> Response<String>` and `From<Redirect> for Response<String>`, inserting the HTTP `Location` header with an empty body.
+- Added `joltr-core/tests/redirect.rs` with coverage for helper construction, `Redirect` conversion, all supported redirect statuses (301/302/303/307/308), invalid status rejection, and axum response bridging.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test redirect` → 5 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skipped the same pre-existing WebSocket test noted in the prior progress entry.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no `package.json` or `server/package.json`.
+
+Key decisions:
+- Kept redirect statuses as `StatusCode::Other(301|302|303|307|308)` instead of adding new `StatusCode` variants, keeping the change scoped to the response abstraction.
+- `Response::redirect` returns `Response<String>` with an empty body so the existing string bridge emits no response body instead of JSON `null`.
+- Unsupported statuses panic with a clear invariant message because the requested constructor is not fallible.
+- Did not add a crate-root `Redirect` re-export because `joltr-core/src/lib.rs` already has unrelated unstaged changes; the type is public at `joltr_core::response::Redirect`.
+
+Files changed:
+- `joltr-core/src/response.rs`
+- `joltr-core/tests/redirect.rs` (new)
+- `prd.json` (item 1 → passes: true)
+- `progress.txt`
+
+Next notes:
+- A later API-polish pass can re-export `Redirect` from the crate root once the unrelated `lib.rs` worktree changes are settled.
+
+
+2026-05-12 PRD #2 — SetCookie parsing from Set-Cookie header
+
+Completed:
+- Added `SetCookie::parse(header_value)` in `joltr-core/src/cookie.rs` for `name=value` plus `Path`, `Domain`, `Secure`, `HttpOnly`, `SameSite`, `Max-Age`, and `Expires` attributes.
+- Added `ParseSetCookieError` with `Display`/`Error` implementations for malformed headers and invalid attribute values.
+- Added cookie integration tests for full supported parsing, case-insensitive attribute names/SameSite values, cookie values containing `=`, and invalid inputs.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 7 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed; skipped the same pre-existing WebSocket integration test noted in prior progress.
+- `npm run type-check` → not applicable to this workspace: no repo-local `package.json` with a `type-check` script.
+- `cd server && npm run type-check` → not applicable: this workspace has no `server/` directory.
+
+Key decisions:
+- Returned `Result<SetCookie, ParseSetCookieError>` instead of silently dropping malformed input, so callers can reject invalid response cookies explicitly.
+- Parsed known attribute names and SameSite tokens case-insensitively, while rendering remains canonical through the existing `Display` impls.
+- Stored `Expires` as the raw string, matching the existing builder field and avoiding a date parsing dependency in this focused slice.
+- Ignored unknown Set-Cookie extensions so standard attributes can parse alongside future or vendor-specific attributes.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 2 → passes: true)
+- `progress.txt`
+
+Next notes:
+- PRD #4 can now build request-cookie parsing separately from this response-cookie parser.
+- PRD #5 can continue using the builder/display path; no response helper changes were made here.
+
+
+2026-05-12 PRD #4 — Cookie request header parsing
+
+Completed:
+- Added `Cookie::parse_all(header_value) -> Vec<Cookie>` for semicolon-separated Cookie request headers.
+- Added `Request::cookies()` to parse cookies from the request `Cookie` header.
+- Added cookie integration tests for normal parsing, invalid segment skipping, value preservation after `=`, and Request header parsing.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 10 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no repo-root `package.json` and no `server/package.json`.
+
+Key decisions:
+- `Cookie::parse_all` returns a best-effort `Vec<Cookie>` and skips malformed segments, matching the existing request-cookie behavior instead of introducing a new error type.
+- Values are split on the first `=` only, so cookie values can contain additional equals signs.
+- `Request::cookies()` parses from headers each call and leaves the existing `Request::cookies` field / `Request::cookie()` behavior unchanged.
+
+Files changed:
+- `joltr-core/src/cookie.rs`
+- `joltr-core/src/request.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 4 → passes: true)
+- `progress.txt`
+
+Next notes:
+- PRD #5 can now use the existing `SetCookie` builder/display path for response helpers.
+
+
+2026-05-12 PRD #5 — Response set_cookie and remove_cookie helpers
+
+Completed:
+- Added chainable `Response::set_cookie(set_cookie)` that appends a `Set-Cookie` header using `SetCookie::to_header()`.
+- Added `Response::remove_cookie(name)` that appends an expiring cookie with `Max-Age=0` and `Expires=Thu, 01 Jan 1970 00:00:00 GMT`.
+- Added cookie integration tests for multiple appended `Set-Cookie` headers and removal header rendering.
+
+Verification:
+- `cargo fmt` → clean.
+- `cargo test -p joltr-core --test cookie` → 12 passed.
+- `cargo check --workspace --all-targets` → passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` → passed.
+- `npm run type-check` / `cd server && npm run type-check` were not run: this workspace has no repo-root `package.json` and no `server/package.json`.
+
+Key decisions:
+- Chose consuming, chainable helpers on `Response<T>` to match the existing builder style used by `SetCookie` and keep the response struct shape unchanged.
+- Used `HeaderMap::append` for `Set-Cookie` so multiple cookies survive instead of replacing each other.
+- Kept removal minimal: empty value plus max-age and a fixed past expiry date, with no implicit Path/Domain.
+
+Files changed:
+- `joltr-core/src/response.rs`
+- `joltr-core/tests/cookie.rs`
+- `prd.json` (item 5 → passes: true)
+- `progress.txt`
+
+Next notes:
+- Phase 6 cookie support is complete. Remaining unfinished Phase 6 core work is static-file caching/compression/ranges (#7/#8) before the example app items.
+
+
+2026-05-12 PRD #7 - File serving: cache headers and ETag
+
+Completed:
+- Added cache metadata injection to `FileServeService`: successful static file responses now include `Cache-Control`, weak `ETag`, and `Last-Modified` headers.
+- Added `If-None-Match` handling for GET/HEAD requests; matching validators return `304 Not Modified` with cache headers and an empty body.
+- Added integration tests for cache headers and conditional 304 responses.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --test file_serve` -> 9 passed.
+- `cargo test -p joltr-core --lib file_serve` -> 11 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- Requested npm checks were not applicable: `**/package.json` search found no root or server npm project in this workspace.
+
+Key decisions:
+- Used a deterministic weak ETag derived from file length plus modified timestamp, avoiding file hashing and keeping the layer cheap.
+- Chose `Cache-Control: public, max-age=0` as a conservative default that permits storage but requires validation before reuse.
+- Metadata headers are added only after `ServeDir` returns 200, so missing files and traversal rejections keep their existing behavior.
+- `Last-Modified` formatting uses the existing workspace `chrono` dependency rather than adding a new date-formatting crate.
+
+Files changed:
+- `Cargo.lock`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/file_serve.rs`
+- `joltr-core/tests/file_serve.rs`
+- `prd.json` (item 7 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #8 can now build on this layer for precompressed gzip and byte ranges.
+
+
+2026-05-12 PRD #8 - File serving: gzip and Range support
+
+Completed:
+- Enabled `ServeDir::precompressed_gzip()` inside `FileServeLayer`, so requests with `Accept-Encoding: gzip` can serve `.gz` sidecar files.
+- Preserved cache metadata correctness for gzip responses by deriving `ETag` / `Last-Modified` from the served `.gz` file when `Content-Encoding: gzip` is selected.
+- Added integration tests for gzip sidecar serving and `Range` requests returning `206 Partial Content`.
+- Kept path traversal protection delegated to `ServeDir`; the existing traversal regression test remains part of the file-serving suite.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --test file_serve` -> 11 passed.
+- `cargo test -p joltr-core --lib file_serve` -> 11 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- npm type-checks were not applicable: `**/package.json` search found no repo-root or `server/` npm project; guarded root/server npm checks were no-ops.
+
+Key decisions:
+- Enabled gzip sidecar serving by default instead of adding an opt-in builder flag, matching the PRD's support requirement without expanding the public API.
+- Delegated byte-range parsing and response construction to `tower-http::ServeDir`, which already emits `206`, `Content-Range`, and `Accept-Ranges` for valid single-range requests.
+- Computed cache headers after `ServeDir` returns so the selected representation is known; gzip responses use `.gz` metadata rather than the uncompressed file's metadata.
+
+Files changed:
+- `joltr-core/src/file_serve.rs`
+- `joltr-core/tests/file_serve.rs`
+- `prd.json` (item 8 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are the example app tasks (#13-#17).
+
+
+2026-05-12 PRD #13 - Example app: scaffold examples/basic crate
+
+Completed:
+- Added `examples/basic` as a workspace member and binary crate.
+- Added `examples/basic/Cargo.toml` depending on `joltr-core`, `joltr-db`, `joltr-templates`, and `joltr-utils`.
+- Added `examples/basic/src/main.rs` that starts `JoltRServer` on port 3000 with explicit CORS config; request tracing is provided by `JoltRServer::start`.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-basic-example` -> passed, 0 tests.
+- Root/server npm type-checks were guarded no-ops: `**/package.json` search found no npm project and no `server/` package in this workspace.
+
+Key decisions:
+- Added the example crate to the workspace so normal workspace checks compile it.
+- Kept the scaffold minimal and endpoint-free because PRD #14 owns the first API routes.
+- Used `Default::default()` for the extra axum router so the example does not need to expose axum in its source.
+
+Files changed:
+- `Cargo.lock`
+- `Cargo.toml`
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 13 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #14 can now add health, echo, and parameterized endpoints inside the scaffold.
+
+
+2026-05-12 PRD #14 - Example app: health, echo, and parameterized endpoint
+
+Completed:
+- Added `examples/basic/src/endpoints.rs` with `GET /api/health` via `#[endpoint]`, `POST /api/echo` returning the parsed JSON request body, and `GET /api/items/:id` returning the final path segment plus optional `filter` query param.
+- Wired the request-driven echo and item endpoints into `examples/basic/src/main.rs`.
+- Added focused unit/router tests for the health response, echo JSON parsing, item path/query extraction, and the dynamic item route.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-basic-example` -> 4 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `**/package.json` search found no npm project; guarded `npm run type-check` and guarded server type-check commands were no-ops.
+
+Key decisions:
+- Used the `#[endpoint]` macro for the stateless health endpoint and manual `Endpoint` impls for echo/item because those examples need direct access to `Request` for body, query, and path-segment parsing.
+- Kept item path handling simple by parsing the final path segment from `Request::path`; route matching remains `"/api/items/:id"` as specified.
+- Added `axum` as a direct example dependency because the current `#[endpoint]` macro expansion references `::axum`.
+
+Files changed:
+- `Cargo.lock`
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 14 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished example items are WebSocket chat (#15), background task/DB migration (#16), and template rendering (#17).
+
+
+2026-05-12 PRD #15 - Example app: WebSocket chat endpoint
+
+Completed:
+- Added `examples/basic/src/chat.rs` with a `ws!`-registered `/ws/chat` route, `ChatHandler` WebSocket lifecycle impl, shared chat `PubSub`, text-message publish/broadcast, and `on_close` forwarder cleanup.
+- Wired the chat router into `examples/basic/src/main.rs` as the extra router passed to `JoltRServer::start`.
+- Wrapped the chat route with `AuthWsJwtLayer` and used the same example JWT config in the `ws!` macro auth function.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 8 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --test ws_macro --test ws_pubsub_integration --test ws_auth_upgrade` -> 7 passed.
+- `cargo test -p joltr-core --lib websocket` -> 37 passed with the same pre-existing warning.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Used a module-level `OnceLock<Arc<PubSub>>` because the current `ws!` macro constructs handlers with `Default` and does not inject app state or PubSub into `WebSocketSender`.
+- Kept the route behind `AuthWsJwtLayer` even though `ws!` also validates the token via `auth_fn`; this satisfies the example requirement and keeps the workaround explicit until the WS macro and auth layer converge.
+- Forwarded PubSub messages as the existing `PubSubMessage` JSON shape so clients receive `{ channel, payload, sender_id }` consistently with core PubSub tests.
+
+Files changed:
+- `examples/basic/src/chat.rs` (new)
+- `examples/basic/src/main.rs`
+- `prd.json` (item 15 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished example items are background task/DB migration (#16) and template rendering (#17).
+
+
+2026-05-12 PRD #16 - Example app: background task and DB migration
+
+Completed:
+- Added `examples/basic/src/tasks.rs` with a `Task` implementation that logs basic uptime/run stats every 30 seconds and a scheduler constructor registering it.
+- Added `examples/basic/migrations/0001_init.sql` with an idempotent example table migration.
+- Wired startup to run `JoltRDb::connect(...).migrate(...)` when `DATABASE_URL` is set, then start the background task scheduler before serving HTTP/WebSocket routes.
+
+Verification:
+- `cargo fmt --package joltr-basic-example -- --check` -> clean after formatting fix.
+- `cargo test -p joltr-basic-example` -> 11 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Migration startup is enabled by `DATABASE_URL`; missing or empty values skip migrations so the example remains runnable without a local Postgres instance.
+- Kept the background task example self-contained and stdout-based, avoiding a new direct tracing dependency in the example crate.
+- Used an absolute compile-time migrations path from `CARGO_MANIFEST_DIR` so startup works regardless of the current working directory.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/src/tasks.rs` (new)
+- `examples/basic/migrations/0001_init.sql` (new)
+- `prd.json` (item 16 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD item is template rendering (#17).
+
+
+2026-05-12 PRD #17 - Example app: template rendering endpoint
+
+Completed:
+- Added a `TemplateEndpoint` for `GET /` that loads `examples/basic/templates` with `TemplateEngine`, renders `index.hbs`, and returns HTML with dynamic route data.
+- Registered the template endpoint in `examples/basic/src/main.rs` before the API endpoints.
+- Added `examples/basic/templates/index.hbs` demonstrating Handlebars interpolation and route iteration.
+- Added a router test proving `GET /` returns HTML containing the rendered dynamic content.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 12 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Loaded the template engine at example startup through `TemplateEndpoint::new()` so a missing or invalid template directory fails early.
+- Kept HTML rendering in the example endpoint instead of changing the core `Response<String>` bridge; the endpoint converts to an axum response and sets `Content-Type: text/html; charset=utf-8` locally.
+- Used a small typed render context rather than ad hoc JSON so the example shows a maintainable TemplateEngine data shape.
+
+Files changed:
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `examples/basic/templates/index.hbs` (new)
+- `prd.json` (item 17 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete in the current worktree.
+
+
+2026-05-12 PRD #21 - Server threads build owned Tokio runtime
+
+Completed:
+- Added `JoltRServer::start_blocking(extra_router)` as a non-async entry point for binaries that do not already own a Tokio runtime.
+- Added a private owned-runtime builder that uses `JoltRServer::threads`, enables Tokio IO/time drivers, and rejects `threads(0)` with `InvalidInput` instead of panicking.
+- Kept the existing async `JoltRServer::start` path unchanged for callers that already own a runtime.
+- Added focused `server.rs` unit tests for configured worker count, zero-thread rejection, and bind-error propagation through `start_blocking`.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 17 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `python3 -m json.tool prd.json > /dev/null` -> clean.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Named the blocking API `start_blocking` so the async `start` signature remains stable and the runtime ownership boundary is explicit.
+- Used `tokio::runtime::Builder::new_multi_thread().worker_threads(self.threads).enable_all()` so the configured thread count only applies to the owned-runtime path.
+- Placed tests in `joltr-core/src/server.rs` to avoid touching the already-dirty shared `joltr-core/src/tests.rs` file.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `prd.json` (item 21 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. TLS config/startup items (#18-#20) remain unfinished and can build on the server entry-point split without changing the async API.
+
+
+2026-05-12 PRD #18 - TLS config carries cert and key paths
+
+Completed:
+- Replaced the `TlsConfig` marker with public `cert_chain_path` and `private_key_path` fields.
+- Added `JoltRServer::tls(config)` to store TLS configuration without changing server startup behavior.
+- Added focused server unit tests for the TLS config field surface and builder wiring.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 19 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `npm run type-check` -> skipped: `**/package.json` search found no npm project.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept TLS as configuration-only in this slice; `start` and `start_blocking` still use the existing plain HTTP path.
+- Used `PathBuf` fields so the next rustls startup item can consume filesystem paths directly.
+- Added tests in `joltr-core/src/server.rs` alongside the existing server-entry tests to avoid expanding the already broad shared `src/tests.rs` module.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `prd.json` (item 18 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #19 can now consume `TlsConfig` to start the rustls-backed server path.
+
+
+2026-05-12 PRD #19 - TLS server startup uses rustls
+
+Completed:
+- Added `axum-server` to `joltr-core` and routed `JoltRServer::start` through `axum_server::bind_rustls` when `tls_config` is present.
+- Preserved the existing plain HTTP path for servers without TLS config.
+- Added a focused server unit test that writes a short PEM cert/key fixture, starts the TLS path on port 0, and shuts it down immediately without a long-lived listener.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-core --lib server::` -> 20 passed, with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed: 294 lib tests plus all joltr-core integration tests; skipped the same pre-existing WebSocket timeout noted in prior progress.
+- `python3 -m json.tool prd.json >/dev/null` -> clean.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept TLS startup behind private helpers so the public server API remains unchanged.
+- Used `RustlsConfig::from_pem_file` directly against `TlsConfig` paths, leaving detailed invalid-cert assertions to PRD #20.
+- Used `axum_server::Handle` for TLS shutdown because axum-server does not expose axum's `with_graceful_shutdown` API.
+
+Files changed:
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/server.rs`
+- `prd.json` (item 19 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #20 can add explicit startup-error assertions for missing, unreadable, or malformed TLS cert/key files.
+
+
+2026-05-12 PRD #24 - AutoMiddleware generated layer performs extraction
+
+Completed:
+- Updated `#[derive(AutoMiddleware)]` service codegen so field-bearing middleware attempts a `joltr_core::Request` downcast and runs `__jolt_extract_from` before delegating to the inner tower service.
+- Added macro token coverage for the helper call ordering.
+- Added an integration regression test proving invalid body extraction panics before the inner service can run.
+
+Verification:
+- `cargo fmt --package joltr-macros --package joltr-core` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 7 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed; skipped the pre-existing WebSocket timeout case.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept the existing generic tower service shape and used an `Any` downcast so prior non-JoltR request tests still compile while real `joltr_core::Request` handling now performs extraction.
+- Ran extraction for any field-bearing middleware, including request-only fields, because the helper owns the per-field dispatch contract.
+- Left typed `QueryParams<T>` and by-ref `&Request` placeholders unchanged; those remain scoped to PRD #22 and PRD #23.
+
+Files changed:
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `prd.json` (item 24 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #25 can build on this call site to honor `RequestExt::is_finished()` before extraction and delegation.
+
+
+2026-05-12 PRD #20 - TLS rejects invalid certificate configuration
+
+Completed:
+- Added explicit TLS cert/key path validation before rustls config loading.
+- Startup now returns clear errors for missing files, unreadable files, non-file paths, and malformed PEM material.
+- Added `joltr-core/tests/tls.rs` integration coverage through `JoltRServer::start` without keeping a server bound.
+
+Verification:
+- `cargo fmt --package joltr-core -- --check` -> clean after formatting.
+- `cargo test -p joltr-core --test tls` -> 4 passed.
+- `cargo test -p joltr-core --lib server::` -> 20 passed with the pre-existing `ParseMethodError` unused-import warning.
+- `cargo check --workspace --all-targets` -> passed with the same pre-existing warning.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Validated path readability before calling `RustlsConfig::from_pem_file` so missing and unreadable cert/key files fail before any bind attempt.
+- Mapped PEM parsing failures to `InvalidInput` with TLS-specific context, while preserving filesystem error kinds for missing and permission failures.
+- Used a Unix permission-bit check in addition to opening the file so unreadable-file coverage is stable even in privileged test environments.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `joltr-core/tests/tls.rs` (new)
+- `prd.json` (item 20 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are AutoMiddleware extraction/short-circuit work (#22/#23/#25), TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).
+
+
+2026-05-12 PRD #22 - AutoMiddleware typed QueryParams extraction
+
+Completed:
+- Made `QueryParams` generic with the existing raw-map shape as its default type.
+- Added `deserialize_query<T>()` in `joltr-core::parse_query` using the existing parsed query map plus `serde_urlencoded` to deserialize typed query structs.
+- Updated `#[derive(AutoMiddleware)]` codegen so `QueryParams<T>` fields deserialize into `T`, wrap back into the declared field type, and return the existing 400 bad-request query response on invalid input before invoking the inner service.
+- Added integration coverage for successful typed query extraction and invalid typed query short-circuit behavior.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 9 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Used `QueryParams<T = HashMap<String, String>>` to preserve the existing raw map API while enabling typed middleware fields.
+- Reused `bad_request_for_query_error` for typed query deserialize failures so the generated middleware returns the same 400 shape as the existing field-level extractors.
+- Boxed the generated future only for field-bearing middleware, keeping zero-field middleware on the old direct inner-service future path.
+
+Files changed:
+- `Cargo.toml`
+- `Cargo.lock`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/parse_query.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `prd.json` (item 22 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #23 can now focus on lifetime threading for by-ref `&Request`; PRD #25 can reuse the boxed field-bearing service path for finished-request short circuits.
+
+
+2026-05-12 PRD #23 - AutoMiddleware by-ref Request extraction
+
+Completed:
+- Threaded user generics through the generated AutoMiddleware marker and extraction impls so lifetime-bearing middleware structs compile.
+- Changed by-ref `&Request` field initialization from `unimplemented!` to borrowing the active request.
+- Added integration coverage proving `BorrowRequestMw<'a>` receives the same borrowed request reference.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-macros --lib auto_middleware` -> 83 passed.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 10 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 263 passed.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- Guarded `npm run type-check` and guarded `cd server && npm run type-check` equivalents were no-ops because there is no repo-root `package.json` or `server/package.json`.
+
+Key decisions:
+- Used the explicit lifetime from the first by-ref request field on the helper request parameter, so `Self` can legally hold the request borrow.
+- Preserved the existing generic tower wrapper shape; the service still downcasts only real `joltr_core::Request` values before extraction.
+- Kept type-generic middleware support out of scope; this slice only unblocks the lifetime-bearing `&Request` shape in the PRD.
+
+Files changed:
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `prd.json` (item 23 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #25 remains the next core AutoMiddleware behavior item: honor finished requests before later middleware or endpoint handling.
+
+
+2026-05-12 PRD #25 - AutoMiddleware request-finished short circuit
+
+Completed:
+- Added a hidden `request_ext` helper that detects an `axum` request carrying a finished `Arc<RequestExt>` and takes its stashed shortcut response, with the existing 500 fallback when no response was stashed.
+- Updated field-bearing `#[derive(AutoMiddleware)]` service codegen to check the helper before extraction or delegation, returning the shortcut response without invoking the inner service.
+- Added integration coverage proving a finished `RequestExt` returns the stashed 401 response and the wrapped service is not called.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-core --test auto_middleware_derive middleware_layer_returns_finished_request_ext_response` -> failed before implementation, then 1 passed after implementation.
+- `cargo test -p joltr-core --test auto_middleware_derive` -> 11 passed.
+- `cargo test -p joltr-macros --lib` -> 263 passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-core --tests -- --skip valid_token_upgrade_and_message_exchange` -> passed.
+- `cargo fmt --check` -> clean.
+- `npm run type-check` and `cd server && npm run type-check` were guarded no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Reused the existing `Any`-downcast strategy from PRD #24 so the generated service can remain generic while observing real `axum` requests at runtime.
+- Kept short-circuiting on the field-bearing boxed-future path, matching the current extraction-capable middleware path without changing zero-field middleware's generic `Service<()>` contract.
+- Centralized the stashed-response-plus-500-fallback logic in `request_ext.rs` for macro use instead of duplicating it in generated tokens.
+
+Files changed:
+- `joltr-core/src/request_ext.rs`
+- `joltr-core/tests/auto_middleware_derive.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `prd.json` (item 25 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are TsExport polish (#26-#28), JWT asymmetric algorithms (#29/#30), and example app polish (#31/#32).
+
+
+2026-05-12 PRD #26 - TsExport preserves user-defined type references
+
+Completed:
+- Updated TsExport type mapping so unmapped plain/path-qualified Rust type paths render as the final identifier, e.g. `crate::models::User` -> `User`.
+- Nested wrapper mappings now preserve user-defined references through `Vec<T>`, `JsonArray<T>`, `Option<T>`, `Optional<T>`, and `Json<T>`.
+- Kept unsupported generic paths and unmapped primitive edge cases on the existing `None` path so inventory emission still falls back to `any` when the macro cannot safely infer a TS reference.
+- Added macro unit coverage and joltr-types integration coverage for direct, vector, and nullable user-defined field references.
+
+Verification:
+- `rustfmt joltr-macros/src/ts_export.rs joltr-types/tests/ts_export_integration.rs` -> clean.
+- `cargo test -p joltr-macros --lib ts_export` -> 62 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 6 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 267 passed.
+- Guarded `npm run type-check` and guarded server type-check were no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Preserved only non-generic path identifiers as references; generic user-defined type rendering remains scoped to PRD #27.
+- Continued excluding unsupported primitive identifiers such as `u8` from TS reference fallback rather than emitting invalid TS primitive names.
+- Left `joltr-types/src/lib.rs` unchanged because the existing renderer already emits whatever `TsField.ts_type` the macro submits.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 26 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #27 can now add generic parameter emission on top of preserved user-defined type references.
+
+
+2026-05-12 PRD #27 - TsExport emits generic parameters
+
+Completed:
+- Added TsExport parsing for Rust type generic parameters and registered them in `TsTypeDef.generics`.
+- Updated the derived marker impl to preserve the user's full Rust generics and where-clause via `split_for_impl`, so generic exported structs compile.
+- Added macro and joltr-types integration coverage for `PageExport<T>` rendering as `export interface PageExport<T>` with `T[]` and `T | null` fields.
+
+Verification:
+- `cargo fmt` -> clean.
+- `cargo test -p joltr-macros --lib ts_export` -> 65 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 7 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 270 passed.
+- `npm run type-check` and `cd server && npm run type-check` were guarded no-ops: `**/package.json` search found no npm project and no `server/package.json`.
+
+Key decisions:
+- Emitted only Rust type parameters as TypeScript generics; lifetimes and const generics are ignored because they have no direct TS declaration equivalent here.
+- Kept generic field type rendering on the existing type-mapping path, so `T`, `Vec<T>`, and `Option<T>` compose without a new special case.
+- Left `joltr-types/src/lib.rs` unchanged because its existing renderer already handles `TsTypeDef.generics`.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 27 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #28 remains the next TsExport core-polish item for data-carrying tagged enum unions.
+
+
+2026-05-12 PRD #28 - TsExport tagged enum unions
+
+Completed:
+- Added TsExport parsing for mixed and data-carrying enum variants, including named fields, tuple fields, and unit variants inside a tagged union.
+- Updated inventory submission so data-carrying enums register as `TsKind::Union` with `{ type: "Variant"; ... }` object arms, while all-unit enums keep the existing `TsKind::Enum` const-object renderer.
+- Added macro and joltr-types integration coverage for tagged union rendering.
+
+Verification:
+- `cargo test -p joltr-macros --lib ts_export` -> 67 passed.
+- `cargo test -p joltr-types` -> 7 lib tests passed, 8 integration tests passed, doc tests passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test -p joltr-macros --lib` -> 272 passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used a fixed `type` discriminator for generated tagged object arms because the PRD did not introduce a discriminator attribute surface.
+- Rendered tuple variant fields as positional `_0`, `_1`, etc. so tuple-style data variants are not silently dropped.
+- Left `joltr-types/src/lib.rs` rendering logic unchanged because the existing `TsKind::Union` renderer already joins submitted object-arm strings correctly.
+
+Files changed:
+- `joltr-macros/src/ts_export.rs`
+- `joltr-types/tests/ts_export_integration.rs`
+- `prd.json` (item 28 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are JWT RSA/ECDSA support (#29/#30) and example app polish (#31/#32).
+
+
+2026-05-12 PRD #29 - JWT RSA algorithm support
+
+Completed:
+- Added RS256, RS384, and RS512 variants to `joltr_utils::jwt::Algorithm`.
+- Updated JWT encode/decode key construction to use HMAC secrets for HS algorithms and RSA PEM key material for RS algorithms.
+- Added RSA JWT tests for all supported RS algorithms, wrong public key rejection, and algorithm mismatch rejection.
+
+Verification:
+- `cargo test -p joltr-utils jwt` -> 28 passed.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-utils` -> 103 passed, doc tests passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Preserved the existing `JwtConfig::new(key_material, algorithm)` API and `secret` field for compatibility; RS decode expects PEM public key bytes and RS encode expects PEM private key bytes.
+- Kept unsupported algorithms returning `InvalidAlgorithm`/`JwtEncodeError` rather than adding ECDSA behavior in this RSA-only slice.
+- Reused the existing `JwtDecodeError` mapping so wrong RSA public keys surface as `InvalidSignature`, matching HS wrong-secret behavior.
+
+Files changed:
+- `joltr-utils/src/jwt.rs`
+- `joltr-utils/src/tests/jwt.rs`
+- `prd.json` (item 29 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #30 can add ES256/ES384 using the same algorithm-dispatch helper shape.
+
+
+2026-05-12 PRD #30 - JWT ECDSA algorithm support
+
+Completed:
+- Added ES256 and ES384 variants to `joltr_utils::jwt::Algorithm`.
+- Updated JWT encode/decode key construction to use PEM EC key material for ECDSA algorithms while preserving existing HS and RSA dispatch.
+- Added ECDSA JWT tests for ES256 and ES384 round trips, wrong public key rejection, and algorithm mismatch rejection.
+
+Verification:
+- `cargo test -p joltr-utils jwt` -> 32 passed.
+- `cargo fmt` -> clean.
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-utils` -> 107 passed, doc tests passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Reused the existing algorithm-dispatch helper shape from RSA support and mapped ES algorithms to `EncodingKey::from_ec_pem` / `DecodingKey::from_ec_pem`.
+- Kept the `JwtConfig::new(key_material, algorithm)` API unchanged; ES encode expects a PEM private key and ES decode expects a PEM public key.
+- Covered one wrong-key path and one algorithm-mismatch path as behavior pins without adding new public error variants.
+
+Files changed:
+- `joltr-utils/src/jwt.rs`
+- `joltr-utils/src/tests/jwt.rs`
+- `prd.json` (item 30 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are example app polish for static files (#31) and TLS startup docs (#32).
+
+
+2026-05-12 PRD #31 - Example app demonstrates static files
+
+Completed:
+- Added `examples/basic/public/app.css` as the example app's public static asset.
+- Wired `FileServeLayer::new("/static", PUBLIC_DIR)` into the example's extra router through an axum fallback service, so unmatched `/static/*` requests serve files while other unknown paths still return 404.
+- Added a serving-router test proving `/static/app.css` is served through the configured static prefix.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 13 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- Staged snapshot verification: `cargo test --manifest-path <temp-index>/Cargo.toml -p joltr-basic-example` -> 9 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used `FileServeLayer` as a fallback service rather than axum `ServeDir` directly, keeping the example on the JoltR static-file abstraction.
+- Kept static serving scoped to `/static` and delegated non-static fallback requests to a tiny 404 service.
+- Left the HTML template unchanged to keep this slice focused on the static serving integration.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/public/app.css` (new)
+- `prd.json` (item 31 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD item is TLS startup documentation/configuration (#32).
+
+
+2026-05-12 PRD #32 - Example app documents TLS startup
+
+Completed:
+- Added TLS startup configuration to `examples/basic/src/main.rs`: setting both `JOLTR_BASIC_TLS_CERT_CHAIN` and `JOLTR_BASIC_TLS_PRIVATE_KEY` enables `JoltRServer::tls` with those paths.
+- Preserved default plain HTTP startup when neither TLS environment variable is set.
+- Added a configuration error for one-sided TLS env setup so the example does not silently start with the wrong transport.
+- Added `examples/basic/README.md` with plain HTTP and TLS startup commands.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo test -p joltr-basic-example` -> 16 passed.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used example-specific env var names to avoid implying a global JoltR convention.
+- Treated empty env values as unset, matching the example's optional local-startup behavior.
+- Kept TLS file validation in the existing `JoltRServer` startup path instead of duplicating certificate/key checks in the example.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `examples/basic/README.md` (new)
+- `prd.json` (item 32 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.
+
+
+2026-05-12 PRD #33 - Example app exposes typed test endpoint
+
+Completed:
+- Added `GET /api/test/typed` via the `#[endpoint]` macro with a deterministic `TypedTestResponse` JSON body.
+- Derived `TsExport` on the response type so later TypeScript generation/integration items have a concrete contract to emit and assert.
+- Added focused endpoint and serving-router tests for the stable runtime response shape.
+
+Verification:
+- `cargo fmt --package joltr-basic-example` -> clean.
+- `cargo test -p joltr-basic-example` -> 19 passed.
+- `cargo fmt --package joltr-basic-example -- --check` -> clean.
+- `cargo check -p joltr-basic-example` -> passed.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo fmt --check` -> clean.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Used stable scalar and array fields (`contract_version`, `service`, `ok`, `features`) so a TypeScript integration test can assert both runtime JSON and generated type shape without external services.
+- Kept the endpoint macro-registered like the existing health endpoint instead of manually wiring it through `main`, preserving the example's macro demonstration.
+- Added direct `joltr-macros` and `joltr-types` dependencies to the example because `TsExport` is not re-exported from `joltr-core` and the derive emits `::joltr_types` paths.
+
+Files changed:
+- `examples/basic/Cargo.toml`
+- `examples/basic/src/endpoints.rs`
+- `examples/basic/src/main.rs`
+- `prd.json` (item 33 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #34 can now wire this TsExport-derived response into generated `types.d.ts` output.
+
+
+2026-05-12 PRD #34 - Example app emits TypeScript types
+
+Completed:
+- Added `--generate-types` to `joltr-basic-example`; it renders the example binary's linked `TsExport` inventory with `joltr_types::render()` and writes `types.d.ts` to `JOLTR_TYPES_OUT` or the workspace root.
+- Added a focused test that writes a temporary generated file and asserts it includes the `TypedTestResponse` contract used by the integration endpoint.
+
+Verification:
+- `cargo test -p joltr-basic-example generated_types_file_includes_typed_test_response_contract` -> 1 passed.
+- `JOLTR_TYPES_OUT="target/joltr-basic-example-generated-types.d.ts" cargo run -q -p joltr-basic-example -- --generate-types` -> wrote a file containing `export interface TypedTestResponse`.
+- `cargo test -p joltr-basic-example && cargo test -p joltr-types && cargo fmt --check && cargo check --workspace --all-targets` -> passed; workspace check still reports the pre-existing `ParseMethodError` unused-import warning.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Generated from the example binary instead of the standalone `joltr-types` binary because inventory registrations are scoped to the linked binary, and the standalone binary does not link app-local derives.
+- Used an explicit `--generate-types` mode so normal server startup, migrations, tasks, and TLS behavior remain unchanged.
+- Reused `JOLTR_TYPES_OUT` for path override to match the existing `joltr-types` binary convention.
+
+Files changed:
+- `examples/basic/src/main.rs`
+- `prd.json` (item 34 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #35 can package the example; PRD #36 can call `cargo run -p joltr-basic-example -- --generate-types` or the compiled binary's `--generate-types` mode before TypeScript checks.
+
+
+2026-05-12 PRD #35 - Example app Docker image
+
+Completed:
+- Added a multi-stage `examples/basic/Dockerfile` that builds `joltr-basic-example` from the local workspace crates, generates `types.d.ts`, and packages the runtime binary plus the example templates, public assets, and migrations.
+- Added a root `.dockerignore` to keep build contexts small and exclude local/generated artifacts.
+- Documented Docker build/run commands in `examples/basic/README.md`.
+
+Verification:
+- `docker build -f examples/basic/Dockerfile .` -> passed.
+- `docker build -t joltr-basic-example:prd35 -f examples/basic/Dockerfile .` -> passed from cache.
+- Runtime smoke test with `docker run -d -p 127.0.0.1::3000 joltr-basic-example:prd35` plus `curl /api/test/typed` -> returned the stable typed JSON response; logs showed `DATABASE_URL is not set; skipping example database migrations`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Preserved `/workspace/examples/basic` in the runtime image because the compiled example resolves templates, public assets, and migrations from `CARGO_MANIFEST_DIR`.
+- Kept `DATABASE_URL` optional so the image starts without Postgres or other external services by default.
+- Generated `types.d.ts` during the image build so later integration tests can reuse the same container artifact.
+
+Files changed:
+- `.dockerignore` (new)
+- `examples/basic/Dockerfile` (new)
+- `examples/basic/README.md`
+- `prd.json` (item 35 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #36 can now use `joltr-basic-example:prd35` or rebuild the Dockerfile for the TypeScript container integration test.
+
+
+2026-05-12 PRD #36 - TypeScript container integration test
+
+Completed:
+- Added `examples/basic/integration` as an isolated npm/TypeScript integration test project.
+- Added `run.sh` to build or reuse the example Docker image, start the container on a random localhost port, wait for `/api/test/typed`, copy the image-generated `types.d.ts`, type-check against it, and run the TypeScript runtime response assertion.
+- Added `test.ts` runtime validation for the stable `TypedTestResponse` contract while importing the generated TypeScript type.
+
+Verification:
+- `examples/basic/integration/run.sh` -> passed; built `joltr-basic-example:integration`, copied `/workspace/types.d.ts`, type-checked, and verified `TypedTestResponse v1` from the running container.
+- `bash -n examples/basic/integration/run.sh` -> clean.
+- `npm --prefix examples/basic/integration run type-check` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Copied generated types into `target/joltr-basic-integration/types.d.ts` and mapped them through `tsconfig.json` so generated artifacts stay out of the source tree.
+- Built the Docker image by default but allowed `JOLTR_BASIC_SKIP_DOCKER_BUILD=1` / `JOLTR_BASIC_IMAGE=...` for faster local reuse.
+- Emitted CommonJS test output under `target/` to avoid Node module-boundary warnings.
+
+Files changed:
+- `examples/basic/integration/package.json` (new)
+- `examples/basic/integration/tsconfig.json` (new)
+- `examples/basic/integration/test.ts` (new)
+- `examples/basic/integration/run.sh` (new)
+- `prd.json` (item 36 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #37 can wire `examples/basic/integration/run.sh` into CI.
+
+
+2026-05-12 PRD #37 - CI builds example container and runs TypeScript integration
+
+Completed:
+- Updated `.github/workflows/build-and-test.yml` from the legacy Zig-only job to the Rust-port CI path.
+- Added stable Rust setup, Node 20 setup, `cargo fmt --check`, and `cargo check --workspace --all-targets`.
+- Added an explicit `examples/basic` Docker image build and then reused that image when running `examples/basic/integration/run.sh` against the containerized endpoint.
+- Left `examples/basic/integration/run.sh` unchanged because it already starts the container, waits for `/api/test/typed`, copies generated `types.d.ts`, type-checks, and runs the TypeScript runtime assertion.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `bash -n examples/basic/integration/run.sh` -> clean.
+- `docker build -t joltr-basic-example:ci -f examples/basic/Dockerfile .` -> passed.
+- `JOLTR_BASIC_IMAGE=joltr-basic-example:ci JOLTR_BASIC_SKIP_DOCKER_BUILD=1 examples/basic/integration/run.sh` -> passed; verified `TypedTestResponse v1` from the running container.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Removed `mlugg/setup-zig` and `zig build test` from this workflow because PRD #37 is the Rust-port CI integration and the current Zig package fingerprint fails locally.
+- Built the Docker image in its own CI step, then passed `JOLTR_BASIC_SKIP_DOCKER_BUILD=1` to the integration script so CI visibly covers both image build and container-based TypeScript verification without a duplicate build.
+- Used `npm exec` through the existing integration package scripts instead of adding a lockfile/install step for this focused CI wiring slice.
+
+Files changed:
+- `.github/workflows/build-and-test.yml`
+- `prd.json` (item 37 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #38 remains unfinished for final Rust port verification docs.
+
+
+2026-05-12 PRD #38 - Final Rust port verification docs
+
+Completed:
+- Documented the final Rust port verification path in the root README: Rust format/check/test, example Docker build, generated TypeScript declarations, and the TypeScript container integration test.
+- Expanded `examples/basic/README.md` with Docker reuse, generated `types.d.ts`, the typed integration endpoint URL, and the stable JSON response contract.
+- Fixed two verification blockers surfaced by the documented path: installed the rustls AWS-LC crypto provider before loading TLS config, and made the raw WebSocket integration test bounded and serialized so `cargo test --workspace` finishes deterministically.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `cargo test --workspace` -> passed after fixing the TLS provider panic and WebSocket test hang.
+- `JOLTR_TYPES_OUT=target/joltr-basic-example-types.d.ts cargo run -q -p joltr-basic-example -- --generate-types` -> wrote the generated declarations.
+- `docker build -t joltr-basic-example:local -f examples/basic/Dockerfile .` -> passed.
+- `JOLTR_BASIC_IMAGE=joltr-basic-example:local JOLTR_BASIC_SKIP_DOCKER_BUILD=1 examples/basic/integration/run.sh` -> passed and verified `TypedTestResponse v1` from the running container.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept the docs focused on the commands CI and local maintainers should actually run, with the integration script as the source of truth for container startup and TypeScript validation.
+- Documented the typed endpoint as `http://127.0.0.1:3000/api/test/typed` with the exact `TypedTestResponse` JSON shape asserted by the TypeScript test.
+- Used `rustls::crypto::aws_lc_rs::default_provider().install_default()` in the TLS config path because `axum-server` enables rustls without process-provider installation.
+- Replaced opportunistic WebSocket reads with exact frame reads under a deadline, and serialized the two raw-socket tests to avoid parallel test interference.
+
+Files changed:
+- `README.md`
+- `examples/basic/README.md`
+- `joltr-core/Cargo.toml`
+- `joltr-core/src/server.rs`
+- `joltr-core/tests/ws_integration.rs`
+- `prd.json` (item 38 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete and the documented final verification path passes locally.
+
+
+2026-05-12 PRD #38 - WebSocket integration sends on_open message
+
+Completed:
+- Verified the current WebSocket upgrade/session path spawns the writer before `on_open`, allowing an `on_open` callback to send the initial `welcome` frame before normal message exchange.
+- Preserved invalid-token rejection behavior; the raw-socket integration still returns 401 without upgrading for bad tokens.
+
+Verification:
+- `cargo test -p joltr-core --test ws_integration` -> 2 passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` -> guarded no-op: no `server/package.json`.
+- `python3 -m json.tool prd.json` -> passed.
+
+Key decisions:
+- Made no code changes because the focused integration already passed against the current WebSocket macro/session implementation.
+- Kept PRD #39 open because lifecycle ordering regression coverage is a separate task.
+
+Files changed:
+- `prd.json` (item 38 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #39 remains the next WebSocket finalization item.
+
+
+2026-05-12 PRD #39 - WebSocket lifecycle ordering regression test
+
+Completed:
+- Tightened `valid_token_upgrade_and_message_exchange` to assert the authenticated WebSocket lifecycle order: `set_claims`, `on_open`, `on_ready`, text `on_message`, close `on_message`, `on_close`, and `on_shutdown`.
+- Fixed the raw upgrade response reader so it stops exactly at the HTTP header terminator and does not consume the first WebSocket frame sent by `on_open`.
+- Updated generated `ws!` shutdown to signal the writer task, close and drain the writer receiver, close the sink, and await the writer before `on_shutdown` instead of aborting the writer and risking queued frame loss.
+
+Verification:
+- `cargo test -p joltr-core --test ws_integration valid_token_upgrade_and_message_exchange` -> failed before the fix, then passed.
+- `cargo test -p joltr-core --test ws_integration` -> 2 passed.
+- `cargo test -p joltr-macros --lib ws` -> 17 passed.
+- `cargo fmt --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed with the pre-existing `ParseMethodError` unused-import warning in `joltr-core/src/tests.rs`.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept the regression at the raw socket boundary so it verifies the real `ws!` upgrade/session path rather than a helper-only unit path.
+- Used a byte-exact HTTP response read to avoid discarding immediate WebSocket frames when the server writes the 101 response and `welcome` frame in the same TCP packet.
+- Drained the writer channel on shutdown with `UnboundedReceiver::close()` so already queued handler sends can flush while later sends fail instead of keeping shutdown open indefinitely.
+
+Files changed:
+- `joltr-core/tests/ws_integration.rs`
+- `joltr-macros/src/ws.rs`
+- `prd.json` (item 39 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished items are proc-macro status docs (#40) and the workspace warning cleanup (#41).
+
+
+2026-05-12 PRD #41 - Remove workspace test warning
+
+Completed:
+- Removed the unused `ParseMethodError` import from `joltr-core/src/tests.rs` so the workspace test suite no longer emits that warning.
+
+Verification:
+- `cargo test --workspace` -> passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` -> skipped: no `server/package.json`.
+- `python3 -m json.tool prd.json` -> passed.
+
+Key decisions:
+- Kept the change to the exact unused import instead of touching the broader dirty test module.
+
+Files changed:
+- `joltr-core/src/tests.rs`
+- `prd.json` (item 41 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. PRD #40 remains the only unfinished item.
+
+
+2026-05-12 PRD #40 - Refresh proc macro status docs
+
+Completed:
+- Refreshed `joltr-macros` public/module docs for AutoMiddleware, PatchQuery, TsExport, and `ws!` so they describe the implemented behavior instead of early phase/current-slice placeholders.
+- Updated AutoMiddleware internals docs around ordering markers, field-bearing service extraction, typed query handling, by-ref request borrowing, and finished-request short-circuiting.
+- Updated PatchQuery, TsExport, and `ws!` docs to cover current SQL placeholder generation, link-time TypeScript inventory registration, tagged enum unions, and WebSocket lifecycle/writer-drain behavior.
+
+Verification:
+- `cargo test -p joltr-macros` -> 272 unit tests passed; doc tests passed with 2 ignored.
+- `cargo test -p joltr-core --test auto_middleware_derive --test patch_query_derive` -> 11 AutoMiddleware tests and 17 PatchQuery tests passed.
+- `cargo test -p joltr-types --test ts_export_integration` -> 8 passed.
+- `npm run type-check` -> skipped: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept this as a documentation-only PRD slice: no macro expansion logic or public API behavior was changed.
+- Preserved historical test comments where they pin regression context, but removed stale phase/status language from public and module-level docs.
+- Described `#[ts(flatten)]` honestly as preserved metadata rather than implemented cross-type flattening.
+
+Files changed:
+- `joltr-macros/src/lib.rs`
+- `joltr-macros/src/auto_middleware.rs`
+- `joltr-macros/src/patch_query.rs`
+- `joltr-macros/src/ts_export.rs`
+- `joltr-macros/src/ws.rs`
+- `prd.json` (item 40 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.
+
+
+2026-05-12 PRD #45 - Document spec implementation deltas
+
+Completed:
+- Updated `spec_rust.md` to replace stale `tokio-postgres` LISTEN/NOTIFY language with the implemented `sqlx::postgres::PgListener` design.
+- Updated `spec_rust.md` and `README.md` to document the expanded JWT algorithm surface: HS256/384/512, RS256/384/512, and ES256/384.
+- Added concise implementation notes covering dedicated listener connections, pooled `pg_notify` publishes, and PEM-backed asymmetric JWT keys.
+
+Verification:
+- `cargo test --workspace` -> passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept this as a docs-only slice; no Rust behavior or public API changed.
+- Documented the implementation deltas both in the original port spec and the public README so the branch no longer under-describes shipped behavior.
+- Used `PgListener` wording in user-facing docs and fully qualified `sqlx::postgres::PgListener` in the spec for precision.
+
+Files changed:
+- `README.md`
+- `spec_rust.md`
+- `prd.json` (item 45 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), example container integration (#46), and final branch diff review (#47).
+
+
+2026-05-12 PRD #46 - Run example container integration
+
+Completed:
+- Ran the existing example TypeScript/container integration script against the current Docker image path.
+- Confirmed the script builds the example image, starts the container, waits for `/api/test/typed`, copies generated `types.d.ts`, type-checks the TypeScript integration package, and verifies the runtime response contract.
+- No code changes were needed for the Dockerfile, generated types path, or typed endpoint path.
+
+Verification:
+- `examples/basic/integration/run.sh` -> passed; verified `TypedTestResponse v1` from the running container.
+- Guarded `npm run type-check` -> skipped: no repo-root `package.json`.
+- Guarded `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+- `python3 -m json.tool prd.json >/dev/null` -> passed.
+
+Key decisions:
+- Treated the passing integration script as the PRD implementation result rather than changing already-working code.
+- Kept generated `types.d.ts` out of the source tree; the script copies it to `target/joltr-basic-integration/types.d.ts` for TypeScript checks.
+
+Files changed:
+- `prd.json` (item 46 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), and final branch diff review (#47).
+
+
+2026-05-13 PRD #43 - Remove obsolete placeholder macros
+
+Completed:
+- Removed the scaffold-only `joltr_placeholder` attribute macro from `joltr-macros`.
+- Removed the scaffold-only `JoltRPlaceholder` derive macro from `joltr-macros`.
+- Removed the now-unused `quote` and `ItemFn` imports from the proc-macro crate root.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-macros` -> 272 passed; doc tests passed with 2 ignored.
+- `cargo check --workspace --all-targets` -> passed.
+- `npm run type-check` -> not applicable to this repo-local workspace: there is no repo-root `package.json`; the attempted command reported no `type-check` script from npm's parent lookup.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server` directory.
+
+Key decisions:
+- Kept the change to the public proc-macro surface only; no implemented macro behavior was changed.
+- Did not add compatibility aliases because the removed macros were documented placeholders and are not part of the Rust port API described by `spec_rust.md`.
+
+Files changed:
+- `joltr-macros/src/lib.rs`
+- `prd.json` (item 43 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are stale core status docs (#44) and final branch diff review (#47).
+
+
+2026-05-13 PRD #47 - Review final branch diff
+
+Completed:
+- Reviewed the dirty branch file set and diff summary for generated or accidental files.
+- Confirmed the remaining diff is limited to source, tests, the example chat module, and Cargo.lock dependency updates.
+- Found no whitespace errors and no unexpected untracked generated artifacts.
+
+Verification:
+- `git status --short` -> listed the expected Rust-port source/test changes plus untracked `examples/basic/src/chat.rs`.
+- `git diff HEAD --stat` -> reviewed source/test/lockfile-only diff; no build output or generated types in the source tree.
+- `git diff --check` -> clean.
+- `cargo check --workspace --all-targets` -> passed.
+- `cargo test --workspace` -> passed.
+- Guarded `npm run type-check` -> skipped: no repo-root `package.json`.
+- Guarded `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Chose PRD #47 before stale-doc polish (#44) because final diff review targets unknown unknowns and integration readiness.
+- Kept the review scoped to diff readiness; no source behavior was changed.
+- Did not remove or alter unrelated dirty files because they are part of the reviewed Rust-port branch state.
+
+Files changed:
+- `prd.json` (item 47 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers for PRD #47. PRD #44 remains unfinished.
+
+
+2026-05-13 PRD #44 - Refresh stale core status docs
+
+Completed:
+- Refreshed stale core/server module docs so CORS, TLS startup, WebSocket, SSE, and utils docs describe implemented behavior instead of upcoming or placeholder work.
+- Updated WebSocket docs for the current `ws!` route handler, lifecycle ordering, writer task, message conversion, pub/sub subscription forwarding, and hidden legacy witness marker.
+- Updated crate-root WebSocket re-export comments that still described the early witness scaffold and future read/write loops.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test --workspace` -> passed.
+- Guarded `npm run type-check` equivalent -> skipped: no repo-root `package.json`.
+- Guarded `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept this as a documentation-only slice; no Rust behavior or public API changed.
+- Preserved legitimate stability notes such as `#[non_exhaustive]`, but removed stale upcoming/placeholder status wording.
+- Included `joltr-core/src/lib.rs` because its WebSocket re-export comments still repeated the stale witness/read-write-loop status.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `joltr-core/src/websocket.rs`
+- `joltr-core/src/sse.rs`
+- `joltr-core/src/lib.rs`
+- `joltr-utils/src/lib.rs`
+- `prd.json` (item 44 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.

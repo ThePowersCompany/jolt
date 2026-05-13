@@ -1,7 +1,7 @@
 name: CI
 
 on:
-  pull_request
+  pull_request:
 
 permissions:
   id-token: write
@@ -14,10 +14,24 @@ jobs:
     name: Run Tests
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - uses: actions/setup-node@v4
         with:
-          version: 0.15.2
+          node-version: "20"
 
-      - name: Jolt tests
-        run: zig build test --summary all
+      - name: Rust formatting
+        run: cargo fmt --check
 
+      - name: Rust workspace check
+        run: cargo check --workspace --all-targets
+
+      - name: Build example Docker image
+        run: docker build -t joltr-basic-example:ci -f examples/basic/Dockerfile .
+
+      - name: TypeScript container integration
+        run: JOLTR_BASIC_IMAGE=joltr-basic-example:ci JOLTR_BASIC_SKIP_DOCKER_BUILD=1 examples/basic/integration/run.sh

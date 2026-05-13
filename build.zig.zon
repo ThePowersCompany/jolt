@@ -1,5 +1,5 @@
 .{
-    .name = .jolt,
+    .name = .joltr,
     .paths = .{
         "build.zig",
         "build.zig.zon",

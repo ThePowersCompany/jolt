@@ -1,0 +1,422 @@
+{
+  "tasks": [
+    {
+      "id": "1",
+      "title": "Redirect helper",
+      "phase": "Phase 6",
+      "description": "Add Response::redirect(location, status) constructor and a Redirect type that converts into a Response with Location header. Support 301/302/303/307/308 status codes.",
+      "files": ["joltr-core/src/response.rs"],
+      "tests": ["joltr-core/tests/redirect.rs"],
+      "passes": true
+    },
+    {
+      "id": "2",
+      "title": "SetCookie parsing from Set-Cookie header",
+      "phase": "Phase 6",
+      "description": "Implement SetCookie::parse(header_value) that parses the Set-Cookie response header format: name=value; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax|Strict|None; Max-Age=N; Expires=<date>.",
+      "files": ["joltr-core/src/cookie.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": true
+    },
+    {
+      "id": "3",
+      "title": "SetCookie builder and to_header",
+      "phase": "Phase 6",
+      "description": "Add SetCookie::new(name, value) builder with .path(), .domain(), .secure(), .http_only(), .same_site(), .max_age(), .expires() chainable methods. Implement Display for SetCookie that renders the Set-Cookie header value string.",
+      "files": ["joltr-core/src/cookie.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": true
+    },
+    {
+      "id": "4",
+      "title": "Cookie request header parsing",
+      "phase": "Phase 6",
+      "description": "Implement Cookie::parse_all(header_value) that parses the Cookie request header (semicolon-separated name=value pairs) into Vec<Cookie>. Add Request::cookies() convenience method that parses from the Cookie header.",
+      "files": ["joltr-core/src/cookie.rs", "joltr-core/src/request.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": true
+    },
+    {
+      "id": "5",
+      "title": "Response set_cookie and remove_cookie helpers",
+      "phase": "Phase 6",
+      "description": "Add Response::set_cookie(set_cookie) that appends a Set-Cookie header. Add Response::remove_cookie(name) that sets a Set-Cookie with Max-Age=0 and Expires in the past.",
+      "files": ["joltr-core/src/response.rs"],
+      "tests": ["joltr-core/tests/cookie.rs"],
+      "passes": true
+    },
+    {
+      "id": "6",
+      "title": "Static file serving layer",
+      "phase": "Phase 6",
+      "description": "Implement FileServeLayer / FileServeService using tower-http ServeDir/ServeFile. Serve files from a configurable root directory. Map to a route prefix (e.g. /static/*). Return 404 for missing files.",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": true
+    },
+    {
+      "id": "7",
+      "title": "File serving: cache headers and ETag",
+      "phase": "Phase 6",
+      "description": "Add Cache-Control, ETag, and Last-Modified headers to served files. Support If-None-Match → 304 Not Modified conditional response.",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": true
+    },
+    {
+      "id": "8",
+      "title": "File serving: gzip and Range support",
+      "phase": "Phase 6",
+      "description": "Support Accept-Encoding: gzip for pre-compressed files (.gz). Support Range header with 206 Partial Content responses for byte-range requests. Guard against path traversal (../).",
+      "files": ["joltr-core/src/file_serve.rs"],
+      "tests": ["joltr-core/tests/file_serve.rs"],
+      "passes": true
+    },
+    {
+      "id": "9",
+      "title": "Unified error type: JoltRError trait with Into<Response>",
+      "phase": "Phase 6",
+      "description": "Define a JoltRError trait (or re-export) that converts typed endpoint errors into JSON error responses with status code and message. Endpoint return type Result<Response<T>, E> where E: JoltRError → 4xx/5xx JSON response with { error: string, status: number }.",
+      "files": ["joltr-core/src/error.rs"],
+      "tests": ["joltr-core/tests/error.rs"],
+      "passes": true
+    },
+    {
+      "id": "10",
+      "title": "Default error handler in #[endpoint] macro",
+      "phase": "Phase 6",
+      "description": "In the #[endpoint] codegen, when the handler returns Result<Response<T>, E>, wrap the call in a match that converts Err(E) via Into<Response>. Support a #[error_handler(fn)] attribute on individual methods for custom error formatting.",
+      "files": ["joltr-macros/src/endpoint.rs"],
+      "tests": ["joltr-macros/tests/endpoint_error.rs"],
+      "passes": true
+    },
+    {
+      "id": "11",
+      "title": "TsExport: joltr-types binary crate",
+      "phase": "Phase 5",
+      "description": "Create joltr-types binary crate in workspace. It collects all #[derive(TsExport)] structs via linkme/inventory at link time, renders TypeScript interfaces/enums/unions, and writes types.d.ts to the workspace root.",
+      "files": ["joltr-types/Cargo.toml", "joltr-types/src/main.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
+    },
+    {
+      "id": "12",
+      "title": "TsExport: inventory registry and type rendering",
+      "phase": "Phase 5",
+      "description": "Implement a TsTypeDef struct (name, fields, generics, docs, kind: Interface|Enum|Union) stored in an inventory. Implement TypeScript rendering: export interface, export type (union), enum (const object + type). Handle Optional<T> → T | null, JsonArray<T> → T[], Vec<T> → T[], Option<T> → T | null.",
+      "files": ["joltr-types/src/lib.rs", "joltr-macros/src/ts_export.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
+    },
+    {
+      "id": "13",
+      "title": "Example app: scaffold examples/basic crate",
+      "phase": "Phase 6",
+      "description": "Create examples/basic/ with Cargo.toml depending on joltr-core, joltr-db, joltr-templates, joltr-utils. Add a main.rs that starts a JoltRServer with CORS config and tracing.",
+      "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs"],
+      "passes": true
+    },
+    {
+      "id": "14",
+      "title": "Example app: health, echo, and parameterized endpoint",
+      "phase": "Phase 6",
+      "description": "Add GET /api/health (JSON { status: ok }), POST /api/echo (returns request body as JSON), GET /api/items/:id (query param filter). Demonstrate #[endpoint], body parsing, query params, path segments.",
+      "files": ["examples/basic/src/endpoints.rs"],
+      "passes": true
+    },
+    {
+      "id": "15",
+      "title": "Example app: WebSocket chat endpoint",
+      "phase": "Phase 6",
+      "description": "Add ws! /ws/chat with WebSocketHandler trait impl. Demonstrate on_open, on_message (broadcast via PubSub), on_close. Use AuthWsJwtLayer for token auth.",
+      "files": ["examples/basic/src/chat.rs"],
+      "passes": true
+    },
+    {
+      "id": "16",
+      "title": "Example app: background task and DB migration",
+      "phase": "Phase 6",
+      "description": "Add a Task that logs stats every 30s. Add a migrations/ directory with one SQL migration file. Wire JoltRDb with migrate() call on startup.",
+      "files": ["examples/basic/src/tasks.rs", "examples/basic/migrations/0001_init.sql"],
+      "passes": true
+    },
+    {
+      "id": "17",
+      "title": "Example app: template rendering endpoint",
+      "phase": "Phase 6",
+      "description": "Add GET / that renders a Handlebars template with dynamic data. Add a templates/ directory with an index.hbs file. Demonstrate TemplateEngine usage.",
+      "files": ["examples/basic/src/endpoints.rs", "examples/basic/templates/index.hbs"],
+      "passes": true
+    },
+    {
+      "id": "18",
+      "title": "TLS config carries cert and key paths",
+      "phase": "Phase 6",
+      "description": "Replace the TlsConfig stub with fields for certificate chain path and private key path, plus a builder method JoltRServer::tls(config). Do not change serving behavior yet.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/src/tests.rs"],
+      "passes": true
+    },
+    {
+      "id": "19",
+      "title": "TLS server startup uses rustls",
+      "phase": "Phase 6",
+      "description": "When tls_config is present, start the server with axum-server and rustls using the configured cert/key paths. Preserve the existing plain HTTP path when tls_config is absent.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/tests/tls.rs"],
+      "passes": true
+    },
+    {
+      "id": "20",
+      "title": "TLS rejects invalid certificate configuration",
+      "phase": "Phase 6",
+      "description": "Surface a startup error when TLS cert or key files are missing, unreadable, or malformed. Add tests that pin the error path without binding a long-lived server.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/tests/tls.rs"],
+      "passes": true
+    },
+    {
+      "id": "21",
+      "title": "Server threads build owned Tokio runtime",
+      "phase": "Phase 1",
+      "description": "Add a non-async server entry point that builds a Tokio multi-thread runtime using JoltRServer::threads and then serves the configured router. Keep the existing async start path for callers that already own a runtime.",
+      "files": ["joltr-core/src/server.rs"],
+      "tests": ["joltr-core/src/tests.rs"],
+      "passes": true
+    },
+    {
+      "id": "22",
+      "title": "AutoMiddleware typed QueryParams extraction",
+      "phase": "Phase 2",
+      "description": "Replace the typed QueryParams<T> unimplemented! expansion with generated extraction that parses the request query into T using the existing parse_query support and fails with a bad-request response on invalid input.",
+      "files": ["joltr-macros/src/auto_middleware.rs", "joltr-core/src/parse_query.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
+      "id": "23",
+      "title": "AutoMiddleware by-ref Request extraction",
+      "phase": "Phase 2",
+      "description": "Replace the &Request unimplemented! expansion by threading lifetimes through the generated helper so middleware structs can borrow the request instead of cloning it.",
+      "files": ["joltr-macros/src/auto_middleware.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
+      "id": "24",
+      "title": "AutoMiddleware generated layer performs extraction",
+      "phase": "Phase 2",
+      "description": "Wire the generated tower service so the middleware extraction helper actually runs in request handling before delegating to the inner service, rather than only emitting ordering markers.",
+      "files": ["joltr-macros/src/auto_middleware.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
+      "id": "25",
+      "title": "AutoMiddleware request-finished short circuit",
+      "phase": "Phase 2",
+      "description": "Honor RequestExt::is_finished() inside generated middleware so a finished request returns the stored shortcut response without invoking later middleware or the endpoint handler.",
+      "files": ["joltr-macros/src/auto_middleware.rs", "joltr-core/src/request_ext.rs"],
+      "tests": ["joltr-core/tests/auto_middleware_derive.rs"],
+      "passes": true
+    },
+    {
+      "id": "26",
+      "title": "TsExport preserves user-defined type references",
+      "phase": "Phase 5",
+      "description": "When a field type is a user-defined path that is not otherwise mapped, render the final Rust identifier as the TypeScript type instead of falling back to any or dropping the type information.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
+    },
+    {
+      "id": "27",
+      "title": "TsExport emits generic parameters",
+      "phase": "Phase 5",
+      "description": "Parse generic parameters from derived structs and register them in TsTypeDef.generics so rendered interfaces include angle-bracket parameters such as export interface Page<T>.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
+    },
+    {
+      "id": "28",
+      "title": "TsExport tagged enum unions",
+      "phase": "Phase 5",
+      "description": "Support enums with data-carrying variants by rendering a TypeScript union of tagged object shapes. Keep existing simple unit-enum rendering unchanged.",
+      "files": ["joltr-macros/src/ts_export.rs", "joltr-types/src/lib.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs"],
+      "passes": true
+    },
+    {
+      "id": "29",
+      "title": "JWT RSA algorithm support",
+      "phase": "Phase 5",
+      "description": "Add RS256/RS384/RS512 encode/decode support using PEM key material while preserving existing HS256/HS384/HS512 behavior and errors.",
+      "files": ["joltr-utils/src/jwt.rs"],
+      "tests": ["joltr-utils/src/tests/jwt.rs"],
+      "passes": true
+    },
+    {
+      "id": "30",
+      "title": "JWT ECDSA algorithm support",
+      "phase": "Phase 5",
+      "description": "Add ES256/ES384 encode/decode support using PEM key material. Add tests for valid tokens, wrong keys, and algorithm mismatch.",
+      "files": ["joltr-utils/src/jwt.rs"],
+      "tests": ["joltr-utils/src/tests/jwt.rs"],
+      "passes": true
+    },
+    {
+      "id": "31",
+      "title": "Example app demonstrates static files",
+      "phase": "Phase 6",
+      "description": "Add a public static asset directory to examples/basic and wire FileServeLayer so the example demonstrates static file serving from /static.",
+      "files": ["examples/basic/src/main.rs", "examples/basic/public"],
+      "tests": ["examples/basic/src/main.rs"],
+      "passes": true
+    },
+    {
+      "id": "32",
+      "title": "Example app documents TLS startup",
+      "phase": "Phase 6",
+      "description": "Update examples/basic so TLS can be enabled through environment variables for cert and key paths, while default local startup remains plain HTTP.",
+      "files": ["examples/basic/src/main.rs", "examples/basic/README.md"],
+      "tests": ["examples/basic/src/main.rs"],
+      "passes": true
+    },
+    {
+      "id": "33",
+      "title": "Example app exposes typed test endpoint",
+      "phase": "Finalization",
+      "description": "Add a deterministic test endpoint to examples/basic that uses JoltR endpoint macros and returns a typed JSON response derived with TsExport. The endpoint should be safe for CI and return stable fields that a TypeScript integration test can assert.",
+      "files": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
+      "tests": ["examples/basic/src/endpoints.rs", "examples/basic/src/main.rs"],
+      "passes": true
+    },
+    {
+      "id": "34",
+      "title": "Example app emits TypeScript types",
+      "phase": "Finalization",
+      "description": "Wire the example app so its TsExport-derived endpoint response types can be rendered into a generated types.d.ts artifact during build or test. The generated file must include the test endpoint response type used by the TypeScript integration test.",
+      "files": ["examples/basic/Cargo.toml", "examples/basic/src/main.rs", "examples/basic/src/endpoints.rs", "joltr-types/src/main.rs"],
+      "tests": ["joltr-types/tests/ts_export_integration.rs", "examples/basic/src/main.rs"],
+      "passes": true
+    },
+    {
+      "id": "35",
+      "title": "Example app Docker image",
+      "phase": "Finalization",
+      "description": "Add a Dockerfile for examples/basic that builds the Rust workspace, packages the example mini project using the local JoltR crates, exposes the configured HTTP port, and starts the example binary without requiring external services by default.",
+      "files": ["examples/basic/Dockerfile", "examples/basic/README.md", ".dockerignore"],
+      "tests": ["docker build -f examples/basic/Dockerfile ."],
+      "passes": true
+    },
+    {
+      "id": "36",
+      "title": "TypeScript container integration test",
+      "phase": "Finalization",
+      "description": "Add a local integration test script that builds or uses the example Docker image, starts the container, waits for readiness, calls the typed test endpoint, imports or type-checks against the generated types.d.ts, and verifies the runtime response shape in TypeScript.",
+      "files": ["examples/basic/integration/package.json", "examples/basic/integration/tsconfig.json", "examples/basic/integration/test.ts", "examples/basic/integration/run.sh"],
+      "tests": ["examples/basic/integration/run.sh"],
+      "passes": true
+    },
+    {
+      "id": "37",
+      "title": "CI builds example container and runs TypeScript integration",
+      "phase": "Finalization",
+      "description": "Update .github/workflows/build-and-test.yml so CI runs the Rust workspace checks, builds the examples/basic Docker image, starts it, and runs the TypeScript integration test against the containerized JoltR example endpoint.",
+      "files": [".github/workflows/build-and-test.yml", "examples/basic/integration/run.sh"],
+      "tests": [".github/workflows/build-and-test.yml"],
+      "passes": true
+    },
+    {
+      "id": "38",
+      "title": "WebSocket integration sends on_open message",
+      "phase": "Finalization",
+      "description": "Fix the WebSocket upgrade/session path so a handler's on_open callback can send an initial message to the connected client before normal message exchange continues. Preserve invalid-token rejection behavior.",
+      "files": ["joltr-core/src/websocket.rs", "joltr-macros/src/ws.rs"],
+      "tests": ["cargo test -p joltr-core --test ws_integration"],
+      "passes": true
+    },
+    {
+      "id": "39",
+      "title": "WebSocket lifecycle ordering regression test",
+      "phase": "Finalization",
+      "description": "Add or tighten a regression test that proves WebSocket callbacks run in the documented order for an authenticated connection: on_open sends welcome, client message reaches on_message, response is delivered, and close/shutdown callbacks run without dropping queued sends.",
+      "files": ["joltr-core/tests/ws_integration.rs", "joltr-core/src/websocket.rs"],
+      "tests": ["cargo test -p joltr-core --test ws_integration valid_token_upgrade_and_message_exchange"],
+      "passes": true
+    },
+    {
+      "id": "40",
+      "title": "Refresh proc macro status docs",
+      "phase": "Finalization",
+      "description": "Update stale phase/status documentation in joltr-macros so AutoMiddleware, PatchQuery, TsExport, and ws! docs describe the implemented behavior instead of early placeholder/current-phase notes.",
+      "files": ["joltr-macros/src/lib.rs", "joltr-macros/src/auto_middleware.rs", "joltr-macros/src/patch_query.rs", "joltr-macros/src/ts_export.rs", "joltr-macros/src/ws.rs"],
+      "tests": ["cargo test -p joltr-macros", "cargo test -p joltr-core --test auto_middleware_derive --test patch_query_derive", "cargo test -p joltr-types --test ts_export_integration"],
+      "passes": true
+    },
+    {
+      "id": "41",
+      "title": "Remove workspace test warning",
+      "phase": "Finalization",
+      "description": "Remove the unused ParseMethodError import reported by cargo test so the full workspace test run is clean of warnings introduced by the Rust port test suite.",
+      "files": ["joltr-core/src/tests.rs"],
+      "tests": ["cargo test --workspace"],
+      "passes": true
+    },
+    {
+      "id": "42",
+      "title": "Final Rust port verification docs",
+      "phase": "Finalization",
+      "description": "Document the final local verification path for the Rust port: cargo check/test, example Docker build, generated TypeScript types, and the TypeScript integration test. Include the expected endpoint URL and response contract for the example mini project.",
+      "files": ["README.md", "examples/basic/README.md", "progress.txt"],
+      "tests": ["cargo check --workspace --all-targets", "cargo test --workspace", "examples/basic/integration/run.sh"],
+      "passes": true
+    },
+    {
+      "id": "43",
+      "title": "Remove obsolete placeholder macros",
+      "phase": "Finalization",
+      "description": "Remove the early scaffold-only joltr_placeholder attribute macro and JoltRPlaceholder derive from joltr-macros so the public proc-macro surface only exposes the Rust port APIs described by spec_rust.md.",
+      "files": ["joltr-macros/src/lib.rs"],
+      "tests": ["cargo test -p joltr-macros", "cargo check --workspace --all-targets"],
+      "passes": true
+    },
+    {
+      "id": "44",
+      "title": "Refresh stale core status docs",
+      "phase": "Finalization",
+      "description": "Update stale module documentation in joltr-core and joltr-utils that still describes implemented behavior as future, upcoming, or placeholder work. Keep the docs factual and aligned with the current passing implementation.",
+      "files": ["joltr-core/src/server.rs", "joltr-core/src/websocket.rs", "joltr-core/src/sse.rs", "joltr-utils/src/lib.rs"],
+      "tests": ["cargo test --workspace"],
+      "passes": true
+    },
+    {
+      "id": "45",
+      "title": "Document spec implementation deltas",
+      "phase": "Finalization",
+      "description": "Update spec_rust.md or project docs to record intentional implementation deltas from the original plan, including expanded JWT algorithm support and the sqlx PgListener LISTEN/NOTIFY choice, so the spec no longer under-describes the branch.",
+      "files": ["spec_rust.md", "README.md"],
+      "tests": ["cargo test --workspace"],
+      "passes": true
+    },
+    {
+      "id": "46",
+      "title": "Run example container integration",
+      "phase": "Finalization",
+      "description": "Run the example TypeScript/container integration script and fix only failures in the example Docker, generated types, or typed endpoint path. This is the final non-Rust verification slice for the Rust port.",
+      "files": ["examples/basic/Dockerfile", "examples/basic/integration/run.sh", "examples/basic/integration/test.ts", "types.d.ts"],
+      "tests": ["examples/basic/integration/run.sh"],
+      "passes": true
+    },
+    {
+      "id": "47",
+      "title": "Review final branch diff",
+      "phase": "Finalization",
+      "description": "Review the dirty feature branch diff, ensure no generated or accidental files are included unintentionally, and confirm the remaining Rust port changes are ready to commit without reverting unrelated user work.",
+      "files": ["Cargo.lock", "examples/basic/src/chat.rs", "joltr-core", "joltr-db", "joltr-macros", "joltr-templates", "joltr-types", "joltr-utils"],
+      "tests": ["git status --short", "git diff --stat", "cargo check --workspace --all-targets", "cargo test --workspace"],
+      "passes": true
+    }
+  ]
+}

@@ -48,14 +48,14 @@ pub fn build(b: *std.Build) !void {
 
     const facilio = try build_facilio("facil.io", b, target, optimize, false);
 
-    const jolt_module = b.addModule("jolt", .{
+    const joltr_module = b.addModule("joltr", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    jolt_module.linkLibrary(facilio);
+    joltr_module.linkLibrary(facilio);
 
-    import_deps(jolt_module);
+    import_deps(joltr_module);
 
     const exe_mod = b.addModule("server", .{
         .root_source_file = b.path("src/main.zig"),
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) !void {
         .root_module = exe_mod,
     });
 
-    exe.root_module.addImport("jolt", jolt_module);
+    exe.root_module.addImport("joltr", joltr_module);
 
     import_deps(exe.root_module);
 

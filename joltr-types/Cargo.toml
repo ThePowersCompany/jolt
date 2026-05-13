@@ -1,0 +1,27 @@
+[package]
+name = "joltr-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# JOLTR-RS-177 (PRD #12) split: the rich `TsTypeDef` shape + `inventory::collect!`
+# + structured TS rendering live in `src/lib.rs`; the `joltr-types` binary in
+# `src/main.rs` is thin glue that resolves the output path and writes the
+# rendered string. The two targets share the same inventory instance — only the
+# library defines `inventory::collect!(TsTypeDef)`, so any binary or test that
+# links the lib sees the same registry.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "joltr-types"
+path = "src/main.rs"
+
+[dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# Used by `tests/ts_export_integration.rs` to derive `TsExport` on a fixture
+# struct and verify the inventory submission renders end-to-end through
+# `joltr_types::render()` inside the same test binary.
+joltr-macros = { path = "../joltr-macros" }
