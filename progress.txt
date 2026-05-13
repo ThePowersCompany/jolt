@@ -1366,3 +1366,30 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. All PRD items are now marked complete.
+
+
+2026-05-12 PRD #45 - Document spec implementation deltas
+
+Completed:
+- Updated `spec_rust.md` to replace stale `tokio-postgres` LISTEN/NOTIFY language with the implemented `sqlx::postgres::PgListener` design.
+- Updated `spec_rust.md` and `README.md` to document the expanded JWT algorithm surface: HS256/384/512, RS256/384/512, and ES256/384.
+- Added concise implementation notes covering dedicated listener connections, pooled `pg_notify` publishes, and PEM-backed asymmetric JWT keys.
+
+Verification:
+- `cargo test --workspace` -> passed.
+- `npm run type-check` -> guarded no-op: no repo-root `package.json`.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server/package.json`.
+
+Key decisions:
+- Kept this as a docs-only slice; no Rust behavior or public API changed.
+- Documented the implementation deltas both in the original port spec and the public README so the branch no longer under-describes shipped behavior.
+- Used `PgListener` wording in user-facing docs and fully qualified `sqlx::postgres::PgListener` in the spec for precision.
+
+Files changed:
+- `README.md`
+- `spec_rust.md`
+- `prd.json` (item 45 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), example container integration (#46), and final branch diff review (#47).

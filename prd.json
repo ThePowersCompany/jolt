@@ -372,6 +372,51 @@
       "files": ["README.md", "examples/basic/README.md", "progress.txt"],
       "tests": ["cargo check --workspace --all-targets", "cargo test --workspace", "examples/basic/integration/run.sh"],
       "passes": true
+    },
+    {
+      "id": "43",
+      "title": "Remove obsolete placeholder macros",
+      "phase": "Finalization",
+      "description": "Remove the early scaffold-only joltr_placeholder attribute macro and JoltRPlaceholder derive from joltr-macros so the public proc-macro surface only exposes the Rust port APIs described by spec_rust.md.",
+      "files": ["joltr-macros/src/lib.rs"],
+      "tests": ["cargo test -p joltr-macros", "cargo check --workspace --all-targets"],
+      "passes": false
+    },
+    {
+      "id": "44",
+      "title": "Refresh stale core status docs",
+      "phase": "Finalization",
+      "description": "Update stale module documentation in joltr-core and joltr-utils that still describes implemented behavior as future, upcoming, or placeholder work. Keep the docs factual and aligned with the current passing implementation.",
+      "files": ["joltr-core/src/server.rs", "joltr-core/src/websocket.rs", "joltr-core/src/sse.rs", "joltr-utils/src/lib.rs"],
+      "tests": ["cargo test --workspace"],
+      "passes": false
+    },
+    {
+      "id": "45",
+      "title": "Document spec implementation deltas",
+      "phase": "Finalization",
+      "description": "Update spec_rust.md or project docs to record intentional implementation deltas from the original plan, including expanded JWT algorithm support and the sqlx PgListener LISTEN/NOTIFY choice, so the spec no longer under-describes the branch.",
+      "files": ["spec_rust.md", "README.md"],
+      "tests": ["cargo test --workspace"],
+      "passes": true
+    },
+    {
+      "id": "46",
+      "title": "Run example container integration",
+      "phase": "Finalization",
+      "description": "Run the example TypeScript/container integration script and fix only failures in the example Docker, generated types, or typed endpoint path. This is the final non-Rust verification slice for the Rust port.",
+      "files": ["examples/basic/Dockerfile", "examples/basic/integration/run.sh", "examples/basic/integration/test.ts", "types.d.ts"],
+      "tests": ["examples/basic/integration/run.sh"],
+      "passes": false
+    },
+    {
+      "id": "47",
+      "title": "Review final branch diff",
+      "phase": "Finalization",
+      "description": "Review the dirty feature branch diff, ensure no generated or accidental files are included unintentionally, and confirm the remaining Rust port changes are ready to commit without reverting unrelated user work.",
+      "files": ["Cargo.lock", "examples/basic/src/chat.rs", "joltr-core", "joltr-db", "joltr-macros", "joltr-templates", "joltr-types", "joltr-utils"],
+      "tests": ["git status --short", "git diff --stat", "cargo check --workspace --all-targets", "cargo test --workspace"],
+      "passes": false
     }
   ]
 }

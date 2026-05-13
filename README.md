@@ -25,8 +25,8 @@ Zig is brilliant if you enjoy debugging segfaults at 2am, rewriting your entire 
 |---|---|
 | `joltr-core` | Server builder, router, request/response, WS, SSE, pub/sub, tasks, TLS |
 | `joltr-macros` | `#[endpoint]`, `#[derive(AutoMiddleware)]`, `#[derive(PatchQuery)]`, `#[derive(TsExport)]` |
-| `joltr-db` | sqlx pool, file-based migrations with SHA-256 checksums, LISTEN/NOTIFY |
-| `joltr-utils` | JWT (HS256/384/512), PBKDF2 hashing, UUID v4/v7, `Optional<T>` tri-state |
+| `joltr-db` | sqlx pool, file-based migrations with SHA-256 checksums, LISTEN/NOTIFY via `PgListener` |
+| `joltr-utils` | JWT (HS256/384/512, RS256/384/512, ES256/384), PBKDF2 hashing, UUID v4/v7, `Optional<T>` tri-state |
 | `joltr-templates` | Handlebars rendering — no C FFI, no custom parser, just `handlebars` |
 
 ## Quick Start
@@ -64,6 +64,11 @@ async fn main() {
 - **PATCH/UPSERT** — `#[derive(PatchQuery)]` generates dynamic SQL from `Optional<T>` fields
 - **Migrations** — File-based SQL migrations with SHA-256 checksums, auto-applied at startup
 - **Background tasks** — Scheduled tasks via `tokio::time::interval` with retry logic
+
+## Implementation Notes
+
+- PostgreSQL LISTEN/NOTIFY uses `sqlx::postgres::PgListener`, not a separate `tokio-postgres` client. Listener streams use dedicated connections; publishes use `SELECT pg_notify($1, $2)` through the regular pool.
+- JWT support intentionally exceeds the original HS256-only port target: HMAC, RSA, and ECDSA algorithms share the same `JwtConfig::new(key_material, algorithm)` API, with PEM key material for asymmetric algorithms.
 
 ## Final Rust Port Verification
 

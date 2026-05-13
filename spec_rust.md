@@ -10,7 +10,7 @@
 | fiobj_mustache | **handlebars** | Mustache-compatible, Rust-native |
 | fio_run_every | **tokio::time::interval** | Standard async scheduling |
 | HTTP/sendfile/TLS | **tower-http** (fs, cors, trace) + **rustls** + **axum-server** | Production-grade, no C deps |
-| JWT (custom HS256) | **jsonwebtoken** | Well-audited, full JWS support |
+| JWT (custom HS256) | **jsonwebtoken** | Well-audited JWS support across HMAC, RSA, and ECDSA algorithms |
 
 ## Crate Layout (workspace)
 
@@ -42,7 +42,7 @@ joltr-rs/
 
 ### Phase 3 — Database & Templates
 
-- `joltr-db`: sqlx connection pool, `query_as` macros, `LISTEN/NOTIFY` via tokio-postgres notification stream
+- `joltr-db`: sqlx connection pool, `query_as` macros, `LISTEN/NOTIFY` via `sqlx::postgres::PgListener`
 - `joltr-db/migrations`: File-based SQL migrations with SHA-256 checksums (port `db-migrations.zig`), auto-create `_migrations` table, rollback detection, new migration scaffolding CLI task
 - `joltr-templates`: Handlebars rendering with Rust struct → template data conversion (port `mustache.zig`)
 - `joltr-macros`: `#[derive(PatchQuery)]` — proc macro that generates dynamic SQL UPDATE/UPSERT from struct fields with `Optional<T>` handling (port `patch.zig`)
@@ -56,7 +56,7 @@ joltr-rs/
 
 ### Phase 5 — Utilities & TypeScript Typegen
 
-- `joltr-utils`: JWT (HS256/384/512 via `jsonwebtoken`), PBKDF2 password hashing, UUID v4/v7, RFC3339 datetime parsing, `Json<T>`/`JsonArray<T>`/`Optional<T>` wrapper types with serde integration, email utils, MIME table
+- `joltr-utils`: JWT (HS256/384/512, RS256/384/512, ES256/384 via `jsonwebtoken`), PBKDF2 password hashing, UUID v4/v7, RFC3339 datetime parsing, `Json<T>`/`JsonArray<T>`/`Optional<T>` wrapper types with serde integration, email utils, MIME table
 - `joltr-macros`: `#[derive(TsExport)]` — proc macro that generates `types.d.ts` from Rust endpoint structs, supporting unions, enums, optionally-tagged unions, `JsonArray`, `Optional` (port `typegen.zig`)
 - `types.d.ts` output parity with the existing Zig typegen
 
@@ -80,6 +80,10 @@ joltr-rs/
 4. **Pub/sub**: facil.io's `fio_publish`/`websocket_subscribe` maps to `tokio::sync::broadcast` channels keyed by channel name in a `DashMap<String, broadcast::Sender>`.
 
 5. **TypeScript typegen**: Proc macro walks the AST of endpoint return types at compile time, writing `types.d.ts` as a side effect (opt-in via a `joltr-types` binary, similar to how `zig build types` works).
+
+6. **LISTEN/NOTIFY stays inside sqlx**: The implemented database layer uses `sqlx::postgres::PgListener` instead of adding `tokio-postgres` as a second Postgres driver. A listener gets its own long-lived connection through the same sqlx pool configuration, while `notify` publishes through `SELECT pg_notify($1, $2)` on the regular pool.
+
+7. **JWT support expanded beyond the original HMAC plan**: The Rust port keeps HS256/384/512 and adds PEM-backed RS256/384/512 plus ES256/384. This keeps one `JwtConfig::new(key_material, algorithm)` API while allowing symmetric and asymmetric deployments.
 
 ## Rough Size Estimate
 
