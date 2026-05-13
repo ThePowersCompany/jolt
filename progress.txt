@@ -1474,3 +1474,34 @@ Files changed:
 
 Blockers or next notes:
 - No blockers for PRD #47. PRD #44 remains unfinished.
+
+
+2026-05-13 PRD #44 - Refresh stale core status docs
+
+Completed:
+- Refreshed stale core/server module docs so CORS, TLS startup, WebSocket, SSE, and utils docs describe implemented behavior instead of upcoming or placeholder work.
+- Updated WebSocket docs for the current `ws!` route handler, lifecycle ordering, writer task, message conversion, pub/sub subscription forwarding, and hidden legacy witness marker.
+- Updated crate-root WebSocket re-export comments that still described the early witness scaffold and future read/write loops.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test --workspace` -> passed.
+- Guarded `npm run type-check` equivalent -> skipped: no repo-root `package.json`.
+- Guarded `cd server && npm run type-check` equivalent -> skipped: no `server/package.json`.
+
+Key decisions:
+- Kept this as a documentation-only slice; no Rust behavior or public API changed.
+- Preserved legitimate stability notes such as `#[non_exhaustive]`, but removed stale upcoming/placeholder status wording.
+- Included `joltr-core/src/lib.rs` because its WebSocket re-export comments still repeated the stale witness/read-write-loop status.
+
+Files changed:
+- `joltr-core/src/server.rs`
+- `joltr-core/src/websocket.rs`
+- `joltr-core/src/sse.rs`
+- `joltr-core/src/lib.rs`
+- `joltr-utils/src/lib.rs`
+- `prd.json` (item 44 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. All PRD items are now marked complete.

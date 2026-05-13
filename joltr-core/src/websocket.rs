@@ -1,33 +1,22 @@
-//! WebSocket lifecycle abstractions (phase28-ws-trait).
+//! WebSocket lifecycle abstractions.
 //!
-//! Phase28 ladder:
-//! - JOLTR-RS-118: define the [`WebSocketHandler`] trait with five async
-//!   lifecycle methods (`on_open`, `on_ready`, `on_message`, `on_close`,
-//!   `on_shutdown`) and no-op default impls. Define minimal placeholder
-//!   shapes for [`WebSocketSender`] and [`WsMessage`] so the trait
-//!   signatures can reference them.
-//! - JOLTR-RS-119: flesh out [`WebSocketSender`] with the
-//!   `send` / `send_text` / `send_json` / `close` methods, an mpsc-backed
-//!   transport so the type is cheaply [`Clone`]able (decision 5 from 118),
-//!   a constructor [`WebSocketSender::channel`] that returns the sender +
-//!   the writer-task feeder receiver, and the [`WsSendError`] enum.
-//! - JOLTR-RS-120 (this iteration): replace the empty [`WsMessage`] enum with
-//!   `Text(String)`, `Binary(Vec<u8>)`, `Ping(Vec<u8>)`, `Pong(Vec<u8>)`, and
-//!   `Close(Option<CloseFrame>)` variants; introduce a JoltR-owned
-//!   [`CloseFrame`] (`code: u16`, `reason: String`) so the public surface
-//!   doesn't expose axum's lifetime-parameterized `CloseFrame<'static>`;
-//!   wire up `From<axum::extract::ws::Message> for WsMessage` and the inverse
-//!   so 124's read/write loops can convert between the framework and axum
-//!   layers; replace [`WebSocketSender::send`]'s `match msg {}` body with a
-//!   real conversion that dispatches the corresponding axum frame.
-//! - JOLTR-RS-121: write the lifecycle-callback ordering unit test
-//!   (open → ready → message → close fires in order on a mock impl).
-//! - JOLTR-RS-122..125: the `ws!` macro that registers a handler against an
-//!   axum router behind a JWT-subprotocol auth guard (consumes the trait
-//!   declared here, composes with [`AuthWsJwtLayer`](crate::AuthWsJwtLayer)
-//!   from JOLTR-RS-076).
+//! This module provides the runtime pieces used by the `ws!` macro and by
+//! manual integrations:
+//! - [`WebSocketHandler`] defines lifecycle callbacks with no-op defaults.
+//! - [`WebSocketSender`] is a cheaply cloneable sender backed by an mpsc
+//!   channel feeding the connection writer task.
+//! - [`WsMessage`] and [`CloseFrame`] are JoltR-owned frame types with lossless
+//!   conversions to and from axum WebSocket messages.
+//! - [`Subscription`] wires a [`PubSub`](crate::PubSub) channel into a
+//!   connection and forwards published messages as JSON frames.
 //!
-//! Architectural decisions pinned here for 120..125 to build on:
+//! The `ws!` macro expands to an axum-compatible route handler that extracts a
+//! JWT from the `Sec-WebSocket-Protocol` header, validates it, upgrades the
+//! socket, spawns the writer task, and drives the handler lifecycle:
+//! `set_claims -> on_open -> on_ready -> on_message* -> on_close -> writer drain
+//! -> on_shutdown`.
+//!
+//! Architectural decisions:
 //!
 //! 1. **Native `async fn` in traits, not the `async-trait` crate.** Rust 1.75+
 //!    natively supports `async fn` in trait declarations (RPITIT); the
@@ -37,32 +26,28 @@
 //!    allocation per call. The trade-off is that the futures produced by the
 //!    methods carry no auto-trait bounds (notably `Send`) by default — the
 //!    `#[allow(async_fn_in_trait)]` on the trait silences the in-trait lint
-//!    that flags this. 124's WS-upgrade handler will express the needed
-//!    `Send` constraint at the call site via a bound like
-//!    `for<'a> H::on_open(&'a mut H, _): Send` (return-type notation,
-//!    stabilized in 1.79) rather than via a trait-level attribute, so a
-//!    single-threaded executor can still implement the trait without a
-//!    needless `Send` requirement.
+//!    that flags this. The generated `ws!` route requires the handler type to
+//!    be `Send` because axum moves it into the upgrade task, but the trait
+//!    itself remains usable by single-threaded integrations.
 //!
-//! 2. **All five methods default to no-ops.** Per the PRD ("All have default
-//!    no-op impls"), implementing the trait on a unit struct must compile
-//!    without overriding any method. The intent is that handlers opt into
-//!    only the lifecycle stages they care about — a simple echo handler
-//!    overrides `on_message`; a chat handler also overrides `on_open` to
-//!    subscribe to a pub/sub channel; a heartbeat handler also overrides
-//!    `on_ready` to spawn a ping timer. This mirrors facil.io's `ws_handler_s`
-//!    callback table where every slot is nullable (see `spec_rust.md` §"Phase
-//!    4 — Real-time: WebSockets…").
+//! 2. **All five methods default to no-ops.** Implementing the trait on a unit
+//!    struct compiles without overriding any method. The intent is that
+//!    handlers opt into only the lifecycle stages they care about — a simple
+//!    echo handler overrides `on_message`; a chat handler also overrides
+//!    `on_open` to subscribe to a pub/sub channel; a heartbeat handler also
+//!    overrides `on_ready` to spawn a ping timer. This mirrors facil.io's
+//!    `ws_handler_s` callback table where every slot is nullable (see
+//!    `spec_rust.md` §"Phase 4 — Real-time: WebSockets…").
 //!
 //! 3. **[`WebSocketSender`] is an mpsc-backed handle to a writer task that
-//!    owns the axum sink.** 119 made the type cheaply [`Clone`]able by
-//!    wrapping a [`tokio::sync::mpsc::UnboundedSender`] of [`axum::extract::ws::Message`]
-//!    rather than locking the sink directly. The framework constructs the
-//!    pair via [`WebSocketSender::channel`]; 124 will spawn a writer task
-//!    that consumes the returned receiver and forwards each frame into the
-//!    axum sink half. Decision 5 (the sender is passed by value to handler
-//!    callbacks so handlers can move it into spawned tasks) only works if
-//!    cloning is cheap — the mpsc handle is one `Arc` clone, no mutex
+//!    owns the axum sink.** The type is cheaply [`Clone`]able because it wraps
+//!    a [`tokio::sync::mpsc::UnboundedSender`] of [`axum::extract::ws::Message`]
+//!    rather than locking the sink directly. The `ws!` upgrade handler
+//!    constructs the pair via [`WebSocketSender::channel`], then spawns a
+//!    writer task that consumes the returned receiver and forwards each frame
+//!    into the axum sink half. Decision 5 (the sender is passed by value to
+//!    handler callbacks so handlers can move it into spawned tasks) only works
+//!    if cloning is cheap — the mpsc handle is one `Arc` clone, no mutex
 //!    contention. [`WsMessage`] is still the public-facing variant set;
 //!    the internal axum [`Message`] is an implementation detail not
 //!    exposed on the public API.
@@ -71,13 +56,13 @@
 //!    routinely mutate per-connection state (subscription set, message
 //!    counters, last-pong instant). Forcing `&self` would push implementers
 //!    onto interior mutability (`Mutex` / `RefCell`) for the common case.
-//!    `&mut self` matches the call pattern in 124's generated upgrade
+//!    `&mut self` matches the call pattern in the generated upgrade
 //!    handler, which owns the handler instance and drives it sequentially
 //!    through the lifecycle (no concurrent calls on a single handler).
 //!
 //! 5. **`WebSocketSender` is passed by value to the open/ready/message
-//!    methods, and `on_close` / `on_shutdown` take no sender.** 119 makes
-//!    `WebSocketSender` cheaply clonable (it wraps an [`Arc`]-backed mpsc
+//!    methods, and `on_close` / `on_shutdown` take no sender.**
+//!    `WebSocketSender` is cheaply clonable (it wraps an [`Arc`]-backed mpsc
 //!    sender to a writer task), so passing by value is no more expensive
 //!    than passing `&WebSocketSender` and lets handlers move the sender into
 //!    spawned tasks (`tokio::spawn`-and-forget for pub/sub fan-in,
@@ -85,13 +70,13 @@
 //!    `on_shutdown` take no sender — the socket is being torn down; sending
 //!    into it is a no-op at best.
 //!
-//! 6. **No trait-level `Error` associated type.** The PRD-118 signatures are
+//! 6. **No trait-level `Error` associated type.** The lifecycle signatures are
 //!    all `async fn ... -> ()`; lifecycle errors are the handler's
-//!    responsibility to log / surface internally. 119's
-//!    [`WebSocketSender::send_text`] / [`send_json`](WebSocketSender::send_json)
-//!    return [`Result<(), WsSendError>`], but those errors don't propagate
-//!    up the trait — the handler decides how to react (drop the connection,
-//!    retry, log). Adding a trait-level `Error` associated type would force
+//!    responsibility to log / surface internally. [`WebSocketSender::send_text`]
+//!    / [`send_json`](WebSocketSender::send_json) return
+//!    [`Result<(), WsSendError>`], but those errors don't propagate up the
+//!    trait — the handler decides how to react (drop the connection, retry,
+//!    log). Adding a trait-level `Error` associated type would force
 //!    every handler to declare one, even for the common case where the
 //!    handler swallows all errors internally.
 
@@ -114,7 +99,7 @@ use crate::pubsub::PubSub;
 /// — decision 5 in the module docs.
 ///
 /// `#[non_exhaustive]` here prevents downstream pattern destructuring with
-/// struct-literal syntax; the type's internal shape is reserved for future
+/// struct-literal syntax; the type's internal shape is reserved for internal
 /// changes (e.g. swapping the unbounded channel for a bounded one if
 /// back-pressure becomes a concern).
 #[derive(Debug, Clone)]
@@ -162,7 +147,7 @@ impl std::error::Error for WsSendError {
 
 impl WebSocketSender {
     /// Constructs a sender + writer-task feeder receiver pair. The
-    /// framework's WS upgrade flow (124) calls this once per accepted
+    /// `ws!` upgrade flow calls this once per accepted
     /// connection, spawns a writer task that consumes the returned
     /// [`mpsc::UnboundedReceiver`] and forwards each frame to the axum
     /// sink half, and hands clones of the sender to the
@@ -319,8 +304,8 @@ impl Drop for Subscription {
 ///    [`WsMessage`] lifetime-free; the conversion to axum's frame allocates
 ///    a `Cow::Owned` on the way out.
 /// 2. Insulating the public surface from axum's frame shape lets us add
-///    fields (a JoltR-side `code` enum, a trailing diagnostic string) in a
-///    future slice without forcing downstream code to track axum upgrades.
+///    fields (a JoltR-side `code` enum, a trailing diagnostic string) without
+///    forcing downstream code to track axum upgrades.
 ///
 /// The `code` is a raw `u16` matching axum's [`CloseCode`](axum::extract::ws::CloseCode)
 /// (also `pub type CloseCode = u16`) — RFC 6455 §7.4 close codes (`1000`
@@ -342,9 +327,9 @@ pub struct CloseFrame {
 /// [`Message`](AxumMessage); the mapping is lossless via the
 /// [`From<AxumMessage>`] / [`From<WsMessage>`] impls below.
 ///
-/// `#[non_exhaustive]` documents that future variant additions (e.g. a
-/// fragmented-frame variant) remain non-breaking: downstream `match` arms
-/// must always include a `_ =>` wildcard.
+/// `#[non_exhaustive]` documents that adding variants (e.g. a fragmented-frame
+/// variant) remains non-breaking: downstream `match` arms must always include
+/// a `_ =>` wildcard.
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WsMessage {
@@ -412,8 +397,8 @@ impl From<WsMessage> for AxumMessage {
 ///
 /// The callbacks fire in this order on a normal connection:
 /// `on_open` → `on_ready` → (`on_message` repeated 0..N times) → `on_close` →
-/// `on_shutdown`. JOLTR-RS-124's generated upgrade handler drives the
-/// sequence; JOLTR-RS-121's test pins the ordering against a mock impl.
+/// `on_shutdown`. The generated `ws!` upgrade handler drives the sequence,
+/// and integration tests pin the ordering against an authenticated connection.
 ///
 /// See the module-level docs for the rationale on native `async fn`,
 /// `&mut self`, the by-value sender, and the absence of a trait-level
@@ -431,8 +416,8 @@ impl From<WsMessage> for AxumMessage {
 ///         let _ = sender.send_text("welcome");
 ///     }
 ///
-///     async fn on_message(&mut self, _msg: WsMessage, _sender: WebSocketSender) {
-///         // 120 adds WsMessage variants; at 119 this body is unreachable.
+///     async fn on_message(&mut self, msg: WsMessage, sender: WebSocketSender) {
+///         let _ = sender.send(msg);
 ///     }
 /// }
 /// ```
@@ -470,23 +455,12 @@ pub trait WebSocketHandler {
     async fn on_shutdown(&mut self) {}
 }
 
-/// Witness value returned by the `ws!` macro at JOLTR-RS-122 (phase29 opener).
+/// Hidden compatibility marker retained from the early `ws!` macro scaffold.
 ///
-/// The macro emits a block expression that constructs this struct with the
-/// two string-literal arguments (`path`, `subprotocol`) so a downstream
-/// integration test can observe that the macro parsed and expanded
-/// correctly. The two remaining macro arguments (the handler type and the
-/// auth-fn path) don't carry runtime values, so they're type-checked at
-/// compile time inside the same expansion via a `const _: fn() = ...`
-/// trait-bound closure (handler type) and a `let _ = ...;` (auth_fn path).
-///
-/// JOLTR-RS-124 will replace this witness with the real WS upgrade-handler
-/// return type (likely an [`axum::Router`] fragment or a registration
-/// helper); the witness exists only to give 122 a typed return value to
-/// land before the upgrade-handler codegen does.
-///
-/// `#[doc(hidden)]` and the `__` prefix mark this as not part of the stable
-/// public API — user code should never reference `__WsMacroWitness` directly.
+/// Current `ws!` expansions return an axum-compatible route handler and do not
+/// construct this type. `#[doc(hidden)]` and the `__` prefix mark it as not
+/// part of the stable public API; user code should never reference
+/// `__WsMacroWitness` directly.
 #[doc(hidden)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct __WsMacroWitness {
@@ -500,7 +474,7 @@ pub struct __WsMacroWitness {
 
 #[cfg(test)]
 mod tests {
-    //! Phase28 test bundle:
+    //! WebSocket unit test bundle:
     //!
     //! - JOLTR-RS-118 tests (preserved): three witnesses for the
     //!   [`WebSocketHandler`] trait — (a) a unit struct can implement it
@@ -513,7 +487,7 @@ mod tests {
     //!   writer-task receiver is dropped yields [`WsSendError::Closed`], and
     //!   a clone of a sender shares the same channel (cheap-clone witness
     //!   for decision 5).
-    //! - JOLTR-RS-120 tests (new): witnesses for the [`WsMessage`] variants
+    //! - JOLTR-RS-120 tests: witnesses for the [`WsMessage`] variants
     //!   and the axum mapping — (a) `axum Text → WsMessage::Text` (the PRD
     //!   verification), (b) the same for binary / ping / pong / close(None)
     //!   / close(Some), (c) the inverse `WsMessage → AxumMessage` mapping,
@@ -540,11 +514,10 @@ mod tests {
             self.open_called = true;
         }
         async fn on_message(&mut self, _msg: WsMessage, _sender: WebSocketSender) {
-            // The 118/119 tests only exercise the open/ready/close/shutdown
+            // These unit tests only exercise the open/ready/close/shutdown
             // path; on_message stays a panic-on-call witness so an
-            // accidentally-routed message would surface loudly. 121's
-            // lifecycle-ordering test will replace this with call-order
-            // recording across all five callbacks.
+            // accidentally-routed message would surface loudly. Integration
+            // tests cover full callback ordering across all lifecycle stages.
             unreachable!("PartialOverrideHandler.on_message is not exercised by 118-120 tests");
         }
     }
@@ -568,8 +541,8 @@ mod tests {
     #[tokio::test]
     async fn default_impls_run_to_completion_on_unit_struct_handler() {
         // Runtime witness: each default impl returns `()` and doesn't
-        // panic. on_message is omitted because WsMessage is uninhabited at
-        // 118/119; 121 covers it once 120 lands the variants.
+        // panic. on_message is omitted because this test focuses the default
+        // lifecycle hooks; message dispatch is covered by dedicated tests.
         let (sender, _rx) = WebSocketSender::channel();
         let mut handler = NoOverrideHandler;
         handler.on_open(sender.clone()).await;
@@ -594,10 +567,8 @@ mod tests {
     #[tokio::test]
     async fn send_text_dispatches_text_frame_through_underlying_channel() {
         // PRD-119 verification: "sender.send_text(\"hi\") calls underlying
-        // WS send." The mpsc receiver IS the writer task's view of the
-        // underlying sink at 119 (the spawned task forwarding rx → axum
-        // sink lands at 124); receiving the frame on rx proves the call
-        // landed on the writer-task feeder channel.
+        // WS send." The mpsc receiver is the writer task's feeder channel;
+        // receiving the frame on rx proves the call reached that channel.
         let (sender, mut rx) = WebSocketSender::channel();
         sender
             .send_text("hi")
@@ -650,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_after_writer_receiver_drop_returns_closed_error() {
-        // Models the connection-torn-down case: 124's writer task drops its
+        // Models the connection-torn-down case: the writer task drops its
         // receiver when the axum sink errors or the close frame is observed.
         // Any subsequent send from a handler must surface as Closed, not
         // panic.
@@ -738,8 +709,8 @@ mod tests {
 
     #[test]
     fn ws_message_to_axum_message_round_trips_across_all_variants() {
-        // The inverse mapping is what 124's writer task will exercise:
-        // it converts outbound WsMessage frames back to AxumMessage. Going
+        // The writer task uses this inverse mapping to convert outbound
+        // WsMessage frames back to AxumMessage. Going
         // WsMessage → AxumMessage → WsMessage should be the identity.
         let cases = vec![
             WsMessage::Text("hi".to_string()),
@@ -761,10 +732,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_dispatches_each_ws_message_variant_through_the_channel() {
-        // Pins that WebSocketSender::send now actually dispatches (vs the
-        // 119 `match msg {}` placeholder). One representative of each
-        // variant goes in; the writer-task feeder receiver yields the
-        // corresponding axum frame in order.
+        // Pins that WebSocketSender::send dispatches each typed frame. One
+        // representative of each variant goes in; the writer-task feeder
+        // receiver yields the corresponding axum frame in order.
         let (sender, mut rx) = WebSocketSender::channel();
         sender.send(WsMessage::Text("t".to_string())).unwrap();
         sender.send(WsMessage::Binary(vec![1, 2])).unwrap();

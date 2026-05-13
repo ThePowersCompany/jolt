@@ -39,8 +39,8 @@ pub use body_log::BodyLogLayer;
 // handler to read.
 pub use auth_ws_jwt::{AuthWsJwtLayer, AuthWsJwtService};
 // JOLTR-RS-075 surface: the WS subprotocol token extractor + its rejection
-// enum + the typed WsJwtToken handle that JOLTR-RS-076's tower::Layer will
-// stash into request extensions for JOLTR-RS-077 to read.
+// enum + the typed WsJwtToken handle that the WS auth layer stores in request
+// extensions for the WebSocket upgrade path.
 pub use auth_websocket::{
     extract_jwt_token as extract_ws_jwt_token, WsJwtToken, WsTokenRejectReason,
     JOLTR_JWT_SUBPROTOCOL,
@@ -89,10 +89,10 @@ pub use to_sql::ToSql;
 // companion.
 // JOLTR-RS-120 surface: the `WsMessage` variants (Text/Binary/Ping/Pong/Close),
 // the JoltR-owned `CloseFrame`, and the `From<axum::Message> for WsMessage`
-// mapping (plus the inverse) that 124's read/write loops will exercise.
-// JOLTR-RS-122 surface: the hidden `__WsMacroWitness` struct that the `ws!`
-// macro's expansion constructs. Not part of the stable API surface; carried
-// only so 122's integration test can verify the macro parsed + expanded.
+// mapping (plus the inverse) used by the WebSocket read/write loops.
+// Legacy hidden `__WsMacroWitness` marker from the early `ws!` scaffold. The
+// current macro expansion returns an axum-compatible route handler and does not
+// construct it.
 // Re-exported at the crate root so user crates `use joltr_core::WebSocketHandler;`
 // without needing to know the internal module layout.
 pub use websocket::{

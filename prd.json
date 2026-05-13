@@ -389,7 +389,7 @@
       "description": "Update stale module documentation in joltr-core and joltr-utils that still describes implemented behavior as future, upcoming, or placeholder work. Keep the docs factual and aligned with the current passing implementation.",
       "files": ["joltr-core/src/server.rs", "joltr-core/src/websocket.rs", "joltr-core/src/sse.rs", "joltr-utils/src/lib.rs"],
       "tests": ["cargo test --workspace"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "45",

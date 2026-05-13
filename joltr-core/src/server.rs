@@ -7,13 +7,13 @@
 //! `0.0.0.0:port` with graceful shutdown driven by `tokio::signal` (SIGINT plus
 //! SIGTERM on unix).
 //!
-//! [`CorsConfig`] (JOLTR-RS-055) carries the four CORS knobs the upcoming
-//! [`tower::Layer`](::tower::Layer) impls in JOLTR-RS-056..058 read at request
-//! time: `allow_origins`, `allow_methods`, `allow_headers`, and `max_age`. The
-//! [`Default`] impl produces an empty/restrictive config (no origins, no
-//! methods, no headers, `max_age = 0`) — opening up CORS is an explicit
-//! caller decision, never the default. [`TlsConfig`] carries certificate/key
-//! paths used by the rustls startup path when TLS is configured.
+//! [`CorsConfig`] stores the request/response header policy consumed by
+//! JoltR's CORS layer: allowed origins, methods, headers, exposed response
+//! headers, and preflight `max_age`. The [`Default`] impl produces an
+//! empty/restrictive config (no origins, no methods, no headers,
+//! `max_age = 0`) — opening up CORS is an explicit caller decision, never the
+//! default. [`TlsConfig`] carries certificate/key paths used by the rustls
+//! startup path when TLS is configured.
 
 use std::future::Future;
 use std::io;
@@ -32,8 +32,7 @@ use crate::endpoint_registry::EndpointRegistry;
 use crate::method::Method;
 use crate::registered_endpoint::RegisteredEndpoint;
 
-/// Per-server CORS configuration consumed by the CORS [`tower::Layer`] landing
-/// in JOLTR-RS-056..058.
+/// Per-server CORS configuration consumed by JoltR's CORS [`tower::Layer`].
 ///
 /// Fields mirror the CORS preflight response headers verbatim:
 /// - `allow_origins` → `Access-Control-Allow-Origin` candidates. A single `"*"`

@@ -2,9 +2,10 @@
 //! JWT signing/verification (jsonwebtoken), UUID/time helpers (uuid + chrono),
 //! and serde glue.
 //!
-//! The [`jwt`] module landed with JOLTR-RS-072 (decode + typed claims + typed
-//! error variants); password hashing, UUID helpers, and serde glue land in
-//! subsequent PRD items.
+//! The [`jwt`] module supports typed claims and HS/RS/ES signing algorithms.
+//! The remaining modules provide password hashing, UUID generation, datetime
+//! formatting, email/mime validation helpers, and JSON wrapper types shared by
+//! the core framework crates.
 
 pub mod datetime;
 pub mod email;

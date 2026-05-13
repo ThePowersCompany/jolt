@@ -1,16 +1,11 @@
-//! Server-Sent Events lifecycle abstractions (phase32-sse).
+//! Server-Sent Events lifecycle abstractions.
 //!
-//! Phase32 ladder:
-//! - JOLTR-RS-135: define the [`SseHandler`] trait with four lifecycle
-//!   methods (`on_open`, `on_ready` -> stream, `on_close`, `on_shutdown`)
-//!   and no-op default impls. Define a minimal placeholder shape for
-//!   [`SseEvent`] so the trait signatures can reference it.
-//! - JOLTR-RS-136: flesh out [`SseEvent`] with `name`, `id`, `retry`
-//!   optional fields and wire `From<SseEvent> for axum::response::sse::Event`.
-//! - JOLTR-RS-137: SSE endpoint adapter that creates `axum::response::Sse`
-//!   from the handler's `on_ready()` stream.
-//! - JOLTR-RS-138: keep-alive comment events every 15s to prevent proxy
-//!   timeouts.
+//! [`SseHandler`] defines the connection lifecycle (`on_open`, `on_ready`,
+//! `on_close`, `on_shutdown`) with no-op defaults. [`SseEvent`] represents a
+//! single SSE event with optional `event`, `id`, and `retry` fields, and
+//! converts into axum's SSE event type. [`into_sse_response`] adapts a handler
+//! into an `axum::response::Sse` response, drives the lifecycle, and emits
+//! keep-alive comments every 15 seconds while the event stream is idle.
 
 use std::convert::Infallible;
 use std::future::Future;
