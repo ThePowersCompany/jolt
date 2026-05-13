@@ -82,8 +82,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::body::{Body, Bytes};
 use axum::body::HttpBody as _;
+use axum::body::{Body, Bytes};
 use axum::extract::Request as AxumRequest;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};

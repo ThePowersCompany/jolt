@@ -37,7 +37,8 @@ impl Password {
 
     pub fn verify(plaintext: &str, hash_hex: &str, salt_hex: &str) -> Result<bool, PasswordError> {
         let salt = hex_decode(salt_hex).map_err(|_| PasswordError::InvalidHex { field: "salt" })?;
-        let stored_hash = hex_decode(hash_hex).map_err(|_| PasswordError::InvalidHex { field: "hash" })?;
+        let stored_hash =
+            hex_decode(hash_hex).map_err(|_| PasswordError::InvalidHex { field: "hash" })?;
 
         let mut computed_hash = [0u8; HASH_LEN];
         pbkdf2_hmac::<Sha256>(plaintext.as_bytes(), &salt, ITERATIONS, &mut computed_hash);
@@ -47,11 +48,13 @@ impl Password {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, ()> {
@@ -81,7 +84,10 @@ mod tests {
     fn different_salts_produce_different_hashes() {
         let (hash1, _salt1) = Password::hash("password");
         let (hash2, _salt2) = Password::hash("password");
-        assert_ne!(hash1, hash2, "different random salts must yield different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "different random salts must yield different hashes"
+        );
     }
 
     #[test]

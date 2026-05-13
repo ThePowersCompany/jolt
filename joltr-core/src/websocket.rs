@@ -184,7 +184,13 @@ impl WebSocketSender {
         pubsub: Arc<PubSub>,
     ) -> (Self, mpsc::UnboundedReceiver<AxumMessage>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx, pubsub: Some(pubsub) }, rx)
+        (
+            Self {
+                tx,
+                pubsub: Some(pubsub),
+            },
+            rx,
+        )
     }
 
     /// Attach a [`PubSub`] handle to an already-constructed sender. Returns
@@ -268,10 +274,7 @@ impl WebSocketSender {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            lagged = n,
-                            "pubsub receiver lagged; skipping messages"
-                        );
+                        tracing::warn!(lagged = n, "pubsub receiver lagged; skipping messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -392,12 +395,12 @@ impl From<WsMessage> for AxumMessage {
             WsMessage::Binary(b) => AxumMessage::Binary(b),
             WsMessage::Ping(p) => AxumMessage::Ping(p),
             WsMessage::Pong(p) => AxumMessage::Pong(p),
-            WsMessage::Close(Some(frame)) => AxumMessage::Close(Some(
-                axum::extract::ws::CloseFrame {
+            WsMessage::Close(Some(frame)) => {
+                AxumMessage::Close(Some(axum::extract::ws::CloseFrame {
                     code: frame.code,
                     reason: std::borrow::Cow::Owned(frame.reason),
-                },
-            )),
+                }))
+            }
             WsMessage::Close(None) => AxumMessage::Close(None),
         }
     }
@@ -632,7 +635,9 @@ mod tests {
     #[tokio::test]
     async fn close_dispatches_empty_close_frame() {
         let (sender, mut rx) = WebSocketSender::channel();
-        sender.close().expect("close on an open sender should succeed");
+        sender
+            .close()
+            .expect("close on an open sender should succeed");
         let msg = rx
             .recv()
             .await
@@ -806,7 +811,9 @@ mod tests {
         let serde_err = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
         let wrapped = WsSendError::Serialize(serde_err);
         assert!(
-            wrapped.to_string().starts_with("failed to serialize value to JSON:"),
+            wrapped
+                .to_string()
+                .starts_with("failed to serialize value to JSON:"),
             "got {wrapped}"
         );
         assert!(
@@ -821,10 +828,7 @@ mod tests {
     fn subscribe_returns_none_when_no_pubsub_configured() {
         let (sender, _rx) = WebSocketSender::channel();
         let sub = sender.subscribe("chat");
-        assert!(
-            sub.is_none(),
-            "subscribe without pubsub must return None"
-        );
+        assert!(sub.is_none(), "subscribe without pubsub must return None");
     }
 
     #[tokio::test]
@@ -848,7 +852,9 @@ mod tests {
     async fn published_message_is_forwarded_as_json_to_ws_writer() {
         let pubsub = Arc::new(PubSub::new());
         let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
-        let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+        let _sub = sender
+            .subscribe("chat")
+            .expect("subscribe must return Some");
 
         let msg = PubSubMessage {
             channel: "chat".to_string(),
@@ -875,10 +881,8 @@ mod tests {
     #[tokio::test]
     async fn message_on_channel_a_not_forwarded_to_subscriber_of_channel_b() {
         let pubsub = Arc::new(PubSub::new());
-        let (sender_a, mut rx_a) =
-            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
-        let (sender_b, mut rx_b) =
-            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let (sender_a, mut rx_a) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let (sender_b, mut rx_b) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
         let _sub_a = sender_a.subscribe("channel-a").expect("subscribe a");
         let _sub_b = sender_b.subscribe("channel-b").expect("subscribe b");
 
@@ -903,11 +907,7 @@ mod tests {
         }
 
         // channel-b must NOT have received anything.
-        let timeout = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx_b.recv(),
-        )
-        .await;
+        let timeout = tokio::time::timeout(std::time::Duration::from_millis(50), rx_b.recv()).await;
         assert!(
             timeout.is_err(),
             "channel-b subscriber must not receive message on channel-a"
@@ -919,7 +919,9 @@ mod tests {
         let pubsub = Arc::new(PubSub::new());
         let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
         {
-            let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+            let _sub = sender
+                .subscribe("chat")
+                .expect("subscribe must return Some");
             // Publish one message — it arrives.
             pubsub.publish(
                 "chat",
@@ -942,11 +944,7 @@ mod tests {
                 sender_id: None,
             },
         );
-        let timeout = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        )
-        .await;
+        let timeout = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         assert!(
             timeout.is_err(),
             "dropping Subscription must abort the forward task; no second message must arrive"
@@ -960,7 +958,9 @@ mod tests {
     async fn forward_task_survives_broadcast_lag_and_continues() {
         let pubsub = Arc::new(PubSub::new());
         let (sender, mut rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
-        let _sub = sender.subscribe("chat").expect("subscribe must return Some");
+        let _sub = sender
+            .subscribe("chat")
+            .expect("subscribe must return Some");
 
         let capacity = PUBSUB_BROADCAST_CAPACITY;
         let overflow = 10_usize;
@@ -1034,9 +1034,10 @@ mod tests {
     #[tokio::test]
     async fn ws_close_receiver_dropped_publish_has_one_fewer_receiver() {
         let pubsub = Arc::new(PubSub::new());
-        let (sender, _rx) =
-            WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
-        let sub = sender.subscribe("chat").expect("subscribe must return Some");
+        let (sender, _rx) = WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
+        let sub = sender
+            .subscribe("chat")
+            .expect("subscribe must return Some");
 
         // Let the forward task register its broadcast receiver.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

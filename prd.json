@@ -416,7 +416,7 @@
       "description": "Review the dirty feature branch diff, ensure no generated or accidental files are included unintentionally, and confirm the remaining Rust port changes are ready to commit without reverting unrelated user work.",
       "files": ["Cargo.lock", "examples/basic/src/chat.rs", "joltr-core", "joltr-db", "joltr-macros", "joltr-templates", "joltr-types", "joltr-utils"],
       "tests": ["git status --short", "git diff --stat", "cargo check --workspace --all-targets", "cargo test --workspace"],
-      "passes": false
+      "passes": true
     }
   ]
 }

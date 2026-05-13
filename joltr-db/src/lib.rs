@@ -1001,9 +1001,7 @@ impl JoltRDb {
     pub async fn connect(config: &DbConfig) -> Result<Self, sqlx::Error> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(config.max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(
-                config.acquire_timeout_secs,
-            ))
+            .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_secs))
             .connect(&config.database_url)
             .await?;
         sqlx::query(MIGRATIONS_TABLE_DDL).execute(&pool).await?;
@@ -1181,8 +1179,7 @@ impl JoltRDb {
         &self,
         channel: &str,
     ) -> Result<
-        impl tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>>
-            + Unpin,
+        impl tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>> + Unpin,
         sqlx::Error,
     > {
         let mut listener = self.listen_connection().await?;
@@ -1262,10 +1259,9 @@ impl JoltRDb {
     pub async fn applied_migrations(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT name, checksum FROM _migrations")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT name, checksum FROM _migrations")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().collect())
     }
 
@@ -1560,11 +1556,17 @@ impl std::fmt::Display for MigrationError {
         match self {
             // PRD-102 mandates this message verbatim.
             Self::Tampered { name } => {
-                write!(f, "Migration {name} has been modified since it was applied.")
+                write!(
+                    f,
+                    "Migration {name} has been modified since it was applied."
+                )
             }
             // PRD-103 mandates this message verbatim.
             Self::Removed { name } => {
-                write!(f, "Migration {name} has been removed. Rollbacks are not supported.")
+                write!(
+                    f,
+                    "Migration {name} has been removed. Rollbacks are not supported."
+                )
             }
             Self::Io(err) => write!(f, "migration filesystem error: {err}"),
             Self::Sqlx(err) => write!(f, "migration database error: {err}"),
@@ -1754,8 +1756,8 @@ pub fn create_migration_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        DbConfig, JoltRDb, MIGRATIONS_TABLE_DDL, MigrationError, MigrationFile, TypedQuery,
-        read_migration_files, sha256_hex,
+        read_migration_files, sha256_hex, DbConfig, JoltRDb, MigrationError, MigrationFile,
+        TypedQuery, MIGRATIONS_TABLE_DDL,
     };
 
     mod connection {
@@ -1763,217 +1765,217 @@ mod tests {
 
         #[test]
         fn default_pins_max_connections_to_10() {
-        // PRD-mandated default surfaces verbatim. A derived Default would
-        // give `0`; this asserts the hand-written impl is what's in effect.
-        assert_eq!(DbConfig::default().max_connections, 10);
-    }
-
-    #[test]
-    fn default_pins_acquire_timeout_to_30_seconds() {
-        assert_eq!(DbConfig::default().acquire_timeout_secs, 30);
-    }
-
-    #[test]
-    fn default_url_is_empty_string() {
-        // Documented in module docs decision 3: empty by default; callers
-        // override via `new` or struct-literal mutation. Pinned so a later
-        // refactor that tries to derive `Default` (which would also produce
-        // empty here, but with the wrong numeric defaults) gets caught by
-        // the sibling tests above.
-        assert!(DbConfig::default().database_url.is_empty());
-    }
-
-    #[test]
-    fn new_carries_url_through_with_str() {
-        let cfg = DbConfig::new("postgres://localhost/db");
-        assert_eq!(cfg.database_url, "postgres://localhost/db");
-    }
-
-    #[test]
-    fn new_carries_url_through_with_owned_string() {
-        // `Into<String>` overload accepts owned strings without an extra
-        // `.to_string()` at the call site. Pinned to catch a regression
-        // that narrows the parameter type to `&str`.
-        let url: String = String::from("postgres://localhost/db");
-        let cfg = DbConfig::new(url);
-        assert_eq!(cfg.database_url, "postgres://localhost/db");
-    }
-
-    #[test]
-    fn new_applies_default_knobs() {
-        // The two non-URL knobs come from Default, so `new` users get the
-        // PRD-mandated defaults without a second call.
-        let cfg = DbConfig::new("postgres://localhost/db");
-        assert_eq!(cfg.max_connections, 10);
-        assert_eq!(cfg.acquire_timeout_secs, 30);
-    }
-
-    #[test]
-    fn struct_literal_construction_compiles_with_all_fields_pub() {
-        // Pins the `pub` field contract (decision 1). A regression that
-        // makes any field private would fail this test to compile.
-        let cfg = DbConfig {
-            database_url: String::from("postgres://localhost/db"),
-            max_connections: 25,
-            acquire_timeout_secs: 5,
-        };
-        assert_eq!(cfg.max_connections, 25);
-        assert_eq!(cfg.acquire_timeout_secs, 5);
-    }
-
-    #[test]
-    fn debug_is_implemented() {
-        // Confirms the derive landed — the connect call (JOLTR-RS-083) will
-        // want to log the config on startup at least once.
-        let cfg = DbConfig::new("postgres://localhost/db");
-        let rendered = format!("{cfg:?}");
-        assert!(rendered.contains("DbConfig"));
-        assert!(rendered.contains("postgres://localhost/db"));
-    }
-
-    #[test]
-    fn clone_is_implemented() {
-        // Connect-call (JOLTR-RS-083) may want to keep an owned clone of the
-        // config alongside the pool; pinned so the derive doesn't get
-        // dropped.
-        let cfg = DbConfig::new("postgres://localhost/db");
-        let copy = cfg.clone();
-        assert_eq!(copy.database_url, cfg.database_url);
-        assert_eq!(copy.max_connections, cfg.max_connections);
-        assert_eq!(copy.acquire_timeout_secs, cfg.acquire_timeout_secs);
-    }
-
-    // ---- JOLTR-RS-083: JoltRDb::connect ----
-
-    /// Unreachable-host URL produces an `Err` from `connect` rather than
-    /// hanging or panicking. Pins decision 7 ("fail-fast on
-    /// misconfiguration"): the connect call performs at least one real TCP
-    /// dial before returning so the error surfaces at startup.
-    ///
-    /// Uses `127.0.0.1:1` (port 1 reserved + not listening) plus a 1-second
-    /// acquire timeout so the test fails fast in CI sandboxes that have
-    /// no Postgres available. The assertion only checks `is_err()` because
-    /// the exact `sqlx::Error` variant (`Io` vs `PoolTimedOut`) depends on
-    /// platform-specific TCP refusal timing.
-    #[tokio::test]
-    async fn connect_returns_err_on_unreachable_server() {
-        let cfg = DbConfig {
-            database_url: "postgres://nouser:nopw@127.0.0.1:1/nodb".into(),
-            max_connections: 1,
-            acquire_timeout_secs: 1,
-        };
-        let result = JoltRDb::connect(&cfg).await;
-        assert!(
-            result.is_err(),
-            "expected Err from connect to unreachable server, got Ok",
-        );
-    }
-
-    /// Bogus URL scheme (`not-a-real-url`) trips sqlx's URL parser before
-    /// any TCP dial happens. Confirms `connect` propagates the parse error
-    /// as `sqlx::Error` rather than panicking.
-    #[tokio::test]
-    async fn connect_returns_err_on_malformed_url() {
-        let cfg = DbConfig::new("not-a-real-url");
-        let result = JoltRDb::connect(&cfg).await;
-        assert!(
-            result.is_err(),
-            "expected Err from connect with malformed URL, got Ok",
-        );
-    }
-
-    /// Success-path test gated on the `JOLTR_TEST_DATABASE_URL` env var.
-    ///
-    /// Without the env var set the test passes trivially so the default
-    /// `cargo test -p joltr-db` flow does not require a running Postgres.
-    /// With the env var set (e.g. `JOLTR_TEST_DATABASE_URL=postgres://...
-    /// cargo test -p joltr-db`) the test exercises the PRD-mandated
-    /// "JoltRDb::connect() returns Ok" verification.
-    #[tokio::test]
-    async fn connect_returns_ok_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            // No test DB configured — skip. The error-path tests above
-            // exercise the rest of the connect logic.
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg)
-            .await
-            .expect("expected Ok from JoltRDb::connect against JOLTR_TEST_DATABASE_URL");
-        // Pool is reachable: a trivial SELECT 1 should round-trip.
-        let one: (i32,) = sqlx::query_as("SELECT 1")
-            .fetch_one(db.pool())
-            .await
-            .expect("SELECT 1 against the connected pool failed");
-        assert_eq!(one.0, 1);
-    }
-
-    // ---- JOLTR-RS-084: JoltRDb::pool + JoltRDb::health_check ----
-
-    /// `pool()` returns a borrow of the underlying [`sqlx::PgPool`] (decision
-    /// 8). Compile-pins that the signature is `&PgPool` (a borrow) rather
-    /// than `PgPool` (a clone) — the explicit `&sqlx::PgPool` binding will
-    /// fail to typecheck if the getter ever changes to return an owned
-    /// value.
-    ///
-    /// Uses the unreachable-server fixture from the connect error-path tests
-    /// because the slice only needs an owned `JoltRDb` to exercise the getter
-    /// shape, not a live pool. The connect itself is expected to fail; the
-    /// test path that actually inspects a `pool()` borrow lives in the
-    /// env-gated `health_check_returns_ok_*` test below.
-    #[test]
-    fn pool_signature_is_borrow_not_clone() {
-        // Pure compile-time pin: the binding annotation forces the return
-        // type to be `&PgPool`. No runtime body needed.
-        fn _pin(db: &JoltRDb) -> &sqlx::PgPool {
-            db.pool()
+            // PRD-mandated default surfaces verbatim. A derived Default would
+            // give `0`; this asserts the hand-written impl is what's in effect.
+            assert_eq!(DbConfig::default().max_connections, 10);
         }
-    }
 
-    /// Health-check success path gated on `JOLTR_TEST_DATABASE_URL` (same
-    /// convention as `connect_returns_ok_when_test_db_available`). Pins
-    /// decision 9: a successful `SELECT 1` round trip resolves to `Ok(())`.
-    #[tokio::test]
-    async fn health_check_returns_ok_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg)
-            .await
-            .expect("expected Ok from JoltRDb::connect against JOLTR_TEST_DATABASE_URL");
-        db.health_check()
-            .await
-            .expect("expected Ok from JoltRDb::health_check on live pool");
-    }
+        #[test]
+        fn default_pins_acquire_timeout_to_30_seconds() {
+            assert_eq!(DbConfig::default().acquire_timeout_secs, 30);
+        }
 
-    /// Health-check failure path: a pool whose configured server is
-    /// unreachable surfaces an `Err` rather than hanging or panicking. Uses
-    /// the same `127.0.0.1:1` + 1-second-acquire-timeout fixture as the
-    /// connect error-path tests, with `connect_lazy_with` so the pool is
-    /// constructed without an upfront TCP dial — the `SELECT 1` inside
-    /// `health_check` is what tries (and fails) to acquire a connection.
-    ///
-    /// This is the only path in joltr-db that uses `connect_lazy_with`; it
-    /// exists exclusively to give the health-check failure path a `JoltRDb`
-    /// to call `health_check()` on without requiring a live Postgres. The
-    /// production constructor remains the eager [`JoltRDb::connect`] from
-    /// JOLTR-RS-083.
-    #[tokio::test]
-    async fn health_check_returns_err_on_unreachable_server() {
-        let pool_options = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(1));
-        let pool = pool_options
-            .connect_lazy("postgres://nouser:nopw@127.0.0.1:1/nodb")
-            .expect("connect_lazy should accept a well-formed URL even if unreachable");
-        let db = JoltRDb { pool };
-        let result = db.health_check().await;
-        assert!(
-            result.is_err(),
-            "expected Err from health_check against unreachable server, got Ok",
-        );
-    }
+        #[test]
+        fn default_url_is_empty_string() {
+            // Documented in module docs decision 3: empty by default; callers
+            // override via `new` or struct-literal mutation. Pinned so a later
+            // refactor that tries to derive `Default` (which would also produce
+            // empty here, but with the wrong numeric defaults) gets caught by
+            // the sibling tests above.
+            assert!(DbConfig::default().database_url.is_empty());
+        }
+
+        #[test]
+        fn new_carries_url_through_with_str() {
+            let cfg = DbConfig::new("postgres://localhost/db");
+            assert_eq!(cfg.database_url, "postgres://localhost/db");
+        }
+
+        #[test]
+        fn new_carries_url_through_with_owned_string() {
+            // `Into<String>` overload accepts owned strings without an extra
+            // `.to_string()` at the call site. Pinned to catch a regression
+            // that narrows the parameter type to `&str`.
+            let url: String = String::from("postgres://localhost/db");
+            let cfg = DbConfig::new(url);
+            assert_eq!(cfg.database_url, "postgres://localhost/db");
+        }
+
+        #[test]
+        fn new_applies_default_knobs() {
+            // The two non-URL knobs come from Default, so `new` users get the
+            // PRD-mandated defaults without a second call.
+            let cfg = DbConfig::new("postgres://localhost/db");
+            assert_eq!(cfg.max_connections, 10);
+            assert_eq!(cfg.acquire_timeout_secs, 30);
+        }
+
+        #[test]
+        fn struct_literal_construction_compiles_with_all_fields_pub() {
+            // Pins the `pub` field contract (decision 1). A regression that
+            // makes any field private would fail this test to compile.
+            let cfg = DbConfig {
+                database_url: String::from("postgres://localhost/db"),
+                max_connections: 25,
+                acquire_timeout_secs: 5,
+            };
+            assert_eq!(cfg.max_connections, 25);
+            assert_eq!(cfg.acquire_timeout_secs, 5);
+        }
+
+        #[test]
+        fn debug_is_implemented() {
+            // Confirms the derive landed — the connect call (JOLTR-RS-083) will
+            // want to log the config on startup at least once.
+            let cfg = DbConfig::new("postgres://localhost/db");
+            let rendered = format!("{cfg:?}");
+            assert!(rendered.contains("DbConfig"));
+            assert!(rendered.contains("postgres://localhost/db"));
+        }
+
+        #[test]
+        fn clone_is_implemented() {
+            // Connect-call (JOLTR-RS-083) may want to keep an owned clone of the
+            // config alongside the pool; pinned so the derive doesn't get
+            // dropped.
+            let cfg = DbConfig::new("postgres://localhost/db");
+            let copy = cfg.clone();
+            assert_eq!(copy.database_url, cfg.database_url);
+            assert_eq!(copy.max_connections, cfg.max_connections);
+            assert_eq!(copy.acquire_timeout_secs, cfg.acquire_timeout_secs);
+        }
+
+        // ---- JOLTR-RS-083: JoltRDb::connect ----
+
+        /// Unreachable-host URL produces an `Err` from `connect` rather than
+        /// hanging or panicking. Pins decision 7 ("fail-fast on
+        /// misconfiguration"): the connect call performs at least one real TCP
+        /// dial before returning so the error surfaces at startup.
+        ///
+        /// Uses `127.0.0.1:1` (port 1 reserved + not listening) plus a 1-second
+        /// acquire timeout so the test fails fast in CI sandboxes that have
+        /// no Postgres available. The assertion only checks `is_err()` because
+        /// the exact `sqlx::Error` variant (`Io` vs `PoolTimedOut`) depends on
+        /// platform-specific TCP refusal timing.
+        #[tokio::test]
+        async fn connect_returns_err_on_unreachable_server() {
+            let cfg = DbConfig {
+                database_url: "postgres://nouser:nopw@127.0.0.1:1/nodb".into(),
+                max_connections: 1,
+                acquire_timeout_secs: 1,
+            };
+            let result = JoltRDb::connect(&cfg).await;
+            assert!(
+                result.is_err(),
+                "expected Err from connect to unreachable server, got Ok",
+            );
+        }
+
+        /// Bogus URL scheme (`not-a-real-url`) trips sqlx's URL parser before
+        /// any TCP dial happens. Confirms `connect` propagates the parse error
+        /// as `sqlx::Error` rather than panicking.
+        #[tokio::test]
+        async fn connect_returns_err_on_malformed_url() {
+            let cfg = DbConfig::new("not-a-real-url");
+            let result = JoltRDb::connect(&cfg).await;
+            assert!(
+                result.is_err(),
+                "expected Err from connect with malformed URL, got Ok",
+            );
+        }
+
+        /// Success-path test gated on the `JOLTR_TEST_DATABASE_URL` env var.
+        ///
+        /// Without the env var set the test passes trivially so the default
+        /// `cargo test -p joltr-db` flow does not require a running Postgres.
+        /// With the env var set (e.g. `JOLTR_TEST_DATABASE_URL=postgres://...
+        /// cargo test -p joltr-db`) the test exercises the PRD-mandated
+        /// "JoltRDb::connect() returns Ok" verification.
+        #[tokio::test]
+        async fn connect_returns_ok_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                // No test DB configured — skip. The error-path tests above
+                // exercise the rest of the connect logic.
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg)
+                .await
+                .expect("expected Ok from JoltRDb::connect against JOLTR_TEST_DATABASE_URL");
+            // Pool is reachable: a trivial SELECT 1 should round-trip.
+            let one: (i32,) = sqlx::query_as("SELECT 1")
+                .fetch_one(db.pool())
+                .await
+                .expect("SELECT 1 against the connected pool failed");
+            assert_eq!(one.0, 1);
+        }
+
+        // ---- JOLTR-RS-084: JoltRDb::pool + JoltRDb::health_check ----
+
+        /// `pool()` returns a borrow of the underlying [`sqlx::PgPool`] (decision
+        /// 8). Compile-pins that the signature is `&PgPool` (a borrow) rather
+        /// than `PgPool` (a clone) — the explicit `&sqlx::PgPool` binding will
+        /// fail to typecheck if the getter ever changes to return an owned
+        /// value.
+        ///
+        /// Uses the unreachable-server fixture from the connect error-path tests
+        /// because the slice only needs an owned `JoltRDb` to exercise the getter
+        /// shape, not a live pool. The connect itself is expected to fail; the
+        /// test path that actually inspects a `pool()` borrow lives in the
+        /// env-gated `health_check_returns_ok_*` test below.
+        #[test]
+        fn pool_signature_is_borrow_not_clone() {
+            // Pure compile-time pin: the binding annotation forces the return
+            // type to be `&PgPool`. No runtime body needed.
+            fn _pin(db: &JoltRDb) -> &sqlx::PgPool {
+                db.pool()
+            }
+        }
+
+        /// Health-check success path gated on `JOLTR_TEST_DATABASE_URL` (same
+        /// convention as `connect_returns_ok_when_test_db_available`). Pins
+        /// decision 9: a successful `SELECT 1` round trip resolves to `Ok(())`.
+        #[tokio::test]
+        async fn health_check_returns_ok_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg)
+                .await
+                .expect("expected Ok from JoltRDb::connect against JOLTR_TEST_DATABASE_URL");
+            db.health_check()
+                .await
+                .expect("expected Ok from JoltRDb::health_check on live pool");
+        }
+
+        /// Health-check failure path: a pool whose configured server is
+        /// unreachable surfaces an `Err` rather than hanging or panicking. Uses
+        /// the same `127.0.0.1:1` + 1-second-acquire-timeout fixture as the
+        /// connect error-path tests, with `connect_lazy_with` so the pool is
+        /// constructed without an upfront TCP dial — the `SELECT 1` inside
+        /// `health_check` is what tries (and fails) to acquire a connection.
+        ///
+        /// This is the only path in joltr-db that uses `connect_lazy_with`; it
+        /// exists exclusively to give the health-check failure path a `JoltRDb`
+        /// to call `health_check()` on without requiring a live Postgres. The
+        /// production constructor remains the eager [`JoltRDb::connect`] from
+        /// JOLTR-RS-083.
+        #[tokio::test]
+        async fn health_check_returns_err_on_unreachable_server() {
+            let pool_options = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(1));
+            let pool = pool_options
+                .connect_lazy("postgres://nouser:nopw@127.0.0.1:1/nodb")
+                .expect("connect_lazy should accept a well-formed URL even if unreachable");
+            let db = JoltRDb { pool };
+            let result = db.health_check().await;
+            assert!(
+                result.is_err(),
+                "expected Err from health_check against unreachable server, got Ok",
+            );
+        }
     }
 
     // ---- JOLTR-RS-086/087: JoltRDb::query_as + TypedQuery<T> query helpers ----
@@ -1981,373 +1983,372 @@ mod tests {
     mod query_helpers {
         use super::{DbConfig, JoltRDb, TypedQuery};
 
-    /// Compile-time pin: `JoltRDb::query_as::<T>(sql)` returns
-    /// `TypedQuery<T>` (decision 10). A regression that wraps the return
-    /// type in a `Result<...>`, a `Pin<Box<dyn Future<...>>>`, or anything
-    /// other than `TypedQuery<T>` fails this typecheck without ever running.
-    #[test]
-    fn query_as_signature_returns_typed_query() {
-        // Type-pin tests below only reference `Row` as a generic argument,
-        // so the compiler can't see through sqlx's `FromRow` derive to know
-        // the struct is constructed. `#[allow(dead_code)]` on the struct
-        // suppresses the noise without hiding real dead code elsewhere.
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct Row {
-            id: i32,
-        }
-        fn _pin(db: &JoltRDb) -> TypedQuery<Row> {
-            db.query_as::<Row>("SELECT 1 AS id")
-        }
-    }
-
-    /// Compile-time pin: the three terminal verbs return the shapes
-    /// documented on `TypedQuery<T>` and consume `self` (decision 10).
-    /// `fetch_one -> Result<T>`, `fetch_optional -> Result<Option<T>>`,
-    /// `fetch_all -> Result<Vec<T>>`, every error a raw `sqlx::Error`.
-    #[test]
-    fn terminal_verbs_return_documented_shapes() {
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct Row {
-            id: i32,
-        }
-        async fn _pin_one(q: TypedQuery<Row>) -> Result<Row, sqlx::Error> {
-            q.fetch_one().await
-        }
-        async fn _pin_optional(q: TypedQuery<Row>) -> Result<Option<Row>, sqlx::Error> {
-            q.fetch_optional().await
-        }
-        async fn _pin_all(q: TypedQuery<Row>) -> Result<Vec<Row>, sqlx::Error> {
-            q.fetch_all().await
-        }
-    }
-
-    /// Compile-time pin: `.bind(value)` returns `Self` (chainable) so a
-    /// caller can write `q.bind(a).bind(b).fetch_one()` (decision 11). A
-    /// regression that switches `.bind` to `Result<Self>` would force every
-    /// caller into `?` and break the chain.
-    #[test]
-    fn bind_returns_self_for_chaining() {
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct Row {
-            v: i32,
-        }
-        fn _pin(db: &JoltRDb) -> TypedQuery<Row> {
-            db.query_as::<Row>("SELECT $1::int4 AS v").bind(7_i32)
-        }
-    }
-
-    /// `TypedQuery<T>` is `'static + Send` so callers can store it or move
-    /// it across `tokio::spawn` boundaries (decision 10). The owned-SQL +
-    /// owned-args + cloned-pool design exists specifically to satisfy this;
-    /// regressing into a borrowed-SQL design would fail this pin.
-    #[test]
-    fn typed_query_is_static_send() {
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct Row {
-            id: i32,
-        }
-        fn _assert_static_send<T: 'static + Send>(_: &T) {}
-        fn _pin(db: &JoltRDb) {
-            let q: TypedQuery<Row> = db.query_as::<Row>("SELECT 1 AS id");
-            _assert_static_send(&q);
-        }
-    }
-
-    /// PRD-mandated success-path verification for JOLTR-RS-086:
-    /// `db.query_as::<TestRow>("SELECT 1 AS id").fetch_one()` returns
-    /// `TestRow { id: 1 }`. Gated on `JOLTR_TEST_DATABASE_URL` so the
-    /// default `cargo test -p joltr-db` flow does not require a running
-    /// Postgres; with the env var set the test exercises the full pipeline.
-    #[tokio::test]
-    async fn query_as_fetch_one_returns_test_row() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-
-        #[derive(sqlx::FromRow)]
-        struct TestRow {
-            id: i32,
-        }
-
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg)
-            .await
-            .expect("connect against JOLTR_TEST_DATABASE_URL");
-        let row: TestRow = db
-            .query_as::<TestRow>("SELECT 1 AS id")
-            .fetch_one()
-            .await
-            .expect("fetch_one of SELECT 1 AS id");
-        assert_eq!(row.id, 1);
-    }
-
-    /// `fetch_optional` returns `Ok(None)` for a query that matches zero
-    /// rows. Env-gated (same convention) — pins the documented "zero or one"
-    /// semantics of the middle terminal verb.
-    #[tokio::test]
-    async fn query_as_fetch_optional_returns_none_for_empty() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            #[allow(dead_code)]
-            id: i32,
-        }
-
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-        let result: Option<Row> = db
-            .query_as::<Row>("SELECT 1 AS id WHERE FALSE")
-            .fetch_optional()
-            .await
-            .expect("fetch_optional of empty result set");
-        assert!(result.is_none(), "expected None for WHERE FALSE, got Some");
-    }
-
-    /// `fetch_all` returns the matching rows as a `Vec<T>` (multi-row case,
-    /// not just one). Env-gated (same convention) — pins the documented
-    /// "every match" semantics and shows the `UNION ALL` shape working.
-    #[tokio::test]
-    async fn query_as_fetch_all_returns_all_rows() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            id: i32,
-        }
-
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-        let rows: Vec<Row> = db
-            .query_as::<Row>("SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3")
-            .fetch_all()
-            .await
-            .expect("fetch_all of three-row UNION");
-        let ids: Vec<i32> = rows.into_iter().map(|r| r.id).collect();
-        assert_eq!(ids, vec![1, 2, 3]);
-    }
-
-    /// `.bind($1)` actually threads the parameter through to the DB.
-    /// Env-gated (same convention) — pins the `(sql, params...)` half of the
-    /// JOLTR-RS-086 description that the parameterless `SELECT 1 AS id` test
-    /// doesn't exercise.
-    #[tokio::test]
-    async fn query_as_with_bind_round_trips_parameter() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            v: i32,
-        }
-
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-        let row: Row = db
-            .query_as::<Row>("SELECT $1::int4 AS v")
-            .bind(42_i32)
-            .fetch_one()
-            .await
-            .expect("fetch_one of SELECT $1::int4 AS v with bind(42)");
-        assert_eq!(row.v, 42);
-    }
-    /// Compile-time pin: `TypedQuery<T>` carries its row type at compile
-    /// time through the full fetch chain. A regression that erases the
-    /// type parameter (e.g. converting `TypedQuery<T>` to a generic
-    /// `Query<'_>`) would break the ability to differentiate queries
-    /// bound to incompatible row types — the compiler would no longer
-    /// reject `_assert_different::<TypedQuery<RowA>, TypedQuery<RowB>>()`
-    /// below. Pinned via a compile-only fn that exercises the full
-    /// `query_as::<T>(sql).fetch_one() -> Result<T, _>` chain for two
-    /// distinct row types whose `TypedQuery<T>` instances must be proven
-    /// as different types at compile time.
-    #[test]
-    fn type_mismatch_is_caught_at_compile_time() {
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct RowI32 {
-            col: i32,
-        }
-
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct RowString {
-            col: String,
-        }
-
-        // Verify the two TypedQuery<T> instantiations are distinct
-        // compiler-visible types. A regression that erases the type
-        // parameter to a single concrete type would allow the
-        // `_assert_different` call to succeed — the compiler won't
-        // accept `_assert_different::<T, T>()` for a function of
-        // signature `fn _assert_different<T, U>()`.
-        fn _assert_different<T, U>() {}
-        fn _pin(db: &JoltRDb) {
-            let _qi: TypedQuery<RowI32> = db.query_as::<RowI32>("SELECT 1 AS col");
-            let _qs: TypedQuery<RowString> =
-                db.query_as::<RowString>("SELECT 'a' AS col");
-            _assert_different::<TypedQuery<RowI32>, TypedQuery<RowString>>();
-        }
-    }
-
-    /// Runtime verification: a query projecting a column name that does
-    /// not exist in the result set surfaces a runtime error (not a hang,
-    /// panic, or silent default). The `#[derive(sqlx::FromRow)]` struct
-    /// has an `id: i32` field expecting column `id`, but the SQL
-    /// projects `SELECT 1 AS non_existent_column` — sqlx has no such
-    /// column to deserialize into `id` and returns an `Err`. Env-gated
-    /// on `JOLTR_TEST_DATABASE_URL`; without a live Postgres the test
-    /// skips trivially so the default `cargo test -p joltr-db` flow
-    /// stays runnable.
-    #[tokio::test]
-    async fn missing_column_returns_runtime_error_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-
-        #[derive(sqlx::FromRow)]
-        #[allow(dead_code)]
-        struct Row {
-            id: i32,
-        }
-
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-        let result: Result<Row, sqlx::Error> = db
-            .query_as::<Row>("SELECT 1 AS non_existent_column")
-            .fetch_one()
-            .await;
-        assert!(
-            result.is_err(),
-            "expected runtime error for query with missing column, got Ok",
-        );
-    }
-
-    // -- JOLTR-RS-088/089: transaction commit / rollback --
-
-    mod transaction {
-        use super::{DbConfig, JoltRDb};
-
-        /// Compile-time pin: `db.transaction(|tx| Box::pin(async move {
-        /// ... }))` typechecks against the documented signature
-        /// (decisions 12–13). The `_pin` fn never runs; it exists so a
-        /// regression that changes the closure parameter type away from
-        /// `&mut Transaction<'static, Postgres>` or the return type away
-        /// from `Pin<Box<dyn Future ...>>` fails the build.
+        /// Compile-time pin: `JoltRDb::query_as::<T>(sql)` returns
+        /// `TypedQuery<T>` (decision 10). A regression that wraps the return
+        /// type in a `Result<...>`, a `Pin<Box<dyn Future<...>>>`, or anything
+        /// other than `TypedQuery<T>` fails this typecheck without ever running.
         #[test]
-        fn signature_accepts_box_pin_closure() {
-            async fn _pin(db: &JoltRDb) -> Result<i32, sqlx::Error> {
-                db.transaction(|_tx| Box::pin(async move { Ok::<_, sqlx::Error>(42_i32) }))
-                    .await
+        fn query_as_signature_returns_typed_query() {
+            // Type-pin tests below only reference `Row` as a generic argument,
+            // so the compiler can't see through sqlx's `FromRow` derive to know
+            // the struct is constructed. `#[allow(dead_code)]` on the struct
+            // suppresses the noise without hiding real dead code elsewhere.
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct Row {
+                id: i32,
+            }
+            fn _pin(db: &JoltRDb) -> TypedQuery<Row> {
+                db.query_as::<Row>("SELECT 1 AS id")
             }
         }
 
-        /// Commit path: closure returns `Ok` → transaction commits →
-        /// the inserted row is visible after `transaction` returns.
-        /// Env-gated on `JOLTR_TEST_DATABASE_URL`.
-        #[tokio::test]
-        async fn commits_on_ok_when_test_db_available() {
-            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-                return;
-            };
-            let cfg = DbConfig::new(url);
-            let db = JoltRDb::connect(&cfg).await.expect("connect");
-
-            sqlx::query("DROP TABLE IF EXISTS _jolt_tx_commit_test")
-                .execute(db.pool())
-                .await
-                .expect("drop table (setup)");
-            sqlx::query("CREATE TABLE _jolt_tx_commit_test (id INT)")
-                .execute(db.pool())
-                .await
-                .expect("create table");
-
-            let result = db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        sqlx::query("INSERT INTO _jolt_tx_commit_test (id) VALUES (1)")
-                            .execute(&mut **tx)
-                            .await?;
-                        Ok::<_, sqlx::Error>(())
-                    })
-                })
-                .await;
-            assert!(result.is_ok(), "expected Ok from commit-path transaction");
-
-            let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_commit_test")
-                .fetch_one(db.pool())
-                .await
-                .expect("count after commit");
-            assert_eq!(
-                count.0, 1,
-                "expected committed insert visible after transaction returned Ok",
-            );
-
-            sqlx::query("DROP TABLE _jolt_tx_commit_test")
-                .execute(db.pool())
-                .await
-                .expect("drop table (teardown)");
+        /// Compile-time pin: the three terminal verbs return the shapes
+        /// documented on `TypedQuery<T>` and consume `self` (decision 10).
+        /// `fetch_one -> Result<T>`, `fetch_optional -> Result<Option<T>>`,
+        /// `fetch_all -> Result<Vec<T>>`, every error a raw `sqlx::Error`.
+        #[test]
+        fn terminal_verbs_return_documented_shapes() {
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct Row {
+                id: i32,
+            }
+            async fn _pin_one(q: TypedQuery<Row>) -> Result<Row, sqlx::Error> {
+                q.fetch_one().await
+            }
+            async fn _pin_optional(q: TypedQuery<Row>) -> Result<Option<Row>, sqlx::Error> {
+                q.fetch_optional().await
+            }
+            async fn _pin_all(q: TypedQuery<Row>) -> Result<Vec<Row>, sqlx::Error> {
+                q.fetch_all().await
+            }
         }
 
-        /// Rollback path: closure returns `Err` → transaction rolls
-        /// back → the attempted insert is *not* visible. The closure's
-        /// error propagates out (decision 14). Env-gated.
+        /// Compile-time pin: `.bind(value)` returns `Self` (chainable) so a
+        /// caller can write `q.bind(a).bind(b).fetch_one()` (decision 11). A
+        /// regression that switches `.bind` to `Result<Self>` would force every
+        /// caller into `?` and break the chain.
+        #[test]
+        fn bind_returns_self_for_chaining() {
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct Row {
+                v: i32,
+            }
+            fn _pin(db: &JoltRDb) -> TypedQuery<Row> {
+                db.query_as::<Row>("SELECT $1::int4 AS v").bind(7_i32)
+            }
+        }
+
+        /// `TypedQuery<T>` is `'static + Send` so callers can store it or move
+        /// it across `tokio::spawn` boundaries (decision 10). The owned-SQL +
+        /// owned-args + cloned-pool design exists specifically to satisfy this;
+        /// regressing into a borrowed-SQL design would fail this pin.
+        #[test]
+        fn typed_query_is_static_send() {
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct Row {
+                id: i32,
+            }
+            fn _assert_static_send<T: 'static + Send>(_: &T) {}
+            fn _pin(db: &JoltRDb) {
+                let q: TypedQuery<Row> = db.query_as::<Row>("SELECT 1 AS id");
+                _assert_static_send(&q);
+            }
+        }
+
+        /// PRD-mandated success-path verification for JOLTR-RS-086:
+        /// `db.query_as::<TestRow>("SELECT 1 AS id").fetch_one()` returns
+        /// `TestRow { id: 1 }`. Gated on `JOLTR_TEST_DATABASE_URL` so the
+        /// default `cargo test -p joltr-db` flow does not require a running
+        /// Postgres; with the env var set the test exercises the full pipeline.
         #[tokio::test]
-        async fn rolls_back_on_err_when_test_db_available() {
+        async fn query_as_fetch_one_returns_test_row() {
             let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
                 return;
             };
+
+            #[derive(sqlx::FromRow)]
+            struct TestRow {
+                id: i32,
+            }
+
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg)
+                .await
+                .expect("connect against JOLTR_TEST_DATABASE_URL");
+            let row: TestRow = db
+                .query_as::<TestRow>("SELECT 1 AS id")
+                .fetch_one()
+                .await
+                .expect("fetch_one of SELECT 1 AS id");
+            assert_eq!(row.id, 1);
+        }
+
+        /// `fetch_optional` returns `Ok(None)` for a query that matches zero
+        /// rows. Env-gated (same convention) — pins the documented "zero or one"
+        /// semantics of the middle terminal verb.
+        #[tokio::test]
+        async fn query_as_fetch_optional_returns_none_for_empty() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+
+            #[derive(sqlx::FromRow)]
+            struct Row {
+                #[allow(dead_code)]
+                id: i32,
+            }
+
             let cfg = DbConfig::new(url);
             let db = JoltRDb::connect(&cfg).await.expect("connect");
-
-            sqlx::query("DROP TABLE IF EXISTS _jolt_tx_rollback_test")
-                .execute(db.pool())
+            let result: Option<Row> = db
+                .query_as::<Row>("SELECT 1 AS id WHERE FALSE")
+                .fetch_optional()
                 .await
-                .expect("drop table (setup)");
-            sqlx::query("CREATE TABLE _jolt_tx_rollback_test (id INT)")
-                .execute(db.pool())
-                .await
-                .expect("create table");
+                .expect("fetch_optional of empty result set");
+            assert!(result.is_none(), "expected None for WHERE FALSE, got Some");
+        }
 
-            let result = db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        sqlx::query("INSERT INTO _jolt_tx_rollback_test (id) VALUES (2)")
-                            .execute(&mut **tx)
-                            .await?;
-                        Err::<(), _>(sqlx::Error::RowNotFound)
-                    })
-                })
+        /// `fetch_all` returns the matching rows as a `Vec<T>` (multi-row case,
+        /// not just one). Env-gated (same convention) — pins the documented
+        /// "every match" semantics and shows the `UNION ALL` shape working.
+        #[tokio::test]
+        async fn query_as_fetch_all_returns_all_rows() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+
+            #[derive(sqlx::FromRow)]
+            struct Row {
+                id: i32,
+            }
+
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg).await.expect("connect");
+            let rows: Vec<Row> = db
+                .query_as::<Row>("SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3")
+                .fetch_all()
+                .await
+                .expect("fetch_all of three-row UNION");
+            let ids: Vec<i32> = rows.into_iter().map(|r| r.id).collect();
+            assert_eq!(ids, vec![1, 2, 3]);
+        }
+
+        /// `.bind($1)` actually threads the parameter through to the DB.
+        /// Env-gated (same convention) — pins the `(sql, params...)` half of the
+        /// JOLTR-RS-086 description that the parameterless `SELECT 1 AS id` test
+        /// doesn't exercise.
+        #[tokio::test]
+        async fn query_as_with_bind_round_trips_parameter() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+
+            #[derive(sqlx::FromRow)]
+            struct Row {
+                v: i32,
+            }
+
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg).await.expect("connect");
+            let row: Row = db
+                .query_as::<Row>("SELECT $1::int4 AS v")
+                .bind(42_i32)
+                .fetch_one()
+                .await
+                .expect("fetch_one of SELECT $1::int4 AS v with bind(42)");
+            assert_eq!(row.v, 42);
+        }
+        /// Compile-time pin: `TypedQuery<T>` carries its row type at compile
+        /// time through the full fetch chain. A regression that erases the
+        /// type parameter (e.g. converting `TypedQuery<T>` to a generic
+        /// `Query<'_>`) would break the ability to differentiate queries
+        /// bound to incompatible row types — the compiler would no longer
+        /// reject `_assert_different::<TypedQuery<RowA>, TypedQuery<RowB>>()`
+        /// below. Pinned via a compile-only fn that exercises the full
+        /// `query_as::<T>(sql).fetch_one() -> Result<T, _>` chain for two
+        /// distinct row types whose `TypedQuery<T>` instances must be proven
+        /// as different types at compile time.
+        #[test]
+        fn type_mismatch_is_caught_at_compile_time() {
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct RowI32 {
+                col: i32,
+            }
+
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct RowString {
+                col: String,
+            }
+
+            // Verify the two TypedQuery<T> instantiations are distinct
+            // compiler-visible types. A regression that erases the type
+            // parameter to a single concrete type would allow the
+            // `_assert_different` call to succeed — the compiler won't
+            // accept `_assert_different::<T, T>()` for a function of
+            // signature `fn _assert_different<T, U>()`.
+            fn _assert_different<T, U>() {}
+            fn _pin(db: &JoltRDb) {
+                let _qi: TypedQuery<RowI32> = db.query_as::<RowI32>("SELECT 1 AS col");
+                let _qs: TypedQuery<RowString> = db.query_as::<RowString>("SELECT 'a' AS col");
+                _assert_different::<TypedQuery<RowI32>, TypedQuery<RowString>>();
+            }
+        }
+
+        /// Runtime verification: a query projecting a column name that does
+        /// not exist in the result set surfaces a runtime error (not a hang,
+        /// panic, or silent default). The `#[derive(sqlx::FromRow)]` struct
+        /// has an `id: i32` field expecting column `id`, but the SQL
+        /// projects `SELECT 1 AS non_existent_column` — sqlx has no such
+        /// column to deserialize into `id` and returns an `Err`. Env-gated
+        /// on `JOLTR_TEST_DATABASE_URL`; without a live Postgres the test
+        /// skips trivially so the default `cargo test -p joltr-db` flow
+        /// stays runnable.
+        #[tokio::test]
+        async fn missing_column_returns_runtime_error_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+
+            #[derive(sqlx::FromRow)]
+            #[allow(dead_code)]
+            struct Row {
+                id: i32,
+            }
+
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg).await.expect("connect");
+            let result: Result<Row, sqlx::Error> = db
+                .query_as::<Row>("SELECT 1 AS non_existent_column")
+                .fetch_one()
                 .await;
             assert!(
-                matches!(result, Err(sqlx::Error::RowNotFound)),
-                "expected closure's Err to surface unchanged, got {result:?}",
+                result.is_err(),
+                "expected runtime error for query with missing column, got Ok",
             );
-
-            let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_rollback_test")
-                .fetch_one(db.pool())
-                .await
-                .expect("count after rollback");
-            assert_eq!(
-                count.0, 0,
-                "expected rolled-back insert invisible after transaction returned Err",
-            );
-
-            sqlx::query("DROP TABLE _jolt_tx_rollback_test")
-                .execute(db.pool())
-                .await
-                .expect("drop table (teardown)");
         }
-    }
+
+        // -- JOLTR-RS-088/089: transaction commit / rollback --
+
+        mod transaction {
+            use super::{DbConfig, JoltRDb};
+
+            /// Compile-time pin: `db.transaction(|tx| Box::pin(async move {
+            /// ... }))` typechecks against the documented signature
+            /// (decisions 12–13). The `_pin` fn never runs; it exists so a
+            /// regression that changes the closure parameter type away from
+            /// `&mut Transaction<'static, Postgres>` or the return type away
+            /// from `Pin<Box<dyn Future ...>>` fails the build.
+            #[test]
+            fn signature_accepts_box_pin_closure() {
+                async fn _pin(db: &JoltRDb) -> Result<i32, sqlx::Error> {
+                    db.transaction(|_tx| Box::pin(async move { Ok::<_, sqlx::Error>(42_i32) }))
+                        .await
+                }
+            }
+
+            /// Commit path: closure returns `Ok` → transaction commits →
+            /// the inserted row is visible after `transaction` returns.
+            /// Env-gated on `JOLTR_TEST_DATABASE_URL`.
+            #[tokio::test]
+            async fn commits_on_ok_when_test_db_available() {
+                let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                    return;
+                };
+                let cfg = DbConfig::new(url);
+                let db = JoltRDb::connect(&cfg).await.expect("connect");
+
+                sqlx::query("DROP TABLE IF EXISTS _jolt_tx_commit_test")
+                    .execute(db.pool())
+                    .await
+                    .expect("drop table (setup)");
+                sqlx::query("CREATE TABLE _jolt_tx_commit_test (id INT)")
+                    .execute(db.pool())
+                    .await
+                    .expect("create table");
+
+                let result = db
+                    .transaction(|tx| {
+                        Box::pin(async move {
+                            sqlx::query("INSERT INTO _jolt_tx_commit_test (id) VALUES (1)")
+                                .execute(&mut **tx)
+                                .await?;
+                            Ok::<_, sqlx::Error>(())
+                        })
+                    })
+                    .await;
+                assert!(result.is_ok(), "expected Ok from commit-path transaction");
+
+                let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_commit_test")
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("count after commit");
+                assert_eq!(
+                    count.0, 1,
+                    "expected committed insert visible after transaction returned Ok",
+                );
+
+                sqlx::query("DROP TABLE _jolt_tx_commit_test")
+                    .execute(db.pool())
+                    .await
+                    .expect("drop table (teardown)");
+            }
+
+            /// Rollback path: closure returns `Err` → transaction rolls
+            /// back → the attempted insert is *not* visible. The closure's
+            /// error propagates out (decision 14). Env-gated.
+            #[tokio::test]
+            async fn rolls_back_on_err_when_test_db_available() {
+                let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                    return;
+                };
+                let cfg = DbConfig::new(url);
+                let db = JoltRDb::connect(&cfg).await.expect("connect");
+
+                sqlx::query("DROP TABLE IF EXISTS _jolt_tx_rollback_test")
+                    .execute(db.pool())
+                    .await
+                    .expect("drop table (setup)");
+                sqlx::query("CREATE TABLE _jolt_tx_rollback_test (id INT)")
+                    .execute(db.pool())
+                    .await
+                    .expect("create table");
+
+                let result = db
+                    .transaction(|tx| {
+                        Box::pin(async move {
+                            sqlx::query("INSERT INTO _jolt_tx_rollback_test (id) VALUES (2)")
+                                .execute(&mut **tx)
+                                .await?;
+                            Err::<(), _>(sqlx::Error::RowNotFound)
+                        })
+                    })
+                    .await;
+                assert!(
+                    matches!(result, Err(sqlx::Error::RowNotFound)),
+                    "expected closure's Err to surface unchanged, got {result:?}",
+                );
+
+                let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _jolt_tx_rollback_test")
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("count after rollback");
+                assert_eq!(
+                    count.0, 0,
+                    "expected rolled-back insert invisible after transaction returned Err",
+                );
+
+                sqlx::query("DROP TABLE _jolt_tx_rollback_test")
+                    .execute(db.pool())
+                    .await
+                    .expect("drop table (teardown)");
+            }
+        }
     }
 
     // JOLTR-RS-090/091/092/093: LISTEN/NOTIFY tests co-located under
@@ -2422,7 +2423,10 @@ mod tests {
         /// value but breaks the streaming contract).
         #[test]
         fn listen_signature_yields_stream() {
-            fn _assert_stream<S: tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>> + Unpin>(
+            fn _assert_stream<
+                S: tokio_stream::Stream<Item = Result<sqlx::postgres::PgNotification, sqlx::Error>>
+                    + Unpin,
+            >(
                 _: &S,
             ) {
             }
@@ -2589,11 +2593,8 @@ mod tests {
                 .await
                 .expect("notify should succeed");
 
-            let Ok(item) = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                stream.next(),
-            )
-            .await
+            let Ok(item) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await
             else {
                 panic!("timed out waiting for notification on channel {channel}");
             };
@@ -2659,7 +2660,7 @@ mod tests {
     }
 
     mod migration_files {
-        use super::{MigrationFile, TestDir, read_migration_files, sha256_hex};
+        use super::{read_migration_files, sha256_hex, MigrationFile, TestDir};
 
         // ---- JOLTR-RS-094: read_migration_files signature + sort + capture ----
 
@@ -2758,7 +2759,8 @@ mod tests {
         fn sha256_hex_is_lowercase() {
             let out = sha256_hex(b"abc");
             assert!(
-                out.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                out.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
                 "expected lowercase hex digits, got {out:?}",
             );
         }
@@ -3044,9 +3046,7 @@ mod tests {
         let mut tampered = HashMap::new();
         tampered.insert(
             f.name.clone(),
-            String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            ),
+            String::from("0000000000000000000000000000000000000000000000000000000000000000"),
         );
         assert_ne!(tampered.get(&f.name), Some(&f.checksum));
     }
@@ -3306,12 +3306,11 @@ mod tests {
         // Bookkeeping rows present in ascending id order matching the
         // lex-sorted filename order — pins decision 40's per-migration
         // commit chain and decision 35's `SERIAL` ordering.
-        let bookkeeping: Vec<(String, String)> = sqlx::query_as(
-            "SELECT name, checksum FROM _migrations ORDER BY id",
-        )
-        .fetch_all(db.pool())
-        .await
-        .expect("read _migrations after migrate");
+        let bookkeeping: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, checksum FROM _migrations ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .expect("read _migrations after migrate");
         assert_eq!(
             bookkeeping
                 .iter()
@@ -3358,489 +3357,490 @@ mod tests {
         use super::TestDir;
         use crate::{create_migration_file, DbConfig, JoltRDb, MigrationError};
 
-    // ---- JOLTR-RS-102: MigrationError + tamper detection ----
+        // ---- JOLTR-RS-102: MigrationError + tamper detection ----
 
-    /// PRD-102 mandates the Display output for the tamper variant
-    /// verbatim: `"Migration X has been modified since it was
-    /// applied."`. Pins decision 47's contract. A regression that
-    /// drops the period, mangles the wording, or routes the variant
-    /// through `Debug` formatting fails this test without ever
-    /// running migrate.
-    #[test]
-    fn migration_error_display_renders_prd_verbatim_for_tampered() {
-        let err = MigrationError::Tampered {
-            name: String::from("003_add_users.sql"),
-        };
-        assert_eq!(
-            format!("{err}"),
-            "Migration 003_add_users.sql has been modified since it was applied.",
-        );
-    }
-
-    /// `From<std::io::Error>` impl on [`MigrationError`] preserves the
-    /// underlying `io::Error` kind verbatim (decision 46). The `?`
-    /// operator inside `migrate` relies on this conversion — a
-    /// regression that swaps the conversion for a fresh-`io::Error`
-    /// construction (losing the kind) or routes IO failures through
-    /// the Sqlx variant fails this pin.
-    #[test]
-    fn migration_error_from_io_preserves_kind() {
-        let raw = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let wrapped: MigrationError = raw.into();
-        match wrapped {
-            MigrationError::Io(io_err) => {
-                assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
-            }
-            other => panic!("expected MigrationError::Io from io::Error conversion, got {other:?}"),
+        /// PRD-102 mandates the Display output for the tamper variant
+        /// verbatim: `"Migration X has been modified since it was
+        /// applied."`. Pins decision 47's contract. A regression that
+        /// drops the period, mangles the wording, or routes the variant
+        /// through `Debug` formatting fails this test without ever
+        /// running migrate.
+        #[test]
+        fn migration_error_display_renders_prd_verbatim_for_tampered() {
+            let err = MigrationError::Tampered {
+                name: String::from("003_add_users.sql"),
+            };
+            assert_eq!(
+                format!("{err}"),
+                "Migration 003_add_users.sql has been modified since it was applied.",
+            );
         }
-    }
 
-    /// `From<sqlx::Error>` impl on [`MigrationError`] routes sqlx
-    /// failures through the Sqlx variant (decision 46). The `?`
-    /// operator inside `migrate` relies on this conversion for the
-    /// `applied_migrations()` call and every per-migration
-    /// `tx.execute` / `tx.commit` round trip.
-    #[test]
-    fn migration_error_from_sqlx_routes_through_sqlx_variant() {
-        // RowNotFound is a no-side-effect variant convenient for
-        // round-tripping through the From impl.
-        let raw = sqlx::Error::RowNotFound;
-        let wrapped: MigrationError = raw.into();
-        assert!(
+        /// `From<std::io::Error>` impl on [`MigrationError`] preserves the
+        /// underlying `io::Error` kind verbatim (decision 46). The `?`
+        /// operator inside `migrate` relies on this conversion — a
+        /// regression that swaps the conversion for a fresh-`io::Error`
+        /// construction (losing the kind) or routes IO failures through
+        /// the Sqlx variant fails this pin.
+        #[test]
+        fn migration_error_from_io_preserves_kind() {
+            let raw = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+            let wrapped: MigrationError = raw.into();
+            match wrapped {
+                MigrationError::Io(io_err) => {
+                    assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+                }
+                other => {
+                    panic!("expected MigrationError::Io from io::Error conversion, got {other:?}")
+                }
+            }
+        }
+
+        /// `From<sqlx::Error>` impl on [`MigrationError`] routes sqlx
+        /// failures through the Sqlx variant (decision 46). The `?`
+        /// operator inside `migrate` relies on this conversion for the
+        /// `applied_migrations()` call and every per-migration
+        /// `tx.execute` / `tx.commit` round trip.
+        #[test]
+        fn migration_error_from_sqlx_routes_through_sqlx_variant() {
+            // RowNotFound is a no-side-effect variant convenient for
+            // round-tripping through the From impl.
+            let raw = sqlx::Error::RowNotFound;
+            let wrapped: MigrationError = raw.into();
+            assert!(
             matches!(wrapped, MigrationError::Sqlx(sqlx::Error::RowNotFound)),
             "expected MigrationError::Sqlx(RowNotFound) from sqlx::Error::RowNotFound, got {wrapped:?}",
         );
-    }
-
-    /// [`MigrationError`] implements [`std::error::Error`] with
-    /// [`source`](std::error::Error::source) chained through the
-    /// wrapped `io::Error` (decision 45). Tampered carries no
-    /// underlying error so its source is `None`.
-    #[test]
-    fn migration_error_source_chains_through_io_variant() {
-        use std::error::Error;
-
-        let io_wrapped = MigrationError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "nope",
-        ));
-        let source = io_wrapped.source().expect("Io variant should expose source");
-        assert!(
-            source.downcast_ref::<std::io::Error>().is_some(),
-            "source for Io variant should downcast to io::Error",
-        );
-
-        let tampered = MigrationError::Tampered {
-            name: String::from("foo.sql"),
-        };
-        assert!(
-            tampered.source().is_none(),
-            "Tampered carries no underlying error",
-        );
-    }
-
-    /// PRD-mandated verification for JOLTR-RS-102: "change file content
-    /// after apply → error on next run." Env-gated on
-    /// `JOLTR_TEST_DATABASE_URL` (same convention as the rest of the
-    /// live-DB tests in this module).
-    ///
-    /// Flow:
-    /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
-    ///    empty starting state.
-    /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
-    ///    `migrate`, assert `Ok(1)`.
-    /// 3. Overwrite the same `001_init.sql` file with different
-    ///    content (different SQL body → different SHA-256). The
-    ///    `_migrations` row still records the *original* checksum.
-    /// 4. Call `migrate` again. Assert it returns
-    ///    [`MigrationError::Tampered`] with `name = "001_init.sql"`.
-    /// 5. Assert the Display output is the PRD-102 verbatim message.
-    /// 6. Teardown.
-    #[tokio::test]
-    async fn migrate_detects_tampered_migration_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-
-        // Fresh-state setup.
-        sqlx::query("TRUNCATE TABLE _migrations")
-            .execute(db.pool())
-            .await
-            .expect("truncate _migrations (setup)");
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
-            .execute(db.pool())
-            .await
-            .expect("drop target table (setup)");
-
-        let dir = TestDir::new("tamper");
-        dir.write_file(
-            "001_init.sql",
-            "CREATE TABLE _jolt_migrate_tamper_target (id INT);",
-        );
-
-        let applied = db
-            .migrate(dir.path_str())
-            .await
-            .expect("first migrate should succeed on a fresh DB");
-        assert_eq!(applied, 1, "first migrate should apply the one file");
-
-        // Now tamper with the file — different body, same name. The
-        // `_migrations.checksum` row holds the *original* SHA-256 so
-        // the next migrate call should detect the mismatch.
-        dir.write_file(
-            "001_init.sql",
-            "CREATE TABLE _jolt_migrate_tamper_target (id BIGINT);",
-        );
-
-        let err = db
-            .migrate(dir.path_str())
-            .await
-            .expect_err("re-run after tampering should surface MigrationError::Tampered");
-        match &err {
-            MigrationError::Tampered { name } => {
-                assert_eq!(name, "001_init.sql");
-            }
-            other => panic!("expected MigrationError::Tampered, got {other:?}"),
         }
-        assert_eq!(
-            format!("{err}"),
-            "Migration 001_init.sql has been modified since it was applied.",
-        );
 
-        // Teardown.
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
-            .execute(db.pool())
-            .await
-            .expect("drop target table (teardown)");
-        sqlx::query("TRUNCATE TABLE _migrations")
-            .execute(db.pool())
-            .await
-            .expect("truncate _migrations (teardown)");
-    }
+        /// [`MigrationError`] implements [`std::error::Error`] with
+        /// [`source`](std::error::Error::source) chained through the
+        /// wrapped `io::Error` (decision 45). Tampered carries no
+        /// underlying error so its source is `None`.
+        #[test]
+        fn migration_error_source_chains_through_io_variant() {
+            use std::error::Error;
 
-    // ---- JOLTR-RS-103: MigrationError::Removed + rollback detection ----
+            let io_wrapped =
+                MigrationError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+            let source = io_wrapped
+                .source()
+                .expect("Io variant should expose source");
+            assert!(
+                source.downcast_ref::<std::io::Error>().is_some(),
+                "source for Io variant should downcast to io::Error",
+            );
 
-    /// PRD-103 mandates the Display output for the Removed variant
-    /// verbatim: `"Migration X has been removed. Rollbacks are not
-    /// supported."`. Pins decision 48's contract. A regression that
-    /// drops the period, mangles the wording, or routes the variant
-    /// through `Debug` formatting fails this test without ever
-    /// running migrate.
-    #[test]
-    fn migration_error_display_renders_prd_verbatim_for_removed() {
-        let err = MigrationError::Removed {
-            name: String::from("003_add_users.sql"),
-        };
-        assert_eq!(
-            format!("{err}"),
-            "Migration 003_add_users.sql has been removed. Rollbacks are not supported.",
-        );
-    }
-
-    /// `MigrationError::Removed` carries no underlying error, so
-    /// [`std::error::Error::source`] returns `None` (parallel to the
-    /// `Tampered` arm — both are joltr-db-synthesized failures, not
-    /// wrappers around an `io::Error` / `sqlx::Error`). Pins decision
-    /// 48's source contract.
-    #[test]
-    fn migration_error_source_returns_none_for_removed() {
-        use std::error::Error;
-        let removed = MigrationError::Removed {
-            name: String::from("foo.sql"),
-        };
-        assert!(
-            removed.source().is_none(),
-            "Removed carries no underlying error",
-        );
-    }
-
-    /// PRD-mandated verification for JOLTR-RS-103: "remove migration
-    /// file after apply → error on next run." Env-gated on
-    /// `JOLTR_TEST_DATABASE_URL` (same convention as the rest of the
-    /// live-DB tests in this module).
-    ///
-    /// Flow:
-    /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
-    ///    empty starting state.
-    /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
-    ///    `migrate`, assert `Ok(1)`.
-    /// 3. Delete the on-disk file. The `_migrations` row still
-    ///    records the original name + checksum.
-    /// 4. Call `migrate` again. Assert it returns
-    ///    [`MigrationError::Removed`] with `name = "001_init.sql"`.
-    /// 5. Assert the Display output is the PRD-103 verbatim message.
-    /// 6. Verify the rollback check ran *before* the per-file apply
-    ///    loop: write a brand-new `002_added.sql` file alongside
-    ///    the now-missing `001_init.sql`'s database row, re-run
-    ///    `migrate`, assert it still fails with
-    ///    [`MigrationError::Removed`] (the new file is not applied
-    ///    because the global-state check short-circuits). Pins
-    ///    decision 48's "before the loop" placement.
-    /// 7. Teardown.
-    #[tokio::test]
-    async fn migrate_detects_removed_migration_when_test_db_available() {
-        let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
-            return;
-        };
-        let cfg = DbConfig::new(url);
-        let db = JoltRDb::connect(&cfg).await.expect("connect");
-
-        // Fresh-state setup.
-        sqlx::query("TRUNCATE TABLE _migrations")
-            .execute(db.pool())
-            .await
-            .expect("truncate _migrations (setup)");
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
-            .execute(db.pool())
-            .await
-            .expect("drop target table (setup)");
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
-            .execute(db.pool())
-            .await
-            .expect("drop should-not-run target table (setup)");
-
-        let dir = TestDir::new("removed");
-        dir.write_file(
-            "001_init.sql",
-            "CREATE TABLE _jolt_migrate_removed_target (id INT);",
-        );
-
-        let applied = db
-            .migrate(dir.path_str())
-            .await
-            .expect("first migrate should succeed on a fresh DB");
-        assert_eq!(applied, 1, "first migrate should apply the one file");
-
-        // Roll the migration back by deleting the on-disk file. The
-        // `_migrations.name = '001_init.sql'` row is still present.
-        std::fs::remove_file(dir.path.join("001_init.sql"))
-            .expect("remove 001_init.sql to simulate operator rollback");
-
-        let err = db
-            .migrate(dir.path_str())
-            .await
-            .expect_err("re-run after deleting file should surface MigrationError::Removed");
-        match &err {
-            MigrationError::Removed { name } => {
-                assert_eq!(name, "001_init.sql");
-            }
-            other => panic!("expected MigrationError::Removed, got {other:?}"),
+            let tampered = MigrationError::Tampered {
+                name: String::from("foo.sql"),
+            };
+            assert!(
+                tampered.source().is_none(),
+                "Tampered carries no underlying error",
+            );
         }
-        assert_eq!(
-            format!("{err}"),
-            "Migration 001_init.sql has been removed. Rollbacks are not supported.",
-        );
 
-        // Pin decision 48's "rollback check runs before the apply
-        // loop" semantic. Add a brand-new file that *would* apply
-        // cleanly if the apply loop ran — but the rollback check
-        // should short-circuit before the loop body starts. We
-        // verify the new file's body did NOT run by checking that
-        // its target table does not exist after the failed migrate
-        // call.
-        dir.write_file(
-            "002_added.sql",
-            "CREATE TABLE _jolt_migrate_removed_should_not_run (id INT);",
-        );
-        let err2 = db
-            .migrate(dir.path_str())
-            .await
-            .expect_err("re-run with new file alongside missing one should still fail Removed");
-        assert!(
-            matches!(err2, MigrationError::Removed { ref name } if name == "001_init.sql"),
-            "expected Removed for the still-missing file, got {err2:?}",
-        );
-        // The new file's body did NOT execute — its CREATE TABLE
-        // never ran, so a SELECT against the target table errors
-        // with "relation does not exist" (sqlx's `Database` error).
-        let probe: Result<(i32,), sqlx::Error> = sqlx::query_as(
-            "SELECT 1 FROM _jolt_migrate_removed_should_not_run LIMIT 1",
-        )
-        .fetch_one(db.pool())
-        .await;
-        assert!(
+        /// PRD-mandated verification for JOLTR-RS-102: "change file content
+        /// after apply → error on next run." Env-gated on
+        /// `JOLTR_TEST_DATABASE_URL` (same convention as the rest of the
+        /// live-DB tests in this module).
+        ///
+        /// Flow:
+        /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
+        ///    empty starting state.
+        /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
+        ///    `migrate`, assert `Ok(1)`.
+        /// 3. Overwrite the same `001_init.sql` file with different
+        ///    content (different SQL body → different SHA-256). The
+        ///    `_migrations` row still records the *original* checksum.
+        /// 4. Call `migrate` again. Assert it returns
+        ///    [`MigrationError::Tampered`] with `name = "001_init.sql"`.
+        /// 5. Assert the Display output is the PRD-102 verbatim message.
+        /// 6. Teardown.
+        #[tokio::test]
+        async fn migrate_detects_tampered_migration_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg).await.expect("connect");
+
+            // Fresh-state setup.
+            sqlx::query("TRUNCATE TABLE _migrations")
+                .execute(db.pool())
+                .await
+                .expect("truncate _migrations (setup)");
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
+                .execute(db.pool())
+                .await
+                .expect("drop target table (setup)");
+
+            let dir = TestDir::new("tamper");
+            dir.write_file(
+                "001_init.sql",
+                "CREATE TABLE _jolt_migrate_tamper_target (id INT);",
+            );
+
+            let applied = db
+                .migrate(dir.path_str())
+                .await
+                .expect("first migrate should succeed on a fresh DB");
+            assert_eq!(applied, 1, "first migrate should apply the one file");
+
+            // Now tamper with the file — different body, same name. The
+            // `_migrations.checksum` row holds the *original* SHA-256 so
+            // the next migrate call should detect the mismatch.
+            dir.write_file(
+                "001_init.sql",
+                "CREATE TABLE _jolt_migrate_tamper_target (id BIGINT);",
+            );
+
+            let err = db
+                .migrate(dir.path_str())
+                .await
+                .expect_err("re-run after tampering should surface MigrationError::Tampered");
+            match &err {
+                MigrationError::Tampered { name } => {
+                    assert_eq!(name, "001_init.sql");
+                }
+                other => panic!("expected MigrationError::Tampered, got {other:?}"),
+            }
+            assert_eq!(
+                format!("{err}"),
+                "Migration 001_init.sql has been modified since it was applied.",
+            );
+
+            // Teardown.
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_tamper_target")
+                .execute(db.pool())
+                .await
+                .expect("drop target table (teardown)");
+            sqlx::query("TRUNCATE TABLE _migrations")
+                .execute(db.pool())
+                .await
+                .expect("truncate _migrations (teardown)");
+        }
+
+        // ---- JOLTR-RS-103: MigrationError::Removed + rollback detection ----
+
+        /// PRD-103 mandates the Display output for the Removed variant
+        /// verbatim: `"Migration X has been removed. Rollbacks are not
+        /// supported."`. Pins decision 48's contract. A regression that
+        /// drops the period, mangles the wording, or routes the variant
+        /// through `Debug` formatting fails this test without ever
+        /// running migrate.
+        #[test]
+        fn migration_error_display_renders_prd_verbatim_for_removed() {
+            let err = MigrationError::Removed {
+                name: String::from("003_add_users.sql"),
+            };
+            assert_eq!(
+                format!("{err}"),
+                "Migration 003_add_users.sql has been removed. Rollbacks are not supported.",
+            );
+        }
+
+        /// `MigrationError::Removed` carries no underlying error, so
+        /// [`std::error::Error::source`] returns `None` (parallel to the
+        /// `Tampered` arm — both are joltr-db-synthesized failures, not
+        /// wrappers around an `io::Error` / `sqlx::Error`). Pins decision
+        /// 48's source contract.
+        #[test]
+        fn migration_error_source_returns_none_for_removed() {
+            use std::error::Error;
+            let removed = MigrationError::Removed {
+                name: String::from("foo.sql"),
+            };
+            assert!(
+                removed.source().is_none(),
+                "Removed carries no underlying error",
+            );
+        }
+
+        /// PRD-mandated verification for JOLTR-RS-103: "remove migration
+        /// file after apply → error on next run." Env-gated on
+        /// `JOLTR_TEST_DATABASE_URL` (same convention as the rest of the
+        /// live-DB tests in this module).
+        ///
+        /// Flow:
+        /// 1. TRUNCATE `_migrations` + DROP the target table for a known-
+        ///    empty starting state.
+        /// 2. Write `001_init.sql` (a CREATE TABLE), apply it via
+        ///    `migrate`, assert `Ok(1)`.
+        /// 3. Delete the on-disk file. The `_migrations` row still
+        ///    records the original name + checksum.
+        /// 4. Call `migrate` again. Assert it returns
+        ///    [`MigrationError::Removed`] with `name = "001_init.sql"`.
+        /// 5. Assert the Display output is the PRD-103 verbatim message.
+        /// 6. Verify the rollback check ran *before* the per-file apply
+        ///    loop: write a brand-new `002_added.sql` file alongside
+        ///    the now-missing `001_init.sql`'s database row, re-run
+        ///    `migrate`, assert it still fails with
+        ///    [`MigrationError::Removed`] (the new file is not applied
+        ///    because the global-state check short-circuits). Pins
+        ///    decision 48's "before the loop" placement.
+        /// 7. Teardown.
+        #[tokio::test]
+        async fn migrate_detects_removed_migration_when_test_db_available() {
+            let Ok(url) = std::env::var("JOLTR_TEST_DATABASE_URL") else {
+                return;
+            };
+            let cfg = DbConfig::new(url);
+            let db = JoltRDb::connect(&cfg).await.expect("connect");
+
+            // Fresh-state setup.
+            sqlx::query("TRUNCATE TABLE _migrations")
+                .execute(db.pool())
+                .await
+                .expect("truncate _migrations (setup)");
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
+                .execute(db.pool())
+                .await
+                .expect("drop target table (setup)");
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
+                .execute(db.pool())
+                .await
+                .expect("drop should-not-run target table (setup)");
+
+            let dir = TestDir::new("removed");
+            dir.write_file(
+                "001_init.sql",
+                "CREATE TABLE _jolt_migrate_removed_target (id INT);",
+            );
+
+            let applied = db
+                .migrate(dir.path_str())
+                .await
+                .expect("first migrate should succeed on a fresh DB");
+            assert_eq!(applied, 1, "first migrate should apply the one file");
+
+            // Roll the migration back by deleting the on-disk file. The
+            // `_migrations.name = '001_init.sql'` row is still present.
+            std::fs::remove_file(dir.path.join("001_init.sql"))
+                .expect("remove 001_init.sql to simulate operator rollback");
+
+            let err = db
+                .migrate(dir.path_str())
+                .await
+                .expect_err("re-run after deleting file should surface MigrationError::Removed");
+            match &err {
+                MigrationError::Removed { name } => {
+                    assert_eq!(name, "001_init.sql");
+                }
+                other => panic!("expected MigrationError::Removed, got {other:?}"),
+            }
+            assert_eq!(
+                format!("{err}"),
+                "Migration 001_init.sql has been removed. Rollbacks are not supported.",
+            );
+
+            // Pin decision 48's "rollback check runs before the apply
+            // loop" semantic. Add a brand-new file that *would* apply
+            // cleanly if the apply loop ran — but the rollback check
+            // should short-circuit before the loop body starts. We
+            // verify the new file's body did NOT run by checking that
+            // its target table does not exist after the failed migrate
+            // call.
+            dir.write_file(
+                "002_added.sql",
+                "CREATE TABLE _jolt_migrate_removed_should_not_run (id INT);",
+            );
+            let err2 = db
+                .migrate(dir.path_str())
+                .await
+                .expect_err("re-run with new file alongside missing one should still fail Removed");
+            assert!(
+                matches!(err2, MigrationError::Removed { ref name } if name == "001_init.sql"),
+                "expected Removed for the still-missing file, got {err2:?}",
+            );
+            // The new file's body did NOT execute — its CREATE TABLE
+            // never ran, so a SELECT against the target table errors
+            // with "relation does not exist" (sqlx's `Database` error).
+            let probe: Result<(i32,), sqlx::Error> =
+                sqlx::query_as("SELECT 1 FROM _jolt_migrate_removed_should_not_run LIMIT 1")
+                    .fetch_one(db.pool())
+                    .await;
+            assert!(
             probe.is_err(),
             "002_added.sql's body must not have run when 001_init.sql was missing; got {probe:?}",
         );
-        // Bookkeeping: the failed call did not insert the new row.
-        let bookkeeping_count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM _migrations WHERE name = '002_added.sql'")
-                .fetch_one(db.pool())
+            // Bookkeeping: the failed call did not insert the new row.
+            let bookkeeping_count: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM _migrations WHERE name = '002_added.sql'")
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("count _migrations rows for the new file");
+            assert_eq!(
+                bookkeeping_count.0, 0,
+                "002_added.sql must not be recorded in _migrations after the rollback-blocked call",
+            );
+
+            // Teardown.
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
+                .execute(db.pool())
                 .await
-                .expect("count _migrations rows for the new file");
-        assert_eq!(
-            bookkeeping_count.0, 0,
-            "002_added.sql must not be recorded in _migrations after the rollback-blocked call",
-        );
-
-        // Teardown.
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_target")
-            .execute(db.pool())
-            .await
-            .expect("drop target table (teardown)");
-        sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
-            .execute(db.pool())
-            .await
-            .expect("drop should-not-run target table (teardown)");
-        sqlx::query("TRUNCATE TABLE _migrations")
-            .execute(db.pool())
-            .await
-            .expect("truncate _migrations (teardown)");
-    }
-
-    // ---- JOLTR-RS-104: `create_migration_file` (CLI scaffolding) ----
-
-    /// Compile-time pin: `create_migration_file(dir: &str, name: &str,
-    /// now: DateTime<Utc>) -> std::io::Result<PathBuf>` (decisions 49,
-    /// 50). The explicit return annotation catches a regression that
-    /// switches the `now` parameter to `Local`-time, narrows the
-    /// return to `()` (the binary doesn't need the path but the
-    /// library does for JOLTR-RS-105's filename test), or wraps the
-    /// return in a foreign error type.
-    #[test]
-    fn create_migration_file_signature_pins() {
-        fn _pin(
-            dir: &str,
-            name: &str,
-            now: chrono::DateTime<chrono::Utc>,
-        ) -> std::io::Result<std::path::PathBuf> {
-            create_migration_file(dir, name, now)
+                .expect("drop target table (teardown)");
+            sqlx::query("DROP TABLE IF EXISTS _jolt_migrate_removed_should_not_run")
+                .execute(db.pool())
+                .await
+                .expect("drop should-not-run target table (teardown)");
+            sqlx::query("TRUNCATE TABLE _migrations")
+                .execute(db.pool())
+                .await
+                .expect("truncate _migrations (teardown)");
         }
-    }
 
-    /// PRD-104 mandated filename shape: `<YYYYMMDDHHMMSS>_<name>.sql`.
-    /// Pins decision 50's `%Y%m%d%H%M%S` UTC format — a regression
-    /// that drops the leading zero on a single-digit month, swaps the
-    /// component order, or formats in local time would produce a
-    /// different filename and fail this assertion.
-    #[test]
-    fn create_migration_file_builds_timestamped_filename() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-name");
-        // The PRD's verification example uses 2026-05-10 12:00:00 UTC.
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
+        // ---- JOLTR-RS-104: `create_migration_file` (CLI scaffolding) ----
 
-        let path =
-            create_migration_file(dir.path_str(), "add_users", now).expect("create migration");
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("UTF-8 filename");
-        assert_eq!(filename, "20260510120000_add_users.sql");
-        assert_eq!(path.parent(), Some(dir.path.as_path()));
-    }
+        /// Compile-time pin: `create_migration_file(dir: &str, name: &str,
+        /// now: DateTime<Utc>) -> std::io::Result<PathBuf>` (decisions 49,
+        /// 50). The explicit return annotation catches a regression that
+        /// switches the `now` parameter to `Local`-time, narrows the
+        /// return to `()` (the binary doesn't need the path but the
+        /// library does for JOLTR-RS-105's filename test), or wraps the
+        /// return in a foreign error type.
+        #[test]
+        fn create_migration_file_signature_pins() {
+            fn _pin(
+                dir: &str,
+                name: &str,
+                now: chrono::DateTime<chrono::Utc>,
+            ) -> std::io::Result<std::path::PathBuf> {
+                create_migration_file(dir, name, now)
+            }
+        }
 
-    /// Decision 51: placeholder body is the single line
-    /// `"-- migration: <name>\n"`. A regression that drops the comment,
-    /// writes an `-- up` / `-- down` template, or omits the trailing
-    /// newline fails this assertion.
-    #[test]
-    fn create_migration_file_writes_placeholder_body() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-body");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
+        /// PRD-104 mandated filename shape: `<YYYYMMDDHHMMSS>_<name>.sql`.
+        /// Pins decision 50's `%Y%m%d%H%M%S` UTC format — a regression
+        /// that drops the leading zero on a single-digit month, swaps the
+        /// component order, or formats in local time would produce a
+        /// different filename and fail this assertion.
+        #[test]
+        fn create_migration_file_builds_timestamped_filename() {
+            use chrono::TimeZone;
+            let dir = TestDir::new("create-name");
+            // The PRD's verification example uses 2026-05-10 12:00:00 UTC.
+            let now = chrono::Utc
+                .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+                .single()
+                .expect("valid UTC datetime");
 
-        let path = create_migration_file(dir.path_str(), "add_users", now).expect("create");
-        let body = std::fs::read_to_string(&path).expect("read placeholder body");
-        assert_eq!(body, "-- migration: add_users\n");
-    }
+            let path =
+                create_migration_file(dir.path_str(), "add_users", now).expect("create migration");
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("UTF-8 filename");
+            assert_eq!(filename, "20260510120000_add_users.sql");
+            assert_eq!(path.parent(), Some(dir.path.as_path()));
+        }
 
-    /// Decision 52: a second call with the same timestamp and name
-    /// returns `ErrorKind::AlreadyExists`, does not overwrite the
-    /// first file. Pins the `OpenOptions::create_new(true)` choice —
-    /// a regression that uses `fs::write` (truncate-and-write) would
-    /// silently overwrite and this test would fail.
-    #[test]
-    fn create_migration_file_errors_on_collision_without_overwriting() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-collision");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
+        /// Decision 51: placeholder body is the single line
+        /// `"-- migration: <name>\n"`. A regression that drops the comment,
+        /// writes an `-- up` / `-- down` template, or omits the trailing
+        /// newline fails this assertion.
+        #[test]
+        fn create_migration_file_writes_placeholder_body() {
+            use chrono::TimeZone;
+            let dir = TestDir::new("create-body");
+            let now = chrono::Utc
+                .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+                .single()
+                .expect("valid UTC datetime");
 
-        let path =
-            create_migration_file(dir.path_str(), "add_users", now).expect("first create");
-        // Mutate the first file's body so we can verify it survives.
-        std::fs::write(&path, "-- operator edits\n").expect("rewrite first body");
+            let path = create_migration_file(dir.path_str(), "add_users", now).expect("create");
+            let body = std::fs::read_to_string(&path).expect("read placeholder body");
+            assert_eq!(body, "-- migration: add_users\n");
+        }
 
-        let err = create_migration_file(dir.path_str(), "add_users", now)
-            .expect_err("second create with identical timestamp must fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        /// Decision 52: a second call with the same timestamp and name
+        /// returns `ErrorKind::AlreadyExists`, does not overwrite the
+        /// first file. Pins the `OpenOptions::create_new(true)` choice —
+        /// a regression that uses `fs::write` (truncate-and-write) would
+        /// silently overwrite and this test would fail.
+        #[test]
+        fn create_migration_file_errors_on_collision_without_overwriting() {
+            use chrono::TimeZone;
+            let dir = TestDir::new("create-collision");
+            let now = chrono::Utc
+                .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+                .single()
+                .expect("valid UTC datetime");
 
-        // The first file's body is untouched.
-        let body = std::fs::read_to_string(&path).expect("re-read first body");
-        assert_eq!(body, "-- operator edits\n");
-    }
+            let path =
+                create_migration_file(dir.path_str(), "add_users", now).expect("first create");
+            // Mutate the first file's body so we can verify it survives.
+            std::fs::write(&path, "-- operator edits\n").expect("rewrite first body");
 
-    /// Decision 53: empty name and names containing path separators
-    /// surface as `ErrorKind::InvalidInput` *before* any filesystem
-    /// touch. A regression that drops the validation would either
-    /// write an unintended file (path-traversal via `../`) or
-    /// fail later with a generic `Os` error.
-    #[test]
-    fn create_migration_file_rejects_invalid_names() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-validate");
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
+            let err = create_migration_file(dir.path_str(), "add_users", now)
+                .expect_err("second create with identical timestamp must fail");
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
 
-        let empty = create_migration_file(dir.path_str(), "", now)
-            .expect_err("empty name should be rejected");
-        assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
+            // The first file's body is untouched.
+            let body = std::fs::read_to_string(&path).expect("re-read first body");
+            assert_eq!(body, "-- operator edits\n");
+        }
 
-        let slash = create_migration_file(dir.path_str(), "../escape", now)
-            .expect_err("forward-slash name should be rejected");
-        assert_eq!(slash.kind(), std::io::ErrorKind::InvalidInput);
+        /// Decision 53: empty name and names containing path separators
+        /// surface as `ErrorKind::InvalidInput` *before* any filesystem
+        /// touch. A regression that drops the validation would either
+        /// write an unintended file (path-traversal via `../`) or
+        /// fail later with a generic `Os` error.
+        #[test]
+        fn create_migration_file_rejects_invalid_names() {
+            use chrono::TimeZone;
+            let dir = TestDir::new("create-validate");
+            let now = chrono::Utc
+                .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+                .single()
+                .expect("valid UTC datetime");
 
-        let backslash = create_migration_file(dir.path_str(), "win\\path", now)
-            .expect_err("backslash name should be rejected");
-        assert_eq!(backslash.kind(), std::io::ErrorKind::InvalidInput);
+            let empty = create_migration_file(dir.path_str(), "", now)
+                .expect_err("empty name should be rejected");
+            assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
 
-        // No files were created (the validation runs before any
-        // filesystem write). Read the directory back: should be empty.
-        let entries: Vec<_> = std::fs::read_dir(&dir.path)
-            .expect("read dir")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect entries");
-        assert!(
-            entries.is_empty(),
-            "validation must reject before touching disk; found {entries:?}",
-        );
-    }
+            let slash = create_migration_file(dir.path_str(), "../escape", now)
+                .expect_err("forward-slash name should be rejected");
+            assert_eq!(slash.kind(), std::io::ErrorKind::InvalidInput);
 
-    /// `create_migration_file` creates the migrations directory if it
-    /// doesn't yet exist (operator's first `migrate new` against a
-    /// fresh repo). Uses a deliberately not-yet-created subdirectory
-    /// under the test fixture so cleanup still works via TestDir's
-    /// recursive remove.
-    #[test]
-    fn create_migration_file_creates_missing_directory() {
-        use chrono::TimeZone;
-        let dir = TestDir::new("create-mkdir");
-        let nested = dir.path.join("nested").join("migrations");
-        let nested_str = nested.to_str().expect("UTF-8 path");
-        assert!(!nested.exists(), "fixture: nested dir not created yet");
+            let backslash = create_migration_file(dir.path_str(), "win\\path", now)
+                .expect_err("backslash name should be rejected");
+            assert_eq!(backslash.kind(), std::io::ErrorKind::InvalidInput);
 
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
-            .single()
-            .expect("valid UTC datetime");
-        let path =
-            create_migration_file(nested_str, "init", now).expect("should mkdir-p and create");
-        assert!(path.exists());
-        assert_eq!(path.parent(), Some(nested.as_path()));
-    }
+            // No files were created (the validation runs before any
+            // filesystem write). Read the directory back: should be empty.
+            let entries: Vec<_> = std::fs::read_dir(&dir.path)
+                .expect("read dir")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect entries");
+            assert!(
+                entries.is_empty(),
+                "validation must reject before touching disk; found {entries:?}",
+            );
+        }
+
+        /// `create_migration_file` creates the migrations directory if it
+        /// doesn't yet exist (operator's first `migrate new` against a
+        /// fresh repo). Uses a deliberately not-yet-created subdirectory
+        /// under the test fixture so cleanup still works via TestDir's
+        /// recursive remove.
+        #[test]
+        fn create_migration_file_creates_missing_directory() {
+            use chrono::TimeZone;
+            let dir = TestDir::new("create-mkdir");
+            let nested = dir.path.join("nested").join("migrations");
+            let nested_str = nested.to_str().expect("UTF-8 path");
+            assert!(!nested.exists(), "fixture: nested dir not created yet");
+
+            let now = chrono::Utc
+                .with_ymd_and_hms(2026, 5, 10, 12, 0, 0)
+                .single()
+                .expect("valid UTC datetime");
+            let path =
+                create_migration_file(nested_str, "init", now).expect("should mkdir-p and create");
+            assert!(path.exists());
+            assert_eq!(path.parent(), Some(nested.as_path()));
+        }
     }
 
     // ---- JOLTR-RS-101: migration apply tests (partial apply + multi-statement body) ----
@@ -4062,5 +4062,4 @@ mod tests {
             .await
             .expect("truncate _migrations (teardown)");
     }
-
 }

@@ -367,7 +367,10 @@ mod tests {
 
         let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
 
-        assert!(engine.has_template("hello"), "hello.hbs registers as 'hello'");
+        assert!(
+            engine.has_template("hello"),
+            "hello.hbs registers as 'hello'"
+        );
         assert!(
             engine.has_template("greeting"),
             "greeting.hbs registers as 'greeting'"
@@ -706,10 +709,7 @@ mod tests {
     #[test]
     fn eq_helper_renders_block_when_value_matches_in_if_subexpression() {
         let dir = TestDir::new("eq-helper");
-        dir.write_file(
-            "status.hbs",
-            r#"{{#if (eq status "active")}}active{{/if}}"#,
-        );
+        dir.write_file("status.hbs", r#"{{#if (eq status "active")}}active{{/if}}"#);
         let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
 
         let out = engine
@@ -748,10 +748,7 @@ mod tests {
     #[test]
     fn ne_gt_lt_helpers_available_in_default_engine() {
         let dir = TestDir::new("comparison-helpers");
-        dir.write_file(
-            "ne.hbs",
-            r#"{{#if (ne a b)}}different{{else}}same{{/if}}"#,
-        );
+        dir.write_file("ne.hbs", r#"{{#if (ne a b)}}different{{else}}same{{/if}}"#);
         dir.write_file("gt.hbs", r#"{{#if (gt n 10)}}big{{else}}small{{/if}}"#);
         dir.write_file("lt.hbs", r#"{{#if (lt n 10)}}small{{else}}big{{/if}}"#);
         let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
@@ -831,10 +828,7 @@ mod tests {
     #[test]
     fn json_helper_preserves_scalar_types() {
         let dir = TestDir::new("json-helper-scalars");
-        dir.write_file(
-            "values.hbs",
-            "n={{{json n}}}|b={{{json b}}}|x={{{json x}}}",
-        );
+        dir.write_file("values.hbs", "n={{{json n}}}|b={{{json b}}}|x={{{json x}}}");
         let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
 
         let out = engine
@@ -886,9 +880,7 @@ mod tests {
                 .register_partial("header", "[[HEADER]]")
                 .expect("register partial");
 
-            let out = engine
-                .render("page", &json!({}))
-                .expect("render succeeds");
+            let out = engine.render("page", &json!({})).expect("render succeeds");
 
             assert_eq!(out, "before [[HEADER]] after");
         }
@@ -960,10 +952,7 @@ mod tests {
                 .render("raw", &json!({ "content": "<script>alert(1)</script>" }))
                 .expect("render succeeds");
 
-            assert_eq!(
-                out,
-                "&lt;script&gt;alert(1)&lt;/script&gt;"
-            );
+            assert_eq!(out, "&lt;script&gt;alert(1)&lt;/script&gt;");
         }
 
         #[test]
@@ -1048,10 +1037,7 @@ mod tests {
             let engine = TemplateEngine::new(&dir.path).expect("engine constructs");
 
             let out = engine
-                .render(
-                    "page",
-                    &json!({ "text": "<b>B</b>", "data": { "n": 42 } }),
-                )
+                .render("page", &json!({ "text": "<b>B</b>", "data": { "n": 42 } }))
                 .expect("render succeeds");
 
             assert_eq!(

@@ -21,8 +21,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use joltr_core::{
-    AuthWsJwtLayer, PubSub, PubSubMessage, Subscription, WebSocketHandler,
-    WebSocketSender, WsMessage,
+    AuthWsJwtLayer, PubSub, PubSubMessage, Subscription, WebSocketHandler, WebSocketSender,
+    WsMessage,
 };
 use joltr_utils::jwt::{JwtClaims, JwtConfig};
 
@@ -88,8 +88,7 @@ async fn two_clients_client_a_publishes_client_b_receives() {
         .route(
             "/ws",
             get(
-                move |ws: WebSocketUpgrade,
-                      Extension(extracted_claims): Extension<JwtClaims>| {
+                move |ws: WebSocketUpgrade, Extension(extracted_claims): Extension<JwtClaims>| {
                     let pubsub = Arc::clone(&pubsub_for_route);
                     async move {
                         ws.on_upgrade(move |socket: WebSocket| {
@@ -97,25 +96,19 @@ async fn two_clients_client_a_publishes_client_b_receives() {
                             async move {
                                 let (mut tx, mut rx) = socket.split();
                                 let (sender, writer_rx) =
-                                    WebSocketSender::channel_with_pubsub(
-                                        Arc::clone(&pubsub),
-                                    );
+                                    WebSocketSender::channel_with_pubsub(Arc::clone(&pubsub));
 
                                 let writer = tokio::spawn(async move {
                                     let mut writer_rx = writer_rx;
                                     use futures_util::SinkExt;
-                                    while let Some(msg) = writer_rx.recv().await
-                                    {
+                                    while let Some(msg) = writer_rx.recv().await {
                                         if tx.send(msg).await.is_err() {
                                             break;
                                         }
                                     }
                                 });
 
-                                let mut handler = PubSubChatHandler {
-                                    pubsub,
-                                    sub: None,
-                                };
+                                let mut handler = PubSubChatHandler { pubsub, sub: None };
                                 handler.set_claims(extracted_claims);
                                 handler.on_open(sender.clone()).await;
                                 handler.on_ready(sender.clone()).await;
@@ -123,11 +116,8 @@ async fn two_clients_client_a_publishes_client_b_receives() {
                                 use futures_util::StreamExt;
                                 while let Some(Ok(msg)) = rx.next().await {
                                     let ws_msg = WsMessage::from(msg);
-                                    let is_close =
-                                        matches!(&ws_msg, WsMessage::Close(_));
-                                    handler
-                                        .on_message(ws_msg, sender.clone())
-                                        .await;
+                                    let is_close = matches!(&ws_msg, WsMessage::Close(_));
+                                    handler.on_message(ws_msg, sender.clone()).await;
                                     if is_close {
                                         break;
                                     }
@@ -198,11 +188,7 @@ async fn two_clients_client_a_publishes_client_b_receives() {
 
 // -- WS frame helpers -------------------------------------------------------
 
-async fn ws_upgrade(
-    stream: &mut tokio::net::TcpStream,
-    addr: std::net::SocketAddr,
-    token: &str,
-) {
+async fn ws_upgrade(stream: &mut tokio::net::TcpStream, addr: std::net::SocketAddr, token: &str) {
     let request = format!(
         "GET /ws HTTP/1.1\r\n\
          Host: {addr}\r\n\
@@ -312,8 +298,7 @@ async fn recv_frame_timeout(stream: &mut tokio::net::TcpStream) -> String {
                 if bytes < offset + payload_len {
                     continue;
                 }
-                return String::from_utf8_lossy(&buf[offset..offset + payload_len])
-                    .to_string();
+                return String::from_utf8_lossy(&buf[offset..offset + payload_len]).to_string();
             }
 
             if bytes < offset + 4 + payload_len {

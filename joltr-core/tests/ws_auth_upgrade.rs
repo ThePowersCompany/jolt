@@ -152,14 +152,15 @@ async fn ws_connect_with_invalid_token_is_rejected_with_401() {
     let secret = b"joltr-077-test-secret-key";
     let config = JwtConfig::new(secret.to_vec(), Algorithm::HS256);
 
-    let app = axum::Router::new()
-        .route(
-            "/ws",
-            get(|ws: WebSocketUpgrade| async move {
-                ws.on_upgrade(|_socket: WebSocket| async move {})
-            }),
-        )
-        .layer(AuthWsJwtLayer::new(config));
+    let app =
+        axum::Router::new()
+            .route(
+                "/ws",
+                get(|ws: WebSocketUpgrade| async move {
+                    ws.on_upgrade(|_socket: WebSocket| async move {})
+                }),
+            )
+            .layer(AuthWsJwtLayer::new(config));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

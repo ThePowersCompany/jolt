@@ -14,14 +14,22 @@ mod tests {
     fn uuid_v4_is_valid_format() {
         let id = uuid_v4();
         let parsed = uuid::Uuid::parse_str(&id).expect("uuid_v4 output must be a valid UUID");
-        assert_eq!(parsed.get_version_num(), 4, "uuid_v4 must produce version 4 UUID");
+        assert_eq!(
+            parsed.get_version_num(),
+            4,
+            "uuid_v4 must produce version 4 UUID"
+        );
     }
 
     #[test]
     fn uuid_v7_is_valid_format() {
         let id = uuid_v7();
         let parsed = uuid::Uuid::parse_str(&id).expect("uuid_v7 output must be a valid UUID");
-        assert_eq!(parsed.get_version_num(), 7, "uuid_v7 must produce version 7 UUID");
+        assert_eq!(
+            parsed.get_version_num(),
+            7,
+            "uuid_v7 must produce version 7 UUID"
+        );
     }
 
     #[test]
@@ -29,7 +37,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..1000 {
             let id = uuid_v4();
-            assert!(seen.insert(id), "uuid_v4 must produce unique values within 1000 generations");
+            assert!(
+                seen.insert(id),
+                "uuid_v4 must produce unique values within 1000 generations"
+            );
         }
     }
 
@@ -38,7 +49,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for _ in 0..1000 {
             let id = uuid_v7();
-            assert!(seen.insert(id), "uuid_v7 must produce unique values within 1000 generations");
+            assert!(
+                seen.insert(id),
+                "uuid_v7 must produce unique values within 1000 generations"
+            );
         }
     }
 }

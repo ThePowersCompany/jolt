@@ -65,4 +65,3 @@ impl FromStr for Method {
         }
     }
 }
-

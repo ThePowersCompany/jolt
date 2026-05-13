@@ -155,9 +155,18 @@ fn to_patch_query_generates_sql_string_and_params() {
         follower_count: 42,
     };
     let (sql, params) = patch.to_patch_query("id", &1u64);
-    assert!(sql.starts_with("UPDATE"), "SQL must be an UPDATE, got: {sql}");
-    assert!(sql.contains("accounts"), "SQL must reference table name, got: {sql}");
-    assert!(!params.is_empty(), "params must include at least the id_value");
+    assert!(
+        sql.starts_with("UPDATE"),
+        "SQL must be an UPDATE, got: {sql}"
+    );
+    assert!(
+        sql.contains("accounts"),
+        "SQL must reference table name, got: {sql}"
+    );
+    assert!(
+        !params.is_empty(),
+        "params must include at least the id_value"
+    );
 }
 
 #[test]
@@ -168,9 +177,16 @@ fn to_patch_query_optional_some_includes_column_in_set_clause() {
         follower_count: 0,
     };
     let (sql, params) = patch.to_patch_query("id", &99u64);
-    assert!(sql.contains("display_name"), "Some field must appear in SET clause, got: {sql}");
+    assert!(
+        sql.contains("display_name"),
+        "Some field must appear in SET clause, got: {sql}"
+    );
     // All four params: display_name, bio, follower_count, id_value
-    assert_eq!(params.len(), 4, "expected 4 params (3 SET + 1 WHERE), got: {sql}");
+    assert_eq!(
+        params.len(),
+        4,
+        "expected 4 params (3 SET + 1 WHERE), got: {sql}"
+    );
 }
 
 #[test]
@@ -181,7 +197,10 @@ fn to_patch_query_optional_null_sets_column_to_null() {
         follower_count: 0,
     };
     let (sql, _params) = patch.to_patch_query("id", &1u64);
-    assert!(sql.contains("display_name = NULL"), "Null field must produce SET col = NULL, got: {sql}");
+    assert!(
+        sql.contains("display_name = NULL"),
+        "Null field must produce SET col = NULL, got: {sql}"
+    );
 }
 
 #[test]
@@ -193,8 +212,15 @@ fn to_patch_query_optional_not_provided_skips_column() {
     };
     let (sql, params) = patch.to_patch_query("id", &1u64);
     // Only bio, follower_count, id_value — display_name is skipped
-    assert!(!sql.contains("display_name"), "NotProvided field must be absent from SET, got: {sql}");
-    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+    assert!(
+        !sql.contains("display_name"),
+        "NotProvided field must be absent from SET, got: {sql}"
+    );
+    assert_eq!(
+        params.len(),
+        3,
+        "expected 3 params (2 SET + 1 WHERE), got: {sql}"
+    );
 }
 
 #[test]
@@ -205,7 +231,10 @@ fn to_patch_query_where_clause_uses_id_column() {
         follower_count: 1,
     };
     let (sql, _params) = patch.to_patch_query("user_id", &42u64);
-    assert!(sql.contains("WHERE user_id"), "WHERE clause must use id_column, got: {sql}");
+    assert!(
+        sql.contains("WHERE user_id"),
+        "WHERE clause must use id_column, got: {sql}"
+    );
 }
 
 // ── JOLTR-RS-116: $N parameter notation + no value interpolation ──
@@ -219,10 +248,22 @@ fn to_patch_query_uses_dollar_n_placeholders() {
     };
     let (sql, params) = patch.to_patch_query("id", &99u64);
 
-    assert!(sql.contains("$1"), "SET clause must use $1 placeholder, got: {sql}");
-    assert!(sql.contains("$2"), "SET clause must use $2 placeholder, got: {sql}");
-    assert!(sql.contains("$3"), "SET clause must use $3 placeholder, got: {sql}");
-    assert!(sql.contains("$4"), "WHERE clause must use $4 placeholder, got: {sql}");
+    assert!(
+        sql.contains("$1"),
+        "SET clause must use $1 placeholder, got: {sql}"
+    );
+    assert!(
+        sql.contains("$2"),
+        "SET clause must use $2 placeholder, got: {sql}"
+    );
+    assert!(
+        sql.contains("$3"),
+        "SET clause must use $3 placeholder, got: {sql}"
+    );
+    assert!(
+        sql.contains("$4"),
+        "WHERE clause must use $4 placeholder, got: {sql}"
+    );
     assert_eq!(params.len(), 4, "params must match $N placeholder count");
 }
 
@@ -269,8 +310,15 @@ fn to_patch_query_all_fields_some() {
     assert!(sql.contains("$3"), "third param should be $3, got: {sql}");
     assert!(sql.contains("$4"), "fourth param should be $4, got: {sql}");
     assert!(sql.contains("$5"), "WHERE clause should be $5, got: {sql}");
-    assert!(!sql.contains("NULL"), "all-Some: no NULL columns expected, got: {sql}");
-    assert_eq!(params.len(), 5, "expected 5 params (4 SET + 1 WHERE), got: {sql}");
+    assert!(
+        !sql.contains("NULL"),
+        "all-Some: no NULL columns expected, got: {sql}"
+    );
+    assert_eq!(
+        params.len(),
+        5,
+        "expected 5 params (4 SET + 1 WHERE), got: {sql}"
+    );
 }
 
 #[test]
@@ -298,7 +346,11 @@ fn to_patch_query_all_fields_null() {
         !sql.contains("$2"),
         "no $2 expected when all fields are Null, got: {sql}"
     );
-    assert_eq!(params.len(), 1, "only the id_value param (no SET params for all-Null), got: {sql}");
+    assert_eq!(
+        params.len(),
+        1,
+        "only the id_value param (no SET params for all-Null), got: {sql}"
+    );
 }
 
 #[test]
@@ -332,7 +384,11 @@ fn to_patch_query_mixed_some_null_not_provided() {
         sql.contains("$3"),
         "WHERE clause must be $3 (after 2 Some params), got: {sql}"
     );
-    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+    assert_eq!(
+        params.len(),
+        3,
+        "expected 3 params (2 SET + 1 WHERE), got: {sql}"
+    );
 }
 
 #[test]
@@ -365,7 +421,11 @@ fn to_patch_query_table_name_round_trips_in_sql() {
     assert!(sql.contains("$1"), "email must be $1, got: {sql}");
     assert!(sql.contains("$2"), "name must be $2, got: {sql}");
     assert!(sql.contains("$3"), "WHERE clause must be $3, got: {sql}");
-    assert_eq!(params.len(), 3, "expected 3 params (2 SET + 1 WHERE), got: {sql}");
+    assert_eq!(
+        params.len(),
+        3,
+        "expected 3 params (2 SET + 1 WHERE), got: {sql}"
+    );
 
     assert!(
         !sql.contains("customers@example.com") && !sql.contains("Alice"),

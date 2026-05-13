@@ -193,8 +193,16 @@ mod tests {
             name: "User",
             kind: TsKind::Interface,
             fields: &[
-                TsField { name: "id", ts_type: "number", docs: None },
-                TsField { name: "name", ts_type: "string", docs: None },
+                TsField {
+                    name: "id",
+                    ts_type: "number",
+                    docs: None,
+                },
+                TsField {
+                    name: "name",
+                    ts_type: "string",
+                    docs: None,
+                },
             ],
             generics: &[],
             docs: None,
@@ -247,8 +255,16 @@ mod tests {
             name: "Status",
             kind: TsKind::Enum,
             fields: &[
-                TsField { name: "Active", ts_type: "", docs: None },
-                TsField { name: "Inactive", ts_type: "", docs: None },
+                TsField {
+                    name: "Active",
+                    ts_type: "",
+                    docs: None,
+                },
+                TsField {
+                    name: "Inactive",
+                    ts_type: "",
+                    docs: None,
+                },
             ],
             generics: &[],
             docs: None,
@@ -267,8 +283,16 @@ mod tests {
             name: "Id",
             kind: TsKind::Union,
             fields: &[
-                TsField { name: "_0", ts_type: "string", docs: None },
-                TsField { name: "_1", ts_type: "number", docs: None },
+                TsField {
+                    name: "_0",
+                    ts_type: "string",
+                    docs: None,
+                },
+                TsField {
+                    name: "_1",
+                    ts_type: "number",
+                    docs: None,
+                },
             ],
             generics: &[],
             docs: None,
@@ -283,7 +307,11 @@ mod tests {
         let def = TsTypeDef {
             name: "Wrapper",
             kind: TsKind::Interface,
-            fields: &[TsField { name: "inner", ts_type: "T", docs: None }],
+            fields: &[TsField {
+                name: "inner",
+                ts_type: "T",
+                docs: None,
+            }],
             generics: &["T"],
             docs: None,
         };

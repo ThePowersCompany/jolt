@@ -74,4 +74,3 @@ impl fmt::Display for StatusCode {
         }
     }
 }
-

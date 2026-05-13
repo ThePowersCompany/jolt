@@ -18,9 +18,7 @@ use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use joltr_core::{
-    ws, AuthError, JwtClaims, WebSocketHandler, WebSocketSender, WsMessage,
-};
+use joltr_core::{ws, AuthError, JwtClaims, WebSocketHandler, WebSocketSender, WsMessage};
 
 /// A static shared across all test handler instances so the ws! macro
 /// (which constructs the handler via `Default::default`) can write into
@@ -125,7 +123,10 @@ async fn valid_token_upgrade_succeeds_and_drives_lifecycle() {
         calls.contains(&"set_claims"),
         "set_claims must be called; observed: {calls:?}"
     );
-    assert!(calls.contains(&"on_open"), "on_open must be called; observed: {calls:?}");
+    assert!(
+        calls.contains(&"on_open"),
+        "on_open must be called; observed: {calls:?}"
+    );
     assert!(
         calls.contains(&"on_ready"),
         "on_ready must be called; observed: {calls:?}"

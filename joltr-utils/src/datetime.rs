@@ -29,10 +29,9 @@ mod tests {
 
     #[test]
     fn parse_rfc3339_with_fractional_seconds() {
-        let dt = parse_rfc3339("2024-01-15T10:30:00.500Z").expect("valid RFC 3339 with fractional seconds");
-        let expected = Utc
-            .with_ymd_and_hms(2024, 1, 15, 10, 30, 0)
-            .unwrap()
+        let dt = parse_rfc3339("2024-01-15T10:30:00.500Z")
+            .expect("valid RFC 3339 with fractional seconds");
+        let expected = Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
             + chrono::Duration::milliseconds(500);
         assert_eq!(dt, expected);
     }
@@ -68,8 +67,12 @@ mod tests {
         let original = "2024-01-15T10:30:00Z";
         let dt = parse_rfc3339(original).expect("valid RFC 3339 input");
         let formatted = format_rfc3339(&dt);
-        let reparsed = parse_rfc3339(&formatted).expect("formatted output must itself be valid RFC 3339");
-        assert_eq!(dt, reparsed, "round-trip parse→format→parse must preserve the instant");
+        let reparsed =
+            parse_rfc3339(&formatted).expect("formatted output must itself be valid RFC 3339");
+        assert_eq!(
+            dt, reparsed,
+            "round-trip parse→format→parse must preserve the instant"
+        );
     }
 
     #[test]
@@ -77,14 +80,15 @@ mod tests {
         let dt = Utc.with_ymd_and_hms(2024, 6, 30, 23, 59, 59).unwrap();
         let s = format_rfc3339(&dt);
         let reparsed = parse_rfc3339(&s).expect("formatted output must be valid RFC 3339");
-        assert_eq!(dt, reparsed, "round-trip format→parse must preserve the instant");
+        assert_eq!(
+            dt, reparsed,
+            "round-trip format→parse must preserve the instant"
+        );
     }
 
     #[test]
     fn format_rfc3339_includes_subsecond_precision() {
-        let dt = Utc
-            .with_ymd_and_hms(2024, 1, 15, 10, 30, 0)
-            .unwrap()
+        let dt = Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
             + chrono::Duration::milliseconds(123);
         let s = format_rfc3339(&dt);
         assert!(s.starts_with("2024-01-15T10:30:00.123"));

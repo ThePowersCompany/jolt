@@ -194,9 +194,7 @@ impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
                     this.keep_alive_sleep
                         .as_mut()
                         .reset(Instant::now() + this.keep_alive_interval);
-                    Poll::Ready(Some(Ok(
-                        AxumSseEvent::default().comment("keepalive"),
-                    )))
+                    Poll::Ready(Some(Ok(AxumSseEvent::default().comment("keepalive"))))
                 }
                 Poll::Pending => Poll::Pending,
             },
@@ -228,7 +226,9 @@ impl<H: SseHandler + Send + 'static> Stream for SseCleanupStream<H> {
 /// 4. When the stream ends (naturally) or the client disconnects,
 ///    `handler.on_close()` and `handler.on_shutdown()` fire in a
 ///    background task.
-pub async fn into_sse_response<H: SseHandler + Send + 'static>(handler: H) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
+pub async fn into_sse_response<H: SseHandler + Send + 'static>(
+    handler: H,
+) -> axum::response::Sse<impl Stream<Item = Result<AxumSseEvent, Infallible>>> {
     into_sse_response_with_keep_alive(handler, Duration::from_secs(15)).await
 }
 

@@ -95,8 +95,14 @@ fn endpoint_macro_registers_one_entry_per_verb_method_in_inventory() {
         entries.len()
     );
     let methods: Vec<Method> = entries.iter().map(|e| e.method).collect();
-    assert!(methods.contains(&Method::Get), "missing GET entry: {methods:?}");
-    assert!(methods.contains(&Method::Post), "missing POST entry: {methods:?}");
+    assert!(
+        methods.contains(&Method::Get),
+        "missing GET entry: {methods:?}"
+    );
+    assert!(
+        methods.contains(&Method::Post),
+        "missing POST entry: {methods:?}"
+    );
 }
 
 #[tokio::test]

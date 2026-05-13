@@ -1,7 +1,7 @@
 #![doc = "joltr-core: HTTP, WebSocket, SSE, tasks, and pub/sub primitives for the JoltR framework."]
 
-pub mod auth_error;
 pub mod auth_bearer;
+pub mod auth_error;
 pub mod auth_jwt;
 pub mod auth_websocket;
 pub mod auth_ws_jwt;
@@ -48,17 +48,21 @@ pub use auth_websocket::{
 // Re-export joltr-utils JWT types at the joltr-core surface so user crates that
 // consume `AuthJwtLayer` (JOLTR-RS-072) don't need a direct `joltr-utils` dep
 // just to build a `JwtConfig` or read a `JwtClaims` from extensions.
-pub use joltr_utils::jwt::{Algorithm as JwtAlgorithm, JwtClaims, JwtConfig, JwtDecodeError, JwtEncodeError, encode as jwt_encode};
 pub use cookie::{Cookie, SameSite, SetCookie};
 pub use cors::{CorsLayer, CorsService};
 pub use endpoint::{Endpoint, EndpointFuture};
 pub use endpoint_registry::EndpointRegistry;
 pub use error::{ErrorBody, JoltRError};
 pub use file_serve::{FileServeLayer, FileServeService};
+pub use joltr_utils::jwt::{
+    encode as jwt_encode, Algorithm as JwtAlgorithm, JwtClaims, JwtConfig, JwtDecodeError,
+    JwtEncodeError,
+};
 pub use method::{Method, ParseMethodError};
 pub use optional::Optional;
-pub use to_sql::ToSql;
-pub use parse_body::{ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService};
+pub use parse_body::{
+    ParseBodyLayer, ParseBodyService, ParseBodyStringLayer, ParseBodyStringService,
+};
 pub use parse_query::{
     bad_request_for_query_error, extract as extract_query, extract_bool as extract_query_bool,
     extract_enum as extract_query_enum, extract_string as extract_query_string,
@@ -72,9 +76,12 @@ pub use request_ext::RequestExt;
 pub use response::{JsonBody, Response};
 pub use router::Router;
 pub use server::{CorsConfig, JoltRServer, TlsConfig};
-pub use sse::{into_sse_response, into_sse_response_with_keep_alive, SseEvent, SseHandler, SseStream};
+pub use sse::{
+    into_sse_response, into_sse_response_with_keep_alive, SseEvent, SseHandler, SseStream,
+};
 pub use status::StatusCode;
 pub use task::{Task, TaskError, TaskFuture, TaskScheduler};
+pub use to_sql::ToSql;
 // JOLTR-RS-118 surface: the WebSocket lifecycle trait (five async callbacks
 // with no-op defaults).
 // JOLTR-RS-119 surface: the real `WebSocketSender` (mpsc-backed cheap-clone
@@ -88,7 +95,10 @@ pub use task::{Task, TaskError, TaskFuture, TaskScheduler};
 // only so 122's integration test can verify the macro parsed + expanded.
 // Re-exported at the crate root so user crates `use joltr_core::WebSocketHandler;`
 // without needing to know the internal module layout.
-pub use websocket::{CloseFrame, Subscription, WebSocketHandler, WebSocketSender, WsMessage, WsSendError, __WsMacroWitness};
+pub use websocket::{
+    __WsMacroWitness, CloseFrame, Subscription, WebSocketHandler, WebSocketSender, WsMessage,
+    WsSendError,
+};
 
 // Re-export `inventory` so the `#[endpoint]` macro can emit
 // `::joltr_core::inventory::submit!` without forcing every user crate to add

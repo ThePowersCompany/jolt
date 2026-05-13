@@ -108,15 +108,17 @@ pub(crate) struct PatchField {
 ///   struct's named fields; positional fields can't carry that meaning, so
 ///   accepting them would force a separate naming rule that doesn't compose
 ///   with named-field structs.
-pub(crate) fn parse_patch_query_input(
-    input: DeriveInput,
-) -> syn::Result<PatchQueryInput> {
+pub(crate) fn parse_patch_query_input(input: DeriveInput) -> syn::Result<PatchQueryInput> {
     let ident = input.ident.clone();
     let table_name = parse_patch_table_attr(&input.attrs)?;
     match input.data {
         Data::Struct(s) => {
             let fields = parse_struct_fields(&s, &ident)?;
-            Ok(PatchQueryInput { ident, fields, table_name })
+            Ok(PatchQueryInput {
+                ident,
+                fields,
+                table_name,
+            })
         }
         Data::Enum(e) => Err(syn::Error::new_spanned(
             e.enum_token,
@@ -137,9 +139,7 @@ pub(crate) fn parse_patch_query_input(
 /// are syntactically valid; downstream codegen surfaces the error). If the
 /// attribute is present but malformed (wrong shape, missing string literal,
 /// duplicate), returns a `syn::Error`.
-fn parse_patch_table_attr(
-    attrs: &[syn::Attribute],
-) -> syn::Result<Option<String>> {
+fn parse_patch_table_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
     let mut found: Option<String> = None;
     for attr in attrs {
         if !attr.path().is_ident("patch") {
@@ -172,10 +172,7 @@ fn parse_patch_table_attr(
     Ok(found)
 }
 
-fn parse_struct_fields(
-    data: &DataStruct,
-    owner: &Ident,
-) -> syn::Result<Vec<PatchField>> {
+fn parse_struct_fields(data: &DataStruct, owner: &Ident) -> syn::Result<Vec<PatchField>> {
     match &data.fields {
         Fields::Named(named) => {
             let mut out = Vec::with_capacity(named.named.len());
@@ -445,7 +442,10 @@ mod tests {
         );
         let parsed = parse_patch_query_input(input).expect("parses");
         assert_eq!(parsed.fields.len(), 1);
-        let inner = parsed.fields[0].inner_type.as_ref().expect("Optional<T> must have inner_type");
+        let inner = parsed.fields[0]
+            .inner_type
+            .as_ref()
+            .expect("Optional<T> must have inner_type");
         let rendered = quote! { #inner }.to_string();
         assert!(
             rendered == "String",
@@ -588,8 +588,7 @@ mod tests {
             ),
             "accounts",
         );
-        let err = parse_patch_query_input(input)
-            .expect_err("duplicate #[patch] must be rejected");
+        let err = parse_patch_query_input(input).expect_err("duplicate #[patch] must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("duplicate"),
@@ -599,17 +598,15 @@ mod tests {
 
     #[test]
     fn parse_patch_table_attr_rejects_non_string_argument() {
-        let input = with_non_string_patch_attr(
-            parse_derive(
-                r#"
+        let input = with_non_string_patch_attr(parse_derive(
+            r#"
                 struct BadPatch {
                     name: Optional<String>,
                 }
                 "#,
-            ),
-        );
-        let err = parse_patch_query_input(input)
-            .expect_err("non-string #[patch] arg must be rejected");
+        ));
+        let err =
+            parse_patch_query_input(input).expect_err("non-string #[patch] arg must be rejected");
         assert!(
             err.to_string().contains("string literal"),
             "diagnostic must mention string literal, got: {err}"
@@ -618,17 +615,14 @@ mod tests {
 
     #[test]
     fn parse_patch_table_attr_rejects_non_list_form() {
-        let input = with_non_list_patch_attr(
-            parse_derive(
-                r#"
+        let input = with_non_list_patch_attr(parse_derive(
+            r#"
                 struct BadPatch {
                     name: Optional<String>,
                 }
                 "#,
-            ),
-        );
-        let err = parse_patch_query_input(input)
-            .expect_err("NameValue #[patch] must be rejected");
+        ));
+        let err = parse_patch_query_input(input).expect_err("NameValue #[patch] must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("string literal") || msg.contains("expected"),
@@ -693,7 +687,10 @@ mod tests {
         let parsed = parse_patch_query_input(input).expect("parses");
         assert_eq!(parsed.fields.len(), 1);
         let f = &parsed.fields[0];
-        assert!(f.is_optional, "Optional<String> must be detected as optional");
+        assert!(
+            f.is_optional,
+            "Optional<String> must be detected as optional"
+        );
         assert!(f.inner_type.is_some(), "inner_type must be Some(String)");
         let inner = f.inner_type.as_ref().unwrap();
         let rendered = quote! { #inner }.to_string();
@@ -717,10 +714,7 @@ mod tests {
         assert!(f.is_optional, "Optional<u32> must be detected as optional");
         let inner = f.inner_type.as_ref().unwrap();
         let rendered = quote! { #inner }.to_string();
-        assert!(
-            rendered == "u32",
-            "inner type must be u32, got: {rendered}"
-        );
+        assert!(rendered == "u32", "inner type must be u32, got: {rendered}");
     }
 
     #[test]
@@ -763,8 +757,14 @@ mod tests {
         );
         let parsed = parse_patch_query_input(input).expect("parses");
         let f = &parsed.fields[0];
-        assert!(!f.is_optional, "Vec<String> must not be detected as optional");
-        assert!(f.inner_type.is_none(), "Vec<String> must have inner_type=None");
+        assert!(
+            !f.is_optional,
+            "Vec<String> must not be detected as optional"
+        );
+        assert!(
+            f.inner_type.is_none(),
+            "Vec<String> must have inner_type=None"
+        );
     }
 
     #[test]
@@ -1160,10 +1160,7 @@ mod tests {
     fn expand_to_patch_query_empty_struct_return_early() {
         // An empty struct (no fields) has no SET clauses. The method should
         // return early with a placeholder string.
-        let input = with_patch_attr(
-            parse_derive("struct EmptyPatch;"),
-            "empty_table",
-        );
+        let input = with_patch_attr(parse_derive("struct EmptyPatch;"), "empty_table");
         let out = expand_patch_query(input).to_string();
         assert!(
             out.contains("fn to_patch_query"),
@@ -1323,10 +1320,7 @@ mod tests {
 
     #[test]
     fn expand_to_patch_query_empty_struct_with_table_emits_early_return() {
-        let input = with_patch_attr(
-            parse_derive("struct EmptyTable;"),
-            "logs",
-        );
+        let input = with_patch_attr(parse_derive("struct EmptyTable;"), "logs");
         let out = expand_patch_query(input).to_string();
 
         assert!(

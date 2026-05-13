@@ -93,9 +93,7 @@ where
         Box::pin(async move {
             let (parts, body) = req.into_parts();
 
-            let req_bytes = axum::body::to_bytes(body, DEFAULT_MAX_BODY_SIZE)
-                .await
-                .ok();
+            let req_bytes = axum::body::to_bytes(body, DEFAULT_MAX_BODY_SIZE).await.ok();
 
             if should_log {
                 if let Some(ref bytes) = req_bytes {

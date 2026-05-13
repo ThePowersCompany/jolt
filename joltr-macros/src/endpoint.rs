@@ -50,9 +50,7 @@ pub(crate) struct EndpointAttr {
 /// The single positional argument MUST be a string literal — the route path.
 /// Empty input or non-string-literal input is rejected with a `syn::Error`
 /// pointing at the offending span (or at call-site for empty input).
-pub(crate) fn parse_endpoint_attr(
-    tokens: proc_macro2::TokenStream,
-) -> syn::Result<EndpointAttr> {
+pub(crate) fn parse_endpoint_attr(tokens: proc_macro2::TokenStream) -> syn::Result<EndpointAttr> {
     let path: LitStr = parse2(tokens)?;
     Ok(EndpointAttr { path })
 }
@@ -214,7 +212,9 @@ fn parse_error_handler_attr(attr: &Attribute) -> syn::Result<Option<syn::Path>> 
 }
 
 fn is_error_handler_attr(attr: &Attribute) -> bool {
-    attr.path().get_ident().is_some_and(|i| i == "error_handler")
+    attr.path()
+        .get_ident()
+        .is_some_and(|i| i == "error_handler")
 }
 
 /// Extract the verb from a single attribute, if it is one of the recognized
@@ -960,9 +960,7 @@ mod tests {
 
     #[test]
     fn accepts_result_response_return_with_borrowed_self() {
-        let sig = parse_sig(
-            "fn handler(&self) -> Result<Response<User>, AppError> { todo!() }",
-        );
+        let sig = parse_sig("fn handler(&self) -> Result<Response<User>, AppError> { todo!() }");
         validate_signature(&sig).expect("&self -> Result<Response<T>, E> is valid");
     }
 
@@ -971,9 +969,7 @@ mod tests {
         // syn-level validation is name-only on the last segment, so fully-
         // qualified `crate::Response<T>` and `joltr_core::Response<T>` are both
         // accepted; rustc enforces the actual type identity on generated code.
-        let sig = parse_sig(
-            "fn handler(&self) -> joltr_core::response::Response<()> { todo!() }",
-        );
+        let sig = parse_sig("fn handler(&self) -> joltr_core::response::Response<()> { todo!() }");
         validate_signature(&sig).expect("qualified path is accepted");
     }
 
@@ -981,9 +977,8 @@ mod tests {
     fn accepts_extra_args_after_self() {
         // Auto-middleware (phase11) adds body / query / req fields after &self;
         // validation must not reject methods with multiple args.
-        let sig = parse_sig(
-            "fn handler(&self, body: CreateUser, id: u64) -> Response<User> { todo!() }",
-        );
+        let sig =
+            parse_sig("fn handler(&self, body: CreateUser, id: u64) -> Response<User> { todo!() }");
         validate_signature(&sig).expect("extra args after &self are valid");
     }
 
@@ -1077,9 +1072,7 @@ mod tests {
 
     #[test]
     fn rejects_result_with_non_response_first_arg() {
-        let sig = parse_sig(
-            "fn handler(&self) -> Result<String, AppError> { todo!() }",
-        );
+        let sig = parse_sig("fn handler(&self) -> Result<String, AppError> { todo!() }");
         let err = validate_signature(&sig).expect_err("Result<String, _> is invalid");
         let msg = err.to_string();
         assert!(
@@ -1150,8 +1143,7 @@ mod tests {
     }
 
     fn parse_match(tokens: proc_macro2::TokenStream) -> syn::ExprMatch {
-        syn::parse2::<syn::ExprMatch>(tokens)
-            .expect("generated tokens parse as a match expression")
+        syn::parse2::<syn::ExprMatch>(tokens).expect("generated tokens parse as a match expression")
     }
 
     #[test]
@@ -1316,10 +1308,7 @@ mod tests {
             .collect();
         assert_eq!(
             surviving_attr_names,
-            vec![
-                vec!["inline".to_string()],
-                vec!["doc".to_string()],
-            ],
+            vec![vec!["inline".to_string()], vec!["doc".to_string()],],
         );
     }
 
@@ -1374,7 +1363,9 @@ mod tests {
         let self_ty = parse_self_ty("Api");
         let rendered = generate_inventory_submits(&path, &self_ty, &methods).to_string();
         // One submit per method.
-        let submit_count = rendered.matches(":: joltr_core :: inventory :: submit").count();
+        let submit_count = rendered
+            .matches(":: joltr_core :: inventory :: submit")
+            .count();
         assert_eq!(submit_count, 3, "expected 3 submits, rendered: {rendered}");
         // Each submit references the correct method variant.
         for variant in ["Get", "Post", "Delete"] {
@@ -1708,7 +1699,10 @@ mod tests {
             .error_handler
             .as_ref()
             .expect("error_handler captured");
-        assert_eq!(path.segments.last().unwrap().ident.to_string(), "my_handler");
+        assert_eq!(
+            path.segments.last().unwrap().ident.to_string(),
+            "my_handler"
+        );
     }
 
     #[test]
@@ -1728,11 +1722,7 @@ mod tests {
             .as_ref()
             .expect("error_handler captured");
         // Multi-segment path is preserved end-to-end.
-        let rendered: Vec<String> = path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
+        let rendered: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         assert_eq!(rendered, vec!["crate", "errors", "map_err"]);
     }
 
@@ -1748,8 +1738,7 @@ mod tests {
             }
             "#,
         );
-        let err = scan_methods(&item)
-            .expect_err("two error_handler attributes is an error");
+        let err = scan_methods(&item).expect_err("two error_handler attributes is an error");
         assert!(
             err.to_string().contains("more than one #[error_handler"),
             "expected multi-error_handler diagnostic, got: {err}"
@@ -1792,8 +1781,8 @@ mod tests {
             "#,
         );
         let methods = scan_methods(&item).expect("scan succeeds");
-        let err = validate_methods(&methods)
-            .expect_err("error_handler on Response<T> must be rejected");
+        let err =
+            validate_methods(&methods).expect_err("error_handler on Response<T> must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("Result<Response<T>, E>") && msg.contains("error_handler"),

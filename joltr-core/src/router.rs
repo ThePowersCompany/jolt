@@ -119,9 +119,7 @@ impl Service<AxumRequest> for Router {
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match &mut self.inner {
-            Inner::Axum(router) => {
-                <axum::Router as Service<AxumRequest>>::poll_ready(router, cx)
-            }
+            Inner::Axum(router) => <axum::Router as Service<AxumRequest>>::poll_ready(router, cx),
             Inner::Registry(_) => Poll::Ready(Ok(())),
         }
     }

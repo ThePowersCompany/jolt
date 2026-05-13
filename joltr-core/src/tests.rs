@@ -142,7 +142,10 @@ mod status_code {
             (StatusCode::Created, axum::http::StatusCode::CREATED),
             (StatusCode::NoContent, axum::http::StatusCode::NO_CONTENT),
             (StatusCode::BadRequest, axum::http::StatusCode::BAD_REQUEST),
-            (StatusCode::Unauthorized, axum::http::StatusCode::UNAUTHORIZED),
+            (
+                StatusCode::Unauthorized,
+                axum::http::StatusCode::UNAUTHORIZED,
+            ),
             (StatusCode::Forbidden, axum::http::StatusCode::FORBIDDEN),
             (StatusCode::NotFound, axum::http::StatusCode::NOT_FOUND),
             (
@@ -262,8 +265,7 @@ mod request {
     #[test]
     fn query_returns_value_for_present_key() {
         let mut req = empty_request();
-        req.query_params
-            .insert("page".to_string(), "1".to_string());
+        req.query_params.insert("page".to_string(), "1".to_string());
         assert_eq!(req.query("page"), Some("1"));
     }
 
@@ -276,8 +278,7 @@ mod request {
     #[test]
     fn query_lookup_is_case_sensitive() {
         let mut req = empty_request();
-        req.query_params
-            .insert("Page".to_string(), "1".to_string());
+        req.query_params.insert("Page".to_string(), "1".to_string());
         assert_eq!(req.query("page"), None);
         assert_eq!(req.query("Page"), Some("1"));
     }
@@ -560,8 +561,8 @@ mod response {
 
     #[tokio::test]
     async fn into_axum_response_with_user_defined_struct_body_serializes_as_json() {
-        use axum::http::header::CONTENT_TYPE;
         use crate::JsonBody;
+        use axum::http::header::CONTENT_TYPE;
 
         #[derive(serde::Serialize)]
         struct Item {
@@ -583,7 +584,10 @@ mod response {
             response.headers().get(CONTENT_TYPE).unwrap(),
             "application/json"
         );
-        assert_eq!(body_bytes(response).await, br#"{"name":"widget","count":3}"#);
+        assert_eq!(
+            body_bytes(response).await,
+            br#"{"name":"widget","count":3}"#
+        );
     }
 
     #[tokio::test]
@@ -621,14 +625,17 @@ mod response {
         ];
         for (joltr, expected) in cases {
             let response: axum::response::Response = Response::new(*joltr, 0u32).into();
-            assert_eq!(response.status(), *expected, "status mismatch for {joltr:?}");
+            assert_eq!(
+                response.status(),
+                *expected,
+                "status mismatch for {joltr:?}"
+            );
         }
     }
 
     #[tokio::test]
     async fn into_axum_response_status_passes_through_other_variant() {
-        let response: axum::response::Response =
-            Response::new(StatusCode::Other(418), 0u32).into();
+        let response: axum::response::Response = Response::new(StatusCode::Other(418), 0u32).into();
         assert_eq!(response.status().as_u16(), 418);
     }
 
@@ -1343,7 +1350,10 @@ mod router {
             axum::routing::get(|req: AxumRequest| async move {
                 match req.extensions().get::<Arc<RequestExt>>() {
                     Some(ext) => {
-                        assert!(!ext.is_finished(), "freshly-injected RequestExt must default to not-finished");
+                        assert!(
+                            !ext.is_finished(),
+                            "freshly-injected RequestExt must default to not-finished"
+                        );
                         StatusCode::OK
                     }
                     None => StatusCode::INTERNAL_SERVER_ERROR,
@@ -2097,9 +2107,7 @@ mod router {
             // Origin`. All three are asserted below.
             use std::sync::atomic::{AtomicBool, Ordering};
 
-            use axum::http::header::{
-                ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN, WWW_AUTHENTICATE,
-            };
+            use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN, WWW_AUTHENTICATE};
             use tower::ServiceBuilder;
 
             use crate::{AuthBearerLayer, CorsConfig, CorsLayer};
@@ -2316,9 +2324,9 @@ mod router {
 }
 
 mod server {
-    use std::sync::Arc;
     use crate::{CorsConfig, Endpoint, EndpointFuture, JoltRServer, Method, Request};
     use axum::body::Body;
+    use std::sync::Arc;
 
     struct StubEndpoint;
 
@@ -2499,8 +2507,7 @@ mod server {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let mut stream =
-            stream.expect("JoltRServer::start should accept connections within 1s");
+        let mut stream = stream.expect("JoltRServer::start should accept connections within 1s");
 
         timeout(
             Duration::from_secs(2),
@@ -2571,8 +2578,7 @@ mod server {
             tracing::subscriber::with_default(subscriber, || {
                 let rt = tokio::runtime::Runtime::new().expect("create runtime");
                 rt.block_on(async {
-                    let router =
-                        JoltRServer::new().build_serving_router(axum::Router::new());
+                    let router = JoltRServer::new().build_serving_router(axum::Router::new());
                     let req = axum::http::Request::builder()
                         .method("GET")
                         .uri("/api/test")
@@ -2651,8 +2657,7 @@ mod server {
             tracing::subscriber::with_default(subscriber, || {
                 let rt = tokio::runtime::Runtime::new().expect("create runtime");
                 rt.block_on(async {
-                    let router =
-                        JoltRServer::new().build_serving_router(axum::Router::new());
+                    let router = JoltRServer::new().build_serving_router(axum::Router::new());
                     let req = axum::http::Request::builder()
                         .method("POST")
                         .uri("/api/echo")
@@ -2723,8 +2728,7 @@ mod server {
             tracing::subscriber::with_default(subscriber, || {
                 let rt = tokio::runtime::Runtime::new().expect("create runtime");
                 rt.block_on(async {
-                    let router =
-                        JoltRServer::new().build_serving_router(axum::Router::new());
+                    let router = JoltRServer::new().build_serving_router(axum::Router::new());
                     let req = axum::http::Request::builder()
                         .method("POST")
                         .uri("/auth/login")
@@ -2763,9 +2767,8 @@ mod cors {
     use axum::body::Body;
     use axum::extract::Request as AxumRequest;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
-        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
-        ORIGIN,
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, ORIGIN,
     };
     use axum::http::{Method as HttpMethod, StatusCode};
     use axum::response::Response;
@@ -2950,11 +2953,9 @@ mod cors {
         assert_eq!(resp.status(), StatusCode::OK);
         let headers = resp.headers();
         assert!(headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
-        assert!(
-            headers
-                .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
-                .is_none()
-        );
+        assert!(headers
+            .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .is_none());
     }
 
     #[tokio::test]
@@ -3550,7 +3551,9 @@ mod parse_body_string {
         // failure surface. A panicking inner service structurally forbids
         // delegation past the failure branch.
         let inner = tower::service_fn(|_: AxumRequest| async move {
-            panic!("ParseBodyStringService must short-circuit on UTF-8 failure and never call inner");
+            panic!(
+                "ParseBodyStringService must short-circuit on UTF-8 failure and never call inner"
+            );
             #[allow(unreachable_code)]
             Ok::<Response, Infallible>(Response::new(Body::empty()))
         });
@@ -3797,9 +3800,7 @@ mod parse_query_typed {
     use axum::body::to_bytes;
     use axum::http::StatusCode;
 
-    use crate::{
-        bad_request_for_query_error, extract_query, QueryExtractError, QueryParams,
-    };
+    use crate::{bad_request_for_query_error, extract_query, QueryExtractError, QueryParams};
 
     fn params_from(pairs: &[(&str, &str)]) -> QueryParams {
         let map: HashMap<String, String> = pairs
@@ -3813,8 +3814,7 @@ mod parse_query_typed {
     fn int_value_parses_via_from_str() {
         // PRD: ?count=5 → i32::from_str("5") == 5.
         let params = params_from(&[("count", "5")]);
-        let parsed: i32 =
-            extract_query(&params, "count").expect("?count=5 must parse as i32");
+        let parsed: i32 = extract_query(&params, "count").expect("?count=5 must parse as i32");
         assert_eq!(parsed, 5);
     }
 
@@ -3827,8 +3827,8 @@ mod parse_query_typed {
         // caller can see the failing field without having to introspect the
         // response code.
         let params = params_from(&[("count", "abc")]);
-        let err = extract_query::<i32>(&params, "count")
-            .expect_err("?count=abc must NOT parse as i32");
+        let err =
+            extract_query::<i32>(&params, "count").expect_err("?count=abc must NOT parse as i32");
 
         match &err {
             QueryExtractError::Invalid {
@@ -3882,12 +3882,10 @@ mod parse_query_typed {
         // way ints do. A single test pins both `f32` and `f64` so the generic
         // shape doesn't quietly regress to int-only.
         let params = params_from(&[("ratio", "1.5"), ("speed", "2.5")]);
-        let ratio: f64 =
-            extract_query(&params, "ratio").expect("?ratio=1.5 must parse as f64");
+        let ratio: f64 = extract_query(&params, "ratio").expect("?ratio=1.5 must parse as f64");
         assert!((ratio - 1.5).abs() < 1e-9, "f64 round-trip");
 
-        let speed: f32 =
-            extract_query(&params, "speed").expect("?speed=2.5 must parse as f32");
+        let speed: f32 = extract_query(&params, "speed").expect("?speed=2.5 must parse as f32");
         assert!((speed - 2.5_f32).abs() < 1e-6, "f32 round-trip");
     }
 
@@ -4018,8 +4016,8 @@ mod parse_query_typed_extras {
         // regression that returned an empty String instead would silently
         // hide required-parameter omissions from the AutoMiddleware codegen.
         let params = params_from(&[("other", "x")]);
-        let err = extract_query_string(&params, "name")
-            .expect_err("absent key must NOT yield a string");
+        let err =
+            extract_query_string(&params, "name").expect_err("absent key must NOT yield a string");
         match err {
             QueryExtractError::Missing { key } => assert_eq!(key, "name"),
             other => panic!("expected QueryExtractError::Missing, got {other:?}"),
@@ -4065,8 +4063,8 @@ mod parse_query_typed_extras {
         assert_eq!(parsed, Sort::Asc);
 
         let params_desc = params_from(&[("sort", "desc")]);
-        let parsed_desc: Sort = extract_query_enum(&params_desc, "sort")
-            .expect("?sort=desc must parse via TryFrom");
+        let parsed_desc: Sort =
+            extract_query_enum(&params_desc, "sort").expect("?sort=desc must parse via TryFrom");
         assert_eq!(parsed_desc, Sort::Desc);
     }
 
@@ -4125,9 +4123,7 @@ mod parse_query_typed_vec {
     use axum::body::to_bytes;
     use axum::http::StatusCode;
 
-    use crate::{
-        bad_request_for_query_error, extract_query_vec, QueryExtractError, QueryParams,
-    };
+    use crate::{bad_request_for_query_error, extract_query_vec, QueryExtractError, QueryParams};
 
     fn params_from(pairs: &[(&str, &str)]) -> QueryParams {
         let map: HashMap<String, String> = pairs
@@ -4191,7 +4187,10 @@ mod parse_query_typed_vec {
                 message,
             } => {
                 assert_eq!(key, "ids");
-                assert_eq!(*index, 1, "second element (zero-based 1) is the failing one");
+                assert_eq!(
+                    *index, 1,
+                    "second element (zero-based 1) is the failing one"
+                );
                 assert_eq!(value, "abc");
                 assert!(
                     !message.is_empty(),
@@ -4647,10 +4646,7 @@ mod auth_jwt {
     /// is already populated (simulating an upstream `AuthBearerLayer` having
     /// run). The `request_ext` Arc is also planted so the test can observe
     /// the `finished` latch.
-    fn request_with_bearer_token(
-        token: &str,
-        request_ext: Arc<RequestExt>,
-    ) -> AxumRequest {
+    fn request_with_bearer_token(token: &str, request_ext: Arc<RequestExt>) -> AxumRequest {
         let mut req = AxumRequest::builder()
             .method(HttpMethod::GET)
             .uri("/api/protected")
@@ -5039,9 +5035,7 @@ mod auth_jwt {
                 let claims = req
                     .extensions()
                     .get::<JwtClaims>()
-                    .expect(
-                        "valid custom-claims token must surface JwtClaims via the typed key",
-                    )
+                    .expect("valid custom-claims token must surface JwtClaims via the typed key")
                     .clone();
                 *captured.lock().unwrap() = Some(claims);
                 Ok::<Response, Infallible>(
@@ -5111,8 +5105,7 @@ mod auth_websocket {
     /// false-positive (e.g. the helper returning "" or a stripped substring)
     /// surfaces in the assertion. Three dot-separated base64url-ish chunks,
     /// matching real JWT layout.
-    const SAMPLE_JWT: &str =
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.aBcDeFgHiJkLmNoPqRsTuV";
+    const SAMPLE_JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.aBcDeFgHiJkLmNoPqRsTuV";
 
     #[test]
     fn extract_jwt_token_canonical_shape_yields_token() {
@@ -5153,8 +5146,8 @@ mod auth_websocket {
 
     #[test]
     fn extract_jwt_token_missing_header_yields_missing_header_variant() {
-        let err =
-            extract_jwt_token(None).expect_err("absent header must surface MissingHeader rejection");
+        let err = extract_jwt_token(None)
+            .expect_err("absent header must surface MissingHeader rejection");
         assert_eq!(err, WsTokenRejectReason::MissingHeader);
         assert_eq!(err.message(), "Missing Sec-WebSocket-Protocol header");
     }
@@ -5487,8 +5480,7 @@ mod auth_ws_jwt {
         let body_bytes = to_bytes(resp.into_body(), u32::MAX as usize).await.unwrap();
         let body_text = std::str::from_utf8(&body_bytes).expect("body is UTF-8");
         assert_eq!(
-            body_text,
-            "Invalid Sec-WebSocket-Protocol format: expected 'joltr-jwt, <token>'",
+            body_text, "Invalid Sec-WebSocket-Protocol format: expected 'joltr-jwt, <token>'",
             "wrong-marker rejection mirrors WsTokenRejectReason::MissingJoltRJwtPrefix::message()"
         );
         assert!(request_ext.is_finished());
@@ -5562,16 +5554,12 @@ mod auth_ws_jwt {
                 let token = req
                     .extensions()
                     .get::<WsJwtToken>()
-                    .expect(
-                        "AuthWsJwtLayer must stash WsJwtToken into extensions on a valid token",
-                    )
+                    .expect("AuthWsJwtLayer must stash WsJwtToken into extensions on a valid token")
                     .clone();
                 let claims = req
                     .extensions()
                     .get::<JwtClaims>()
-                    .expect(
-                        "AuthWsJwtLayer must stash JwtClaims into extensions on a valid token",
-                    )
+                    .expect("AuthWsJwtLayer must stash JwtClaims into extensions on a valid token")
                     .clone();
                 *captured.lock().unwrap() = Some((token, claims));
                 Ok::<Response, Infallible>(
@@ -5688,7 +5676,7 @@ mod early_termination {
     use axum::body::Body;
     use axum::extract::Request as AxumRequest;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE, HeaderName,
+        HeaderName, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE,
         SEC_WEBSOCKET_PROTOCOL,
     };
     use axum::http::{HeaderValue, Method as HttpMethod, StatusCode};
@@ -5734,9 +5722,7 @@ mod early_termination {
             let captured = Arc::clone(&captured);
             async move {
                 let saw_extension = req.extensions().get::<T>().is_some();
-                *captured
-                    .lock()
-                    .expect("inner-stub capture mutex poisoned") = saw_extension;
+                *captured.lock().expect("inner-stub capture mutex poisoned") = saw_extension;
                 let mut resp = Response::new(Body::from(MARKER_BODY));
                 resp.headers_mut()
                     .insert(MARKER_HEADER.clone(), HeaderValue::from_static("present"));
@@ -5784,8 +5770,8 @@ mod early_termination {
         // reject as 401 — a regression that ignored the early-termination
         // check would surface that 401 instead of the inner's 200 marker.
         let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-        let svc =
-            AuthBearerLayer::new().layer(marker_inner_capturing::<BearerToken>(Arc::clone(&captured)));
+        let svc = AuthBearerLayer::new()
+            .layer(marker_inner_capturing::<BearerToken>(Arc::clone(&captured)));
 
         let ext = pre_finished_request_ext();
         let mut req = AxumRequest::builder()
@@ -5944,8 +5930,9 @@ mod early_termination {
         // marker 200.
         let captured: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
         let layer = ParseBodyLayer::<serde_json::Value>::new();
-        let svc =
-            layer.layer(marker_inner_capturing::<serde_json::Value>(Arc::clone(&captured)));
+        let svc = layer.layer(marker_inner_capturing::<serde_json::Value>(Arc::clone(
+            &captured,
+        )));
 
         let ext = pre_finished_request_ext();
         let mut req = AxumRequest::builder()
@@ -6491,7 +6478,10 @@ mod websocket {
 
         async fn on_shutdown(&mut self) {
             self.calls.lock().unwrap().push("on_shutdown");
-            self.close_shutdown_order.lock().unwrap().push("on_shutdown");
+            self.close_shutdown_order
+                .lock()
+                .unwrap()
+                .push("on_shutdown");
         }
     }
 
@@ -6539,10 +6529,7 @@ mod websocket {
             .on_message(WsMessage::Text("hello".to_string()), sender.clone())
             .await;
         handler
-            .on_message(
-                WsMessage::Binary(vec![1, 2, 3]),
-                sender.clone(),
-            )
+            .on_message(WsMessage::Binary(vec![1, 2, 3]), sender.clone())
             .await;
 
         {
@@ -6740,7 +6727,9 @@ mod pubsub {
             sender_id: None,
         };
         ps.publish("test", msg);
-        let received = rx.try_recv().expect("subscriber should receive the published message");
+        let received = rx
+            .try_recv()
+            .expect("subscriber should receive the published message");
         assert_eq!(received.channel, "test");
         assert_eq!(received.payload, "hello");
         assert_eq!(received.sender_id, None);
@@ -6823,7 +6812,11 @@ mod pubsub {
         while let Ok(msg) = rx.try_recv() {
             received.push(msg.payload);
         }
-        assert_eq!(received.len(), 10, "all 10 concurrent publishes must be delivered");
+        assert_eq!(
+            received.len(),
+            10,
+            "all 10 concurrent publishes must be delivered"
+        );
         for i in 0..10 {
             let expected = format!("msg-{}", i);
             assert!(
@@ -6951,7 +6944,10 @@ mod sse {
         let stream = h.on_ready();
         tokio::pin!(stream);
         let next = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
-        assert!(next.is_err() || next.unwrap().is_none(), "default on_ready must be empty");
+        assert!(
+            next.is_err() || next.unwrap().is_none(),
+            "default on_ready must be empty"
+        );
     }
 
     #[tokio::test]
@@ -6987,12 +6983,7 @@ mod sse {
         let handler = TickHandler { count: 2 };
         let sse_response = into_sse_response(handler).await;
         let response = sse_response.into_response();
-        let body_bytes = response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         // Each SseEvent::new("tick", "tick-N") maps to "event: tick\ndata: tick-N\n\n"
         assert!(
@@ -7020,17 +7011,9 @@ mod sse {
         };
         let sse_response = into_sse_response(handler).await;
         let response = sse_response.into_response();
-        let body_bytes = response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(
-            body_str.contains("data-0"),
-            "body must contain event data"
-        );
+        assert!(body_str.contains("data-0"), "body must contain event data");
         // Allow the spawned cleanup task to run
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
@@ -7097,10 +7080,7 @@ mod sse {
 
         // Second frame should arrive quickly after the first
         let frame2 = tokio::time::timeout(Duration::from_millis(500), body.frame()).await;
-        assert!(
-            frame2.is_ok(),
-            "second keep-alive comment must arrive"
-        );
+        assert!(frame2.is_ok(), "second keep-alive comment must arrive");
         assert!(
             frame2.unwrap().is_some(),
             "second interval must produce a body frame"
@@ -7204,7 +7184,9 @@ mod task {
     fn task_scheduler_get_retrieves_registered_task_by_slab_key() {
         let mut scheduler = TaskScheduler::new();
         let key = scheduler.register(CleanupTask);
-        let task = scheduler.get(key).expect("task must be retrievable by slab key");
+        let task = scheduler
+            .get(key)
+            .expect("task must be retrievable by slab key");
         assert_eq!(task.name(), "cleanup");
     }
 
@@ -7223,8 +7205,14 @@ mod task {
 
         let removed = scheduler.remove(key);
         assert!(removed.is_some(), "remove must return the task");
-        assert!(scheduler.get(key).is_none(), "slot must be empty after removal");
-        assert!(scheduler.is_empty(), "slab must report empty after removing sole entry");
+        assert!(
+            scheduler.get(key).is_none(),
+            "slot must be empty after removal"
+        );
+        assert!(
+            scheduler.is_empty(),
+            "slab must report empty after removing sole entry"
+        );
     }
 
     #[test]
@@ -7269,9 +7257,7 @@ mod task {
         }
 
         let mut scheduler = TaskScheduler::new();
-        scheduler.register(FailThenFinish {
-            flag: finish_flag,
-        });
+        scheduler.register(FailThenFinish { flag: finish_flag });
         scheduler.start();
 
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -7312,7 +7298,10 @@ mod task {
 
         tokio::time::sleep(Duration::from_secs(4)).await;
         let runs = run_count.load(Ordering::SeqCst);
-        assert!(runs >= 3, "erroring task must keep retrying; got {runs} runs, expected >= 3");
+        assert!(
+            runs >= 3,
+            "erroring task must keep retrying; got {runs} runs, expected >= 3"
+        );
     }
 
     #[tokio::test]
@@ -7349,7 +7338,10 @@ mod task {
 
         tokio::time::sleep(Duration::from_millis(80)).await;
         let runs = timestamps.lock().unwrap();
-        assert!(runs.len() >= 2, "must have at least 2 runs for timing check");
+        assert!(
+            runs.len() >= 2,
+            "must have at least 2 runs for timing check"
+        );
 
         for i in 1..runs.len() {
             let delta = runs[i].duration_since(runs[i - 1]);
@@ -7430,7 +7422,10 @@ mod task {
         let b = count_b.load(Ordering::SeqCst);
         assert!(a >= 4, "counter-a must run multiple times; got {a}");
         assert!(b >= 2, "counter-b must run multiple times; got {b}");
-        assert!(a > b, "counter-a (5ms interval) must run more often than counter-b (10ms interval)");
+        assert!(
+            a > b,
+            "counter-a (5ms interval) must run more often than counter-b (10ms interval)"
+        );
     }
 
     #[tokio::test]
@@ -7467,7 +7462,10 @@ mod task {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let runs = run_count.load(Ordering::SeqCst);
-        assert!(runs >= 3, "successful task must run multiple times; got {runs}");
+        assert!(
+            runs >= 3,
+            "successful task must run multiple times; got {runs}"
+        );
     }
 
     #[tokio::test]
@@ -7514,7 +7512,10 @@ mod task {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         let runs = run_count.load(Ordering::SeqCst);
-        assert!(runs >= 5, "task must run at least 5 times (3 failures + 2 successes); got {runs}");
+        assert!(
+            runs >= 5,
+            "task must run at least 5 times (3 failures + 2 successes); got {runs}"
+        );
 
         let times = timestamps.lock().unwrap();
         assert!(
@@ -7588,7 +7589,10 @@ mod task {
 
         tokio::time::sleep(Duration::from_millis(60)).await;
         let runs_before = run_count.load(Ordering::SeqCst);
-        assert!(runs_before >= 2, "task must have run before shutdown; got {runs_before}");
+        assert!(
+            runs_before >= 2,
+            "task must have run before shutdown; got {runs_before}"
+        );
 
         shutdown.store(true, Ordering::SeqCst);
 
@@ -7690,7 +7694,10 @@ mod task_retry {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let runs_before = run_count.load(Ordering::SeqCst);
-        assert!(runs_before >= 1, "task must have run at least once before shutdown; got {runs_before}");
+        assert!(
+            runs_before >= 1,
+            "task must have run at least once before shutdown; got {runs_before}"
+        );
 
         shutdown.store(true, Ordering::SeqCst);
 
@@ -7720,8 +7727,14 @@ mod task_retry {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let a_before = count_a.load(Ordering::SeqCst);
         let b_before = count_b.load(Ordering::SeqCst);
-        assert!(a_before >= 1, "task A must have run at least once; got {a_before}");
-        assert!(b_before >= 1, "task B must have run at least once; got {b_before}");
+        assert!(
+            a_before >= 1,
+            "task A must have run at least once; got {a_before}"
+        );
+        assert!(
+            b_before >= 1,
+            "task B must have run at least once; got {b_before}"
+        );
 
         scheduler.shutdown(Duration::from_secs(5)).await;
 

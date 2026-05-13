@@ -165,4 +165,3 @@ fn parse_cookies(headers: &HeaderMap) -> Vec<Cookie> {
         })
         .unwrap_or_default()
 }
-

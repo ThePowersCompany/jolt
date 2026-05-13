@@ -280,4 +280,3 @@ fn unauthorized_response(reason: WsAuthRejectReason) -> Response {
         .body(Body::from(reason.body()))
         .expect("401 response builder always succeeds with static headers + owned body")
 }
-

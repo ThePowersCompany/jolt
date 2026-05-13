@@ -56,7 +56,10 @@ mod tests {
 
     #[test]
     fn js_extension_returns_application_javascript() {
-        assert_eq!(MIME_TABLE.get(".js").copied(), Some("application/javascript"));
+        assert_eq!(
+            MIME_TABLE.get(".js").copied(),
+            Some("application/javascript")
+        );
     }
 
     #[test]
@@ -84,7 +87,10 @@ mod tests {
     fn content_type_for_path_with_known_extension_returns_mime() {
         assert_eq!(content_type_for_path("style.css"), Some("text/css"));
         assert_eq!(content_type_for_path("image.jpeg"), Some("image/jpeg"));
-        assert_eq!(content_type_for_path("script.mjs"), Some("application/javascript"));
+        assert_eq!(
+            content_type_for_path("script.mjs"),
+            Some("application/javascript")
+        );
     }
 
     #[test]
@@ -104,6 +110,9 @@ mod tests {
 
     #[test]
     fn content_type_for_path_with_deep_path_uses_final_extension() {
-        assert_eq!(content_type_for_path("/static/css/style.css"), Some("text/css"));
+        assert_eq!(
+            content_type_for_path("/static/css/style.css"),
+            Some("text/css")
+        );
     }
 }

@@ -1252,7 +1252,9 @@ dependencies = [
  "axum",
  "joltr-core",
  "joltr-db",
+ "joltr-macros",
  "joltr-templates",
+ "joltr-types",
  "joltr-utils",
  "serde",
  "serde_json",
@@ -1273,6 +1275,7 @@ dependencies = [
  "joltr-macros",
  "joltr-utils",
  "jsonwebtoken",
+ "rustls",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -1916,6 +1919,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

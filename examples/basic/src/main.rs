@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod chat;
 mod endpoints;
 mod tasks;
 
@@ -50,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .endpoint(endpoints::TemplateEndpoint::new()?)
         .endpoint(endpoints::EchoEndpoint)
         .endpoint(endpoints::ItemEndpoint)
-        .start(static_assets_router())
+        .start(extra_router())
         .await?;
 
     Ok(())
@@ -118,6 +119,10 @@ fn configure_tls(
     }
 }
 
+fn extra_router() -> axum::Router {
+    chat::router().merge(static_assets_router())
+}
+
 fn static_assets_router() -> axum::Router {
     let not_found = service_fn(|_req: AxumRequest<Body>| async {
         Ok::<_, std::convert::Infallible>(
@@ -141,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn serving_router_serves_public_asset_from_static_prefix() {
-        let router = JoltRServer::new().build_serving_router(static_assets_router());
+        let router = JoltRServer::new().build_serving_router(extra_router());
 
         let response = router
             .oneshot(

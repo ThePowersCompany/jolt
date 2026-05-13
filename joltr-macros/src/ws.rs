@@ -41,10 +41,7 @@ impl Parse for WsMacroInput {
             )
         })?;
         input.parse::<Token![,]>().map_err(|e| {
-            syn::Error::new(
-                e.span(),
-                "ws! expects a comma after the path argument",
-            )
+            syn::Error::new(e.span(), "ws! expects a comma after the path argument")
         })?;
         let handler_type: Type = input.parse().map_err(|e| {
             syn::Error::new(
@@ -363,10 +360,8 @@ mod tests {
     fn parses_named_args_in_reverse_order() {
         // Named args may appear in either order after the two positional args.
         // The parser is positional-first, named-flexible.
-        let input = parse_input(
-            r#""/ws", MyHandler, auth_fn = my_auth, subprotocol = "v2""#,
-        )
-        .expect("reverse-order named args parse");
+        let input = parse_input(r#""/ws", MyHandler, auth_fn = my_auth, subprotocol = "v2""#)
+            .expect("reverse-order named args parse");
         assert_eq!(input.path.value(), "/ws");
         assert_eq!(input.subprotocol.value(), "v2");
         let auth_fn = &input.auth_fn;
@@ -378,15 +373,11 @@ mod tests {
         // `auth_fn` accepts any `syn::Path`, not just a bare identifier.
         // A module-qualified function is a routine use case (the user defines
         // auth helpers in a sibling module).
-        let input = parse_input(
-            r#""/chat", H, subprotocol = "v1", auth_fn = crate::auth::validate"#,
-        )
-        .expect("qualified path parses");
+        let input =
+            parse_input(r#""/chat", H, subprotocol = "v1", auth_fn = crate::auth::validate"#)
+                .expect("qualified path parses");
         let auth_fn = &input.auth_fn;
-        assert_eq!(
-            quote! { #auth_fn }.to_string(),
-            "crate :: auth :: validate"
-        );
+        assert_eq!(quote! { #auth_fn }.to_string(), "crate :: auth :: validate");
     }
 
     #[test]
@@ -465,10 +456,9 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_subprotocol() {
-        let err = parse_input(
-            r#""/chat", H, subprotocol = "v1", auth_fn = auth, subprotocol = "v2""#,
-        )
-        .expect_err("duplicate subprotocol must be rejected");
+        let err =
+            parse_input(r#""/chat", H, subprotocol = "v1", auth_fn = auth, subprotocol = "v2""#)
+                .expect_err("duplicate subprotocol must be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("already provided") || msg.contains("subprotocol"),
@@ -567,8 +557,7 @@ mod tests {
         .expect("test input parses as TokenStream");
         let out = expand_ws_macro(tokens).to_string();
         assert!(
-            out.contains("StatusCode :: UNAUTHORIZED")
-                || out.contains("StatusCode::UNAUTHORIZED"),
+            out.contains("StatusCode :: UNAUTHORIZED") || out.contains("StatusCode::UNAUTHORIZED"),
             "emission must return 401 on auth failure, got: {out}"
         );
     }
