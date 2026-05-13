@@ -1,8 +1,7 @@
 #![doc = "joltr-macros: proc-macro support for JoltR (endpoint registration, middleware, patch queries, TS typegen)."]
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{parse_macro_input, DeriveInput, ItemFn};
+use syn::{parse_macro_input, DeriveInput};
 
 mod auto_middleware;
 mod endpoint;
@@ -134,28 +133,4 @@ pub fn ts_export_derive(input: TokenStream) -> TokenStream {
 pub fn ws(input: TokenStream) -> TokenStream {
     let input2: proc_macro2::TokenStream = input.into();
     ws::expand_ws_macro(input2).into()
-}
-
-/// Placeholder attribute macro. Future PRD items will expand this into
-/// auto-middleware and patch-query attributes.
-#[proc_macro_attribute]
-pub fn joltr_placeholder(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    let output = quote! { #input };
-    output.into()
-}
-
-/// Placeholder derive macro. Future PRD items will expand this into TypeScript
-/// typegen and request/response body derivations.
-#[proc_macro_derive(JoltRPlaceholder)]
-pub fn joltr_placeholder_derive(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-    let output = quote! {
-        impl #name {
-            #[doc(hidden)]
-            pub fn __joltr_placeholder() {}
-        }
-    };
-    output.into()
 }

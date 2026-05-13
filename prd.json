@@ -380,7 +380,7 @@
       "description": "Remove the early scaffold-only joltr_placeholder attribute macro and JoltRPlaceholder derive from joltr-macros so the public proc-macro surface only exposes the Rust port APIs described by spec_rust.md.",
       "files": ["joltr-macros/src/lib.rs"],
       "tests": ["cargo test -p joltr-macros", "cargo check --workspace --all-targets"],
-      "passes": false
+      "passes": true
     },
     {
       "id": "44",

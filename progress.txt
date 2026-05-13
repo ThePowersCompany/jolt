@@ -1418,3 +1418,30 @@ Files changed:
 
 Blockers or next notes:
 - No blockers. Remaining unfinished PRD items are placeholder macro removal (#43), stale core status docs (#44), and final branch diff review (#47).
+
+
+2026-05-13 PRD #43 - Remove obsolete placeholder macros
+
+Completed:
+- Removed the scaffold-only `joltr_placeholder` attribute macro from `joltr-macros`.
+- Removed the scaffold-only `JoltRPlaceholder` derive macro from `joltr-macros`.
+- Removed the now-unused `quote` and `ItemFn` imports from the proc-macro crate root.
+
+Verification:
+- `cargo fmt --check` -> clean.
+- `cargo test -p joltr-macros` -> 272 passed; doc tests passed with 2 ignored.
+- `cargo check --workspace --all-targets` -> passed.
+- `npm run type-check` -> not applicable to this repo-local workspace: there is no repo-root `package.json`; the attempted command reported no `type-check` script from npm's parent lookup.
+- `cd server && npm run type-check` equivalent -> guarded no-op: no `server` directory.
+
+Key decisions:
+- Kept the change to the public proc-macro surface only; no implemented macro behavior was changed.
+- Did not add compatibility aliases because the removed macros were documented placeholders and are not part of the Rust port API described by `spec_rust.md`.
+
+Files changed:
+- `joltr-macros/src/lib.rs`
+- `prd.json` (item 43 -> passes: true)
+- `progress.txt`
+
+Blockers or next notes:
+- No blockers. Remaining unfinished PRD items are stale core status docs (#44) and final branch diff review (#47).
