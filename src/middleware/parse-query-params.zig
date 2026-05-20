@@ -56,7 +56,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             comptime FieldType: type,
             alloc: Allocator,
             param: []const u8,
-        ) !Optional(FieldType) {
+        ) Optional(FieldType) {
             const info = @typeInfo(FieldType);
             switch (info) {
                 .bool => {
@@ -96,7 +96,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     if (std.meta.stringToEnum(FieldType, param)) |v| {
                         return .{ .value = v };
                     } else {
-                        return error.InvalidEnumVariant;
+                        return .not_provided;
                     }
                 },
                 .@"struct", .@"union" => {
@@ -107,18 +107,25 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         };
                         return .{ .value = parsed };
                     }
-                    const parsed: std.json.Parsed(FieldType) = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
-                        std.log.err("query param failed to parse as json: {s} - {s}", .{ @typeName(FieldType), param });
-                        return .not_provided;
-                    };
-                    return .{ .value = parsed.value };
+                    if (info == .@"struct") @compileError("Must define paramParse for struct: " ++ @typeName(FieldType));
+                    // Note: `untagged` union parsing
+                    inline for (@typeInfo(FieldType).@"union".fields) |f| {
+                        if (f.type == void) {
+                            if (std.mem.eql(u8, f.name, param)) {
+                                return .{ .value = @unionInit(FieldType, f.name, {}) };
+                            }
+                        } else if (_handleQueryParam(f.type, alloc, param).get()) |v| {
+                            return .{ .value = @unionInit(FieldType, f.name, v) };
+                        }
+                    }
+                    return .not_provided;
                 },
                 .optional => {
                     if (std.mem.eql(u8, param, "null")) {
                         return .{ .value = null };
                     } else {
                         // Optional(T) -> Optional(?T)
-                        switch (try _handleQueryParam(info.optional.child, alloc, param)) {
+                        switch (_handleQueryParam(info.optional.child, alloc, param)) {
                             .value => |v| {
                                 // Implicit conversion: ?T -> T
                                 return .{ .value = v };
@@ -186,7 +193,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             if (param_opt) |param| {
                 const is_optional = comptime isOptional(field.type);
                 const T = if (is_optional) field.type.childType() else field.type;
-                switch (try _handleQueryParam(T, alloc, param.items)) {
+                switch (_handleQueryParam(T, alloc, param.items)) {
                     .value => |v| {
                         @field(@field(ctx, query_params), field.name) = if (is_optional) .to(v) else v;
                         return false;
