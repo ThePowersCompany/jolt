@@ -662,8 +662,12 @@ const TypeGenerator = struct {
                         } else {
                             try res.appendSlice(self.arena_alloc, " | ");
                         }
-                        const ident = (try self.extractIdentifier(field.type)).parsed;
-                        try res.appendSlice(self.arena_alloc, ident);
+                        if (@typeInfo(field.type) == .void) {
+                            try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
+                        } else {
+                            const ident = (try self.extractIdentifier(field.type)).parsed;
+                            try res.appendSlice(self.arena_alloc, ident);
+                        }
                     }
                 },
             }
