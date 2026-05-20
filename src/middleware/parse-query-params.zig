@@ -100,11 +100,17 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     }
                 },
                 .@"struct", .@"union" => {
-                    const parsed = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
-                        std.log.info("parse union failed: {s} - {s}", .{ @typeName(FieldType), param });
+                    if (std.meta.hasFn(FieldType, "paramParse")) {
+                        const parsed: FieldType = FieldType.paramParse(alloc, param) catch {
+                            std.log.err("query param failed to parse as custom: {s} - {s}", .{ @typeName(FieldType), param });
+                            return .not_provided;
+                        };
+                        return .{ .value = parsed };
+                    }
+                    const parsed: std.json.Parsed(FieldType) = std.json.parseFromSlice(FieldType, alloc, param, .{}) catch {
+                        std.log.err("query param failed to parse as json: {s} - {s}", .{ @typeName(FieldType), param });
                         return .not_provided;
                     };
-                    errdefer parsed.deinit();
                     return .{ .value = parsed.value };
                 },
                 .optional => {
