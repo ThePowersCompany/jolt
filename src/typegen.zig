@@ -38,6 +38,15 @@ const EndpointData = struct {
     response: ?[]const u8 = null,
 };
 
+const PrivateUtilityTypes = [_][]const u8{
+    \\ type RequireAtLeastOne<T, Keys extends keyof T = keyof T> =
+    \\   Keys extends keyof T
+    \\   ? {
+    \\     [K in Keys]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
+    \\   }[Keys]
+    \\   : never;
+};
+
 pub fn generateTypesFile(
     alloc: Allocator,
     ts_file_name: []const u8,
@@ -59,6 +68,12 @@ pub fn generateTypesFile(
         \\
         \\
     );
+
+    // Emit the private TS utility types used by the generated definitions below.
+    for (PrivateUtilityTypes) |utility_type| {
+        try ts.appendSlice(alloc, utility_type);
+        try ts.appendSlice(alloc, "\n\n");
+    }
 
     var type_generator = try TypeGenerator.init(arena_alloc);
     defer type_generator.deinit();
@@ -771,7 +786,19 @@ const TypeGenerator = struct {
                 }
             },
             .@"struct" => {
-                const type_name = shortTypeName(@typeName(T));
+                const type_name = comptime shortTypeName(@typeName(T));
+                if (comptime strEqls(type_name, "RequireAtLeastOne")) {
+                    const inner = try self.extractIdentifier(@FieldType(T, "value"));
+                    return .{
+                        .optional = false,
+                        .parsed = try allocPrint(
+                            self.arena_alloc,
+                            "RequireAtLeastOne<{s}>",
+                            .{inner.parsed},
+                        ),
+                    };
+                }
+
                 if (self.top_level_types.get(type_name)) |gen| {
                     return .{ .parsed = type_name, .optional = gen.optional };
                 }

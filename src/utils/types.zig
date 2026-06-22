@@ -542,3 +542,105 @@ test "Json(JsonArray(T))" {
     defer alloc.free(str);
     try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
 }
+
+/// Ensures at least one Optional is not equal to .not_provided.
+/// All fields in T must be Optional(...) types.
+pub fn RequireAtLeastOne(comptime T: type) type {
+    const info = @typeInfo(T);
+    if (info != .@"struct") @compileError(@typeName(T) ++ " must be a struct");
+    for (info.@"struct".fields) |f| {
+        if (!comptime isOptional(f.type)) {
+            @compileError("All fields in " ++ @typeName(T) ++ " must be Optional: " ++ @typeName(f.type));
+        }
+    }
+
+    return struct {
+        pub const Self = @This();
+        value: T,
+
+        pub fn areAllFieldsMissing(self: Self) bool {
+            inline for (@typeInfo(T).@"struct".fields) |f| {
+                if (@field(@field(self, "value"), f.name) != .not_provided) return false;
+            }
+            return true;
+        }
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: json.ParseOptions,
+        ) json.ParseError(@TypeOf(source.*))!Self {
+            // The payload is the inner `T` struct directly.
+            // Each field of `T` is an Optional(...) that knows how to parse itself
+            // (including turning a missing key / explicit null into `.not_provided`).
+            const self: Self = .{ .value = try json.innerParse(T, allocator, source, options) };
+            if (self.areAllFieldsMissing()) return error.MissingField;
+            return self;
+        }
+
+        pub fn jsonParseFromValue(
+            allocator: std.mem.Allocator,
+            source: json.Value,
+            options: json.ParseOptions,
+        ) json.ParseError(@TypeOf(allocator))!Self {
+            const self: Self = .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
+            if (self.areAllFieldsMissing()) return error.MissingField;
+            return self;
+        }
+    };
+}
+
+test "RequireAtLeastOne" {
+    const Foo = RequireAtLeastOne(struct {
+        a: Optional(i32) = .not_provided,
+    });
+
+    const f: Foo = .{ .value = .{ .a = .to(123) } };
+    try std.testing.expectEqual(false, f.areAllFieldsMissing());
+
+    const g: Foo = .{ .value = .{ .a = .not_provided } };
+    try std.testing.expectEqual(true, g.areAllFieldsMissing());
+}
+
+test "parse json RequireAtLeastOne" {
+    const alloc = std.testing.allocator;
+
+    const Foo = RequireAtLeastOne(struct {
+        a: Optional(i32) = .not_provided,
+        b: Optional(?i32) = .not_provided,
+    });
+
+    // Provided fields are parsed into the Optional `.value` shape,
+    // absent fields stay `.not_provided`.
+    {
+        const payload =
+            \\ { "a": 123 }
+        ;
+        const parsed = try json.parseFromSlice(Foo, alloc, payload, .{});
+        defer parsed.deinit();
+
+        try std.testing.expectEqual(123, parsed.value.value.a.value);
+        try std.testing.expectEqual(.not_provided, parsed.value.value.b);
+        try std.testing.expectEqual(false, parsed.value.areAllFieldsMissing());
+    }
+
+    // An explicit null on a nullable Optional still counts as provided.
+    {
+        const payload =
+            \\ { "b": null }
+        ;
+        const parsed = try json.parseFromSlice(Foo, alloc, payload, .{});
+        defer parsed.deinit();
+
+        try std.testing.expect(parsed.value.value.a == .not_provided);
+        try std.testing.expect(parsed.value.value.b.value == null);
+        try std.testing.expectEqual(false, parsed.value.areAllFieldsMissing());
+    }
+
+    // When no fields are provided, parsing fails the "require at least one" check.
+    {
+        const payload = "{}";
+        const result = json.parseFromSlice(Foo, alloc, payload, .{});
+        try std.testing.expectError(error.MissingField, result);
+    }
+}
