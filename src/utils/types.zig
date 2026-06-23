@@ -543,106 +543,182 @@ test "Json(JsonArray(T))" {
     try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
 }
 
-/// Ensures at least one Optional is not equal to .not_provided.
-/// All fields in T must be Optional(...) types.
-pub fn RequireAtLeastOne(comptime T: type) type {
-    const info = @typeInfo(T);
-    if (info != .@"struct") @compileError(@typeName(T) ++ " must be a struct");
-    for (info.@"struct".fields) |f| {
-        if (!comptime isOptional(f.type)) {
-            @compileError("All fields in " ++ @typeName(T) ++ " must be Optional: " ++ @typeName(f.type));
+/// Declarative presence constraints for a request `body` or `query_params` struct.
+/// Attach as a decl inside the struct:
+///
+///   pub const constraints: Constraints = .{
+///       .require_at_least_one = true,
+///       .require_together = &.{ "foo", "bar" },
+///       .mutually_exclusive = &.{ "start", "end" },
+///   };
+///
+/// Each rule is independent and may target a different set of fields.
+///
+/// Use tagged unions for distinct shapes, e.g. "a & b" OR "c & d".
+pub const Constraints = struct {
+    /// At least one field in the struct must be provided.
+    require_at_least_one: bool = false,
+    /// These fields must all be provided together, or none of them.
+    require_together: ?[]const []const u8 = null,
+    /// At most one of these fields may be provided.
+    mutually_exclusive: ?[]const []const u8 = null,
+};
+
+/// Returns whether a (possibly `Optional` wrapped) field carries a provided value.
+/// Non-Optional fields are always considered present once parsing succeeds, since they are mandatory.
+pub fn fieldPresent(value: anytype, comptime name: []const u8) bool {
+    const F = @FieldType(@TypeOf(value), name);
+    if (comptime isOptional(F)) {
+        return @field(value, name) != .not_provided;
+    }
+    return true;
+}
+
+fn assertFieldsExist(comptime T: type, comptime group: []const []const u8) void {
+    inline for (group) |name| {
+        if (!@hasField(T, name)) {
+            @compileError(@typeName(T) ++ " has no field named '" ++ name ++ "' referenced in constraints");
+        }
+    }
+}
+
+/// Validates the `constraints` of struct type `T` against a parsed value.
+/// Returns a human readable error message for the first violated rule,
+/// or `null` when all constraints are satisfied.
+pub fn validateConstraints(comptime T: type, value: T) ?[]const u8 {
+    // If it's not a struct, or if it is but doesn't have constraints, skip the checks.
+    if (comptime @typeInfo(T) != .@"struct" or !@hasDecl(T, "constraints")) return null;
+
+    const c: Constraints = T.constraints;
+    if (comptime c.require_at_least_one) {
+        var any_present = false;
+        inline for (@typeInfo(T).@"struct".fields) |f| {
+            if (fieldPresent(value, f.name)) {
+                any_present = true;
+                break;
+            }
+        }
+        if (!any_present) return "At least one field must be provided";
+    }
+
+    if (comptime c.require_together) |group| {
+        comptime assertFieldsExist(T, group);
+        var present: usize = 0;
+        inline for (group) |name| {
+            if (fieldPresent(value, name)) present += 1;
+        }
+        if (present != 0 and present != group.len) {
+            return "These fields must all be provided together";
         }
     }
 
-    return struct {
-        pub const Self = @This();
-        value: T,
-
-        pub fn areAllFieldsMissing(self: Self) bool {
-            inline for (@typeInfo(T).@"struct".fields) |f| {
-                if (@field(@field(self, "value"), f.name) != .not_provided) return false;
-            }
-            return true;
+    if (comptime c.mutually_exclusive) |group| {
+        comptime assertFieldsExist(T, group);
+        var present: usize = 0;
+        inline for (group) |name| {
+            if (fieldPresent(value, name)) present += 1;
         }
-
-        pub fn jsonParse(
-            allocator: std.mem.Allocator,
-            source: anytype,
-            options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(source.*))!Self {
-            // The payload is the inner `T` struct directly.
-            // Each field of `T` is an Optional(...) that knows how to parse itself
-            // (including turning a missing key / explicit null into `.not_provided`).
-            const self: Self = .{ .value = try json.innerParse(T, allocator, source, options) };
-            if (self.areAllFieldsMissing()) return error.MissingField;
-            return self;
-        }
-
-        pub fn jsonParseFromValue(
-            allocator: std.mem.Allocator,
-            source: json.Value,
-            options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(allocator))!Self {
-            const self: Self = .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
-            if (self.areAllFieldsMissing()) return error.MissingField;
-            return self;
-        }
-    };
+        if (present > 1) return "These fields are mutually exclusive";
+    }
+    return null;
 }
 
-test "RequireAtLeastOne" {
-    const Foo = RequireAtLeastOne(struct {
-        a: Optional(i32) = .not_provided,
-    });
-
-    const f: Foo = .{ .value = .{ .a = .to(123) } };
-    try std.testing.expectEqual(false, f.areAllFieldsMissing());
-
-    const g: Foo = .{ .value = .{ .a = .not_provided } };
-    try std.testing.expectEqual(true, g.areAllFieldsMissing());
-}
-
-test "parse json RequireAtLeastOne" {
-    const alloc = std.testing.allocator;
-
-    const Foo = RequireAtLeastOne(struct {
+test "validateConstraints require_at_least_one" {
+    const Body = struct {
         a: Optional(i32) = .not_provided,
         b: Optional(?i32) = .not_provided,
+
+        pub const constraints: Constraints = .{ .require_at_least_one = true };
+    };
+
+    var error_msg: ?[]const u8 = null;
+
+    error_msg = validateConstraints(Body, .{ .a = .{ .value = 1 } });
+    try std.testing.expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{ .b = .{ .value = null } });
+    try std.testing.expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{});
+    try std.testing.expect(error_msg != null);
+    try std.testing.expectEqualStrings("At least one field must be provided", error_msg.?);
+}
+
+test "validateConstraints require_together" {
+    const Body = struct {
+        a: Optional(f64) = .not_provided,
+        b: Optional(f64) = .not_provided,
+        c: Optional([]const u8) = .not_provided,
+
+        pub const constraints: Constraints = .{ .require_together = &.{ "a", "b" } };
+    };
+
+    var error_msg: ?[]const u8 = null;
+
+    error_msg = validateConstraints(Body, .{});
+    try std.testing.expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{
+        .a = .{ .value = 1 },
+        .b = .{ .value = 2 },
     });
+    try std.testing.expectEqual(null, error_msg);
 
-    // Provided fields are parsed into the Optional `.value` shape,
-    // absent fields stay `.not_provided`.
-    {
-        const payload =
-            \\ { "a": 123 }
-        ;
-        const parsed: std.json.Parsed(Foo) = try json.parseFromSlice(Foo, alloc, payload, .{});
-        defer parsed.deinit();
+    error_msg = validateConstraints(Body, .{ .a = .{ .value = 1 } });
+    try std.testing.expectEqualStrings("These fields must all be provided together", error_msg.?);
+}
 
-        const foo = parsed.value;
-        try std.testing.expectEqual(123, foo.value.a.get());
-        try std.testing.expectEqual(.not_provided, foo.value.b);
-        try std.testing.expectEqual(false, foo.areAllFieldsMissing());
-    }
+test "validateConstraints mutually_exclusive" {
+    const Body = struct {
+        start: Optional([]const u8) = .not_provided,
+        end: Optional([]const u8) = .not_provided,
 
-    // An explicit null on a nullable Optional still counts as provided.
-    {
-        const payload =
-            \\ { "b": null }
-        ;
-        const parsed: std.json.Parsed(Foo) = try json.parseFromSlice(Foo, alloc, payload, .{});
-        defer parsed.deinit();
+        pub const constraints: Constraints = .{ .mutually_exclusive = &.{ "start", "end" } };
+    };
 
-        const foo = parsed.value;
-        try std.testing.expectEqual(.not_provided, foo.value.a);
-        try std.testing.expectEqual(null, foo.value.b.get());
-        try std.testing.expectEqual(false, foo.areAllFieldsMissing());
-    }
+    var error_msg: ?[]const u8 = null;
 
-    // When no fields are provided, parsing fails the "require at least one" check.
-    {
-        const payload = "{}";
-        const result = json.parseFromSlice(Foo, alloc, payload, .{});
-        try std.testing.expectError(error.MissingField, result);
-    }
+    error_msg = validateConstraints(Body, .{});
+    try std.testing.expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{ .start = .{ .value = "x" } });
+    try std.testing.expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{
+        .start = .{ .value = "x" },
+        .end = .{ .value = "y" },
+    });
+    try std.testing.expectEqualStrings("These fields are mutually exclusive", error_msg.?);
+}
+
+test "validateConstraints composes rules" {
+    const Body = struct {
+        foo: Optional(f64) = .not_provided,
+        bar: Optional(f64) = .not_provided,
+        start: Optional([]const u8) = .not_provided,
+        end: Optional([]const u8) = .not_provided,
+
+        pub const constraints: Constraints = .{
+            .require_at_least_one = true,
+            .require_together = &.{ "foo", "bar" },
+            .mutually_exclusive = &.{ "start", "end" },
+        };
+    };
+
+    var error_msg: ?[]const u8 = null;
+
+    error_msg = validateConstraints(Body, .{});
+    try std.testing.expectEqualStrings("At least one field must be provided", error_msg.?);
+
+    error_msg = validateConstraints(Body, .{ .foo = .{ .value = 1 } });
+    try std.testing.expectEqualStrings("These fields must all be provided together", error_msg.?);
+
+    error_msg = validateConstraints(Body, .{
+        .start = .{ .value = "x" },
+        .end = .{ .value = "y" },
+    });
+    try std.testing.expectEqualStrings("These fields are mutually exclusive", error_msg.?);
+
+    error_msg = validateConstraints(Body, .{ .start = .{ .value = "x" } });
+    try std.testing.expectEqual(null, error_msg);
 }

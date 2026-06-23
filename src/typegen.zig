@@ -45,6 +45,18 @@ const PrivateUtilityTypes = [_][]const u8{
     \\     [K in Keys]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
     \\   }[Keys]
     \\   : never;
+    ,
+    \\ type RequireTogether<T, K extends keyof T> =
+    \\   | (T & Required<Pick<T, K>>)
+    \\   | (Omit<T, K> & { [P in K]?: never });
+    ,
+    \\ type MutuallyExclusive<T, K extends keyof T> =
+    \\   | (Omit<T, K> & { [P in K]?: never })
+    \\   | {
+    \\     [E in K]: Omit<T, K> & { [P in E]?: T[P] } & {
+    \\       [P in Exclude<K, E>]?: never;
+    \\     };
+    \\   }[K];
 };
 
 pub fn generateTypesFile(
@@ -770,6 +782,44 @@ const TypeGenerator = struct {
         name: []const u8,
     };
 
+    /// Builds a TS key union, e.g. `"foo" | "bar"`, from the names in the group.
+    fn buildKeyUnion(self: *Self, comptime group: []const []const u8) ![]const u8 {
+        var res: ArrayList(u8) = .empty;
+        inline for (group, 0..) |name, i| {
+            if (i != 0) try res.appendSlice(self.arena_alloc, " | ");
+            try res.appendSlice(
+                self.arena_alloc,
+                try allocPrint(self.arena_alloc, "\"{s}\"", .{name}),
+            );
+        }
+        return res.toOwnedSlice(self.arena_alloc);
+    }
+
+    /// Wraps an already emitted struct object (`base`) in the TS utility types implied by its `constraints` decl.
+    /// `require_at_least_one` rule additionally forces the field to be required.
+    fn applyConstraints(self: *Self, comptime T: type, base: *ParseResult) !ParseResult {
+        const c: types.Constraints = T.constraints;
+        if (comptime c.require_together) |group| {
+            base.parsed = try allocPrint(self.arena_alloc, "RequireTogether<{s}, {s}>", .{
+                base.parsed,
+                try self.buildKeyUnion(group),
+            });
+        }
+
+        if (comptime c.mutually_exclusive) |group| {
+            base.parsed = try allocPrint(self.arena_alloc, "MutuallyExclusive<{s}, {s}>", .{
+                base.parsed,
+                try self.buildKeyUnion(group),
+            });
+        }
+
+        if (comptime c.require_at_least_one) {
+            base.parsed = try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{base.parsed});
+            base.optional = false;
+        }
+        return .{ .parsed = base.parsed, .optional = base.optional };
+    }
+
     fn extractIdentifier(self: *Self, T: type) !ParseResult {
         const type_info = @typeInfo(T);
         switch (type_info) {
@@ -787,22 +837,18 @@ const TypeGenerator = struct {
             },
             .@"struct" => {
                 const type_name = comptime shortTypeName(@typeName(T));
-                if (comptime strEqls(type_name, "RequireAtLeastOne")) {
-                    const inner = try self.extractIdentifier(@FieldType(T, "value"));
-                    return .{
-                        .optional = false,
-                        .parsed = try allocPrint(
-                            self.arena_alloc,
-                            "RequireAtLeastOne<{s}>",
-                            .{inner.parsed},
-                        ),
-                    };
-                }
 
-                if (self.top_level_types.get(type_name)) |gen| {
-                    return .{ .parsed = type_name, .optional = gen.optional };
+                var res: ParseResult = if (self.top_level_types.get(type_name)) |gen|
+                    .{ .parsed = type_name, .optional = gen.optional }
+                else
+                    try self.parseStruct(type_name, type_info.@"struct");
+
+                // Wrap the emitted object in the matching TS utility type(s)
+                // if any constraints should be applied.
+                if (@hasDecl(T, "constraints")) {
+                    return try self.applyConstraints(T, &res);
                 }
-                return try self.parseStruct(type_name, type_info.@"struct");
+                return res;
             },
             .@"enum" => {
                 const type_name = shortTypeName(@typeName(T));

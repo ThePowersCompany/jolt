@@ -9,6 +9,8 @@ const Request = zap.Request;
 const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
 
+const types = @import("../utils/types.zig");
+
 /// Various ways to represent tagged unions in JSON.
 /// Reference (Rust): https://serde.rs/enum-representations.html
 pub const UnionRepr = union(enum) {
@@ -49,6 +51,11 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
                                 "Unexpected body structure",
                             );
                         };
+                        // Enforce constraints now that the body is populated.
+                        if (types.validateConstraints(@TypeOf(ctx.ctx.body), parsed_body)) |err_msg| {
+                            return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
+                        }
+
                         ctx.ctx.body = parsed_body;
                     } else {
                         try ctx.req.respondWithError(

@@ -243,12 +243,25 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 );
             }
 
-            outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
+            inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
                 if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
                     inline for (@typeInfo(ctx_field.type).@"struct".fields) |field| {
                         if (try handleQueryParam(ctx.ctx, ctx.alloc, ctx.req, field)) {
-                            break :outer;
+                            // Reaching this block indicates we must exit early.
+                            return;
                         }
+                    }
+                }
+            }
+
+            // Enforce presence constraints now that every query param has been populated.
+            inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
+                if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
+                    if (types.validateConstraints(
+                        ctx_field.type,
+                        @field(ctx.ctx, query_params),
+                    )) |err_msg| {
+                        return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
                     }
                 }
             }
