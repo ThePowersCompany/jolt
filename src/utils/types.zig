@@ -616,12 +616,13 @@ test "parse json RequireAtLeastOne" {
         const payload =
             \\ { "a": 123 }
         ;
-        const parsed = try json.parseFromSlice(Foo, alloc, payload, .{});
+        const parsed: std.json.Parsed(Foo) = try json.parseFromSlice(Foo, alloc, payload, .{});
         defer parsed.deinit();
 
-        try std.testing.expectEqual(123, parsed.value.value.a.value);
-        try std.testing.expectEqual(.not_provided, parsed.value.value.b);
-        try std.testing.expectEqual(false, parsed.value.areAllFieldsMissing());
+        const foo = parsed.value;
+        try std.testing.expectEqual(123, foo.value.a.get());
+        try std.testing.expectEqual(.not_provided, foo.value.b);
+        try std.testing.expectEqual(false, foo.areAllFieldsMissing());
     }
 
     // An explicit null on a nullable Optional still counts as provided.
@@ -629,12 +630,13 @@ test "parse json RequireAtLeastOne" {
         const payload =
             \\ { "b": null }
         ;
-        const parsed = try json.parseFromSlice(Foo, alloc, payload, .{});
+        const parsed: std.json.Parsed(Foo) = try json.parseFromSlice(Foo, alloc, payload, .{});
         defer parsed.deinit();
 
-        try std.testing.expect(parsed.value.value.a == .not_provided);
-        try std.testing.expect(parsed.value.value.b.value == null);
-        try std.testing.expectEqual(false, parsed.value.areAllFieldsMissing());
+        const foo = parsed.value;
+        try std.testing.expectEqual(.not_provided, foo.value.a);
+        try std.testing.expectEqual(null, foo.value.b.get());
+        try std.testing.expectEqual(false, foo.areAllFieldsMissing());
     }
 
     // When no fields are provided, parsing fails the "require at least one" check.
