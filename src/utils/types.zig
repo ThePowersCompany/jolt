@@ -574,7 +574,7 @@ pub fn fieldPresent(value: anytype, comptime name: []const u8) bool {
     return true;
 }
 
-fn assertFieldsExist(comptime T: type, comptime group: []const []const u8) void {
+pub fn assertFieldsExist(comptime T: type, comptime group: []const []const u8) void {
     inline for (group) |name| {
         if (!@hasField(T, name)) {
             @compileError(@typeName(T) ++ " has no field named '" ++ name ++ "' referenced in constraints");
