@@ -11,8 +11,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#9644e4ca89509e0160d7bcda6d9a22acc9456538",
-            .hash = "pg-0.0.0-Wp_7gV1pBgAN_atgbzpICLXPcJ0gJJxVfFmuaprjCUew",
+            .url = "git+https://github.com/karlseguin/pg.zig?ref=zig-0.15#12e48fc57b78486e338e8707448d9a87597dd3ad",
+            .hash = "pg-0.0.0-Wp_7gdBzBgBVVMi1iVK12HQ582gXCGSHEI-DkqSKLDY8",
         },
     },
 }
