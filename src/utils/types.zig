@@ -548,20 +548,11 @@ test "Json(JsonArray(T))" {
 ///
 ///   pub const constraints: Constraints = .{
 ///       .require_at_least_one = true,
-///       .require_together = &.{ "foo", "bar" },
-///       .mutually_exclusive = &.{ "start", "end" },
 ///   };
-///
-/// Each rule is independent and may target a different set of fields.
 ///
 /// Use tagged unions for distinct shapes, e.g. "a & b" OR "c & d".
 pub const Constraints = struct {
-    /// At least one field in the struct must be provided.
     require_at_least_one: bool = false,
-    /// These fields must all be provided together, or none of them.
-    require_together: ?[]const []const u8 = null,
-    /// At most one of these fields may be provided.
-    mutually_exclusive: ?[]const []const u8 = null,
 };
 
 /// Returns whether a (possibly `Optional` wrapped) field carries a provided value.
@@ -572,14 +563,6 @@ pub fn fieldPresent(value: anytype, comptime name: []const u8) bool {
         return @field(value, name) != .not_provided;
     }
     return true;
-}
-
-pub fn assertFieldsExist(comptime T: type, comptime group: []const []const u8) void {
-    inline for (group) |name| {
-        if (!@hasField(T, name)) {
-            @compileError(@typeName(T) ++ " has no field named '" ++ name ++ "' referenced in constraints");
-        }
-    }
 }
 
 /// Validates the `constraints` of struct type `T` against a parsed value.
@@ -601,25 +584,6 @@ pub fn validateConstraints(comptime T: type, value: T) ?[]const u8 {
         if (!any_present) return "At least one field must be provided";
     }
 
-    if (comptime c.require_together) |group| {
-        comptime assertFieldsExist(T, group);
-        var present: usize = 0;
-        inline for (group) |name| {
-            if (fieldPresent(value, name)) present += 1;
-        }
-        if (present != 0 and present != group.len) {
-            return "These fields must all be provided together";
-        }
-    }
-
-    if (comptime c.mutually_exclusive) |group| {
-        comptime assertFieldsExist(T, group);
-        var present: usize = 0;
-        inline for (group) |name| {
-            if (fieldPresent(value, name)) present += 1;
-        }
-        if (present > 1) return "These fields are mutually exclusive";
-    }
     return null;
 }
 
@@ -642,83 +606,4 @@ test "validateConstraints require_at_least_one" {
     error_msg = validateConstraints(Body, .{});
     try std.testing.expect(error_msg != null);
     try std.testing.expectEqualStrings("At least one field must be provided", error_msg.?);
-}
-
-test "validateConstraints require_together" {
-    const Body = struct {
-        a: Optional(f64) = .not_provided,
-        b: Optional(f64) = .not_provided,
-        c: Optional([]const u8) = .not_provided,
-
-        pub const constraints: Constraints = .{ .require_together = &.{ "a", "b" } };
-    };
-
-    var error_msg: ?[]const u8 = null;
-
-    error_msg = validateConstraints(Body, .{});
-    try std.testing.expectEqual(null, error_msg);
-
-    error_msg = validateConstraints(Body, .{
-        .a = .{ .value = 1 },
-        .b = .{ .value = 2 },
-    });
-    try std.testing.expectEqual(null, error_msg);
-
-    error_msg = validateConstraints(Body, .{ .a = .{ .value = 1 } });
-    try std.testing.expectEqualStrings("These fields must all be provided together", error_msg.?);
-}
-
-test "validateConstraints mutually_exclusive" {
-    const Body = struct {
-        start: Optional([]const u8) = .not_provided,
-        end: Optional([]const u8) = .not_provided,
-
-        pub const constraints: Constraints = .{ .mutually_exclusive = &.{ "start", "end" } };
-    };
-
-    var error_msg: ?[]const u8 = null;
-
-    error_msg = validateConstraints(Body, .{});
-    try std.testing.expectEqual(null, error_msg);
-
-    error_msg = validateConstraints(Body, .{ .start = .{ .value = "x" } });
-    try std.testing.expectEqual(null, error_msg);
-
-    error_msg = validateConstraints(Body, .{
-        .start = .{ .value = "x" },
-        .end = .{ .value = "y" },
-    });
-    try std.testing.expectEqualStrings("These fields are mutually exclusive", error_msg.?);
-}
-
-test "validateConstraints composes rules" {
-    const Body = struct {
-        foo: Optional(f64) = .not_provided,
-        bar: Optional(f64) = .not_provided,
-        start: Optional([]const u8) = .not_provided,
-        end: Optional([]const u8) = .not_provided,
-
-        pub const constraints: Constraints = .{
-            .require_at_least_one = true,
-            .require_together = &.{ "foo", "bar" },
-            .mutually_exclusive = &.{ "start", "end" },
-        };
-    };
-
-    var error_msg: ?[]const u8 = null;
-
-    error_msg = validateConstraints(Body, .{});
-    try std.testing.expectEqualStrings("At least one field must be provided", error_msg.?);
-
-    error_msg = validateConstraints(Body, .{ .foo = .{ .value = 1 } });
-    try std.testing.expectEqualStrings("These fields must all be provided together", error_msg.?);
-
-    error_msg = validateConstraints(Body, .{
-        .start = .{ .value = "x" },
-        .end = .{ .value = "y" },
-    });
-    try std.testing.expectEqualStrings("These fields are mutually exclusive", error_msg.?);
-
-    error_msg = validateConstraints(Body, .{ .start = .{ .value = "x" } });
-    try std.testing.expectEqual(null, error_msg);
 }

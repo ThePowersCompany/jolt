@@ -45,7 +45,7 @@ const PrivateUtilityTypes = [_][]const u8{
     \\   [P in K]: SetRequired<T, P>;
     \\ }[K];
     ,
-    \\ type RequireTogether<T, K extends keyof T> =
+    \\ type RequireTogether<T, K extends keyof T = keyof T> =
     \\   | (T & Required<Pick<T, K>>)
     \\   | (Omit<T, K> & { [P in K]?: never });
     ,
@@ -378,7 +378,7 @@ const TypeGenerator = struct {
                     }
                 }
             } else if (strEqls(field.name, "query_params")) {
-                const param_res = try self.extractIdentifier(field.type);
+                const param_res = try self.extractQueryParams(field.type);
                 if (param_res.optional) {
                     res.value_ptr.query_params = try allocPrint(
                         self.arena_alloc,
@@ -781,70 +781,279 @@ const TypeGenerator = struct {
         name: []const u8,
     };
 
-    /// Builds a TS key union, e.g. `"foo" | "bar"`, from the names in the group.
-    fn buildKeyUnion(self: *Self, comptime group: []const []const u8) ![]const u8 {
-        var res: ArrayList(u8) = .empty;
-        inline for (group, 0..) |name, i| {
-            if (i != 0) try res.appendSlice(self.arena_alloc, " | ");
-            try res.appendSlice(
-                self.arena_alloc,
-                try allocPrint(self.arena_alloc, "\"{s}\"", .{name}),
-            );
-        }
-        return res.toOwnedSlice(self.arena_alloc);
-    }
-
     /// Combines an already-emitted struct object (`res`)
     /// with the TS utility types implied by its `constraints` decl.
     /// The `require_at_least_one` rule additionally forces the field to be required.
-    fn applyConstraints(
-        self: *Self,
-        comptime T: type,
-        comptime constraints: types.Constraints,
-        res: ParseResult,
-    ) !ParseResult {
-        var ts_constraints: ArrayList([]const u8) = .empty;
-        var optional = res.optional;
-
+    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: ParseResult) !ParseResult {
         if (comptime constraints.require_at_least_one) {
-            try ts_constraints.append(
-                self.arena_alloc,
-                try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{res.parsed}),
-            );
-            optional = false;
+            return .{
+                .parsed = try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{res.parsed}),
+                .optional = false,
+            };
+        }
+        return res;
+    }
+
+    /// Whether a struct type carries a custom `paramParse`
+    /// and therefore stays a single query key (its value parsed from a string),
+    /// rather than being flattened into leaf keys.
+    fn hasParamParse(comptime T: type) bool {
+        return comptime std.meta.hasFn(T, "paramParse");
+    }
+
+    /// Emits the TS type for a single query param leaf.
+    /// A `paramParse` custom type always receives a string at runtime,
+    /// so its typegen'd type should be `string`.
+    /// `extractIdentifier` parses its struct fields, which is incorrect for query_params.
+    /// Everything else delegates to `extractIdentifier`.
+    fn queryLeafType(self: *Self, comptime T: type) !ParseResult {
+        if (comptime hasParamParse(T)) return .{ .parsed = "string" };
+        return self.extractIdentifier(T);
+    }
+
+    /// Query params are a flat key/value store, so a tagged union maps to a flattened TS union.
+    /// The active variant is inferred at runtime from which keys are present.
+    /// Anything else falls back to the normal struct handling.
+    fn extractQueryParams(self: *Self, T: type) !ParseResult {
+        const info = @typeInfo(T);
+        if (comptime info == .@"union" and !isOptional(T)) {
+            return try self.parseFlatUnion(info.@"union");
         }
 
-        if (comptime constraints.require_together) |group| {
-            comptime types.assertFieldsExist(T, group);
-            try ts_constraints.append(self.arena_alloc, try allocPrint(
-                self.arena_alloc,
-                "RequireTogether<{s}, {s}>",
-                .{ res.parsed, try self.buildKeyUnion(group) },
-            ));
+        if (comptime isStructContainingUnionField(T)) {
+            return try self.parseFlatQueryStruct(T, info.@"struct");
         }
+        return try self.extractIdentifier(T);
+    }
 
-        if (comptime constraints.mutually_exclusive) |group| {
-            comptime types.assertFieldsExist(T, group);
-            try ts_constraints.append(self.arena_alloc, try allocPrint(
-                self.arena_alloc,
-                "MutuallyExclusive<{s}, {s}>",
-                .{ res.parsed, try self.buildKeyUnion(group) },
-            ));
+    /// Parses a union into a flat TS union.
+    /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
+    /// and a plain struct variant is flattened into its leaf keys.
+    fn parseFlatUnion(self: *Self, U: Type.Union) !ParseResult {
+        var res: ArrayList(u8) = .empty;
+        inline for (U.fields, 0..) |field, i| {
+            if (i != 0) try res.appendSlice(self.arena_alloc, "\n | ");
+
+            const info = @typeInfo(field.type);
+            if (field.type == void) {
+                try res.appendSlice(self.arena_alloc, try allocPrint(
+                    self.arena_alloc,
+                    "{{ {s}: \"\" }}",
+                    .{field.name},
+                ));
+            } else if (info == .@"struct" and !hasParamParse(field.type)) {
+                const shape = (try self.buildFlatStruct(field.type, info.@"struct")) orelse "{}";
+                try res.appendSlice(self.arena_alloc, shape);
+            } else {
+                // Scalar / array / enum / paramParse struct: variant name is key.
+                const ident = try self.queryLeafType(field.type);
+                try res.appendSlice(self.arena_alloc, try allocPrint(
+                    self.arena_alloc,
+                    "{{ {s}: {s} }}",
+                    .{ field.name, ident.parsed },
+                ));
+            }
         }
+        // A union always needs at least one matching key, so it is required.
+        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+    }
 
-        // No active rules (e.g. a `constraints` decl with all defaults)
-        if (ts_constraints.items.len == 0) return res;
+    /// A single flattened query-param leaf key.
+    const FlatLeaf = struct {
+        name: []const u8,
+        ts_type: []const u8,
+        optional: bool,
+    };
 
-        var parsed: ArrayList(u8) = .empty;
-        for (ts_constraints.items, 0..) |witness, i| {
-            if (i != 0) try parsed.appendSlice(self.arena_alloc, " & ");
-            try parsed.appendSlice(self.arena_alloc, witness);
-        }
+    /// A `query_params` struct represented as a flat structure.
+    /// `independent` - Leaves that are not in any kind of group.
+    /// `groups` - Each set of leaves that must exist together in a group (for `RequireTogether`).
+    const FlatStruct = struct {
+        independent: ArrayList(FlatLeaf) = .empty,
+        groups: ArrayList(ArrayList(FlatLeaf)) = .empty,
+    };
 
-        return .{
-            .parsed = try parsed.toOwnedSlice(self.arena_alloc),
-            .optional = optional,
+    /// Builds the flat TS shape for a struct query parameter.
+    ///
+    /// Returns null when the struct contributes no keys (no leaves and no `require_at_least_one`),
+    /// so it can be omitted from the generated types.
+    ///
+    /// Union fields are skipped here (see `collectFlatLeaves`) and handled by the caller.
+    fn buildFlatStruct(self: *Self, comptime T: type, S: Type.Struct) !?[]const u8 {
+        var flat_struct: FlatStruct = .{};
+        try self.collectFlatLeaves(&flat_struct, S, false, null);
+
+        const require_at_least_one = comptime blk: {
+            if (@hasDecl(T, "constraints")) break :blk T.constraints.require_at_least_one;
+            break :blk false;
         };
+
+        var all: ArrayList(FlatLeaf) = .empty;
+        try all.appendSlice(self.arena_alloc, flat_struct.independent.items);
+        for (flat_struct.groups.items) |group| {
+            try all.appendSlice(self.arena_alloc, group.items);
+        }
+
+        if (all.items.len == 0 and !require_at_least_one) return null;
+
+        // No groups means the full object is the base, optionally wrapped in RequireAtLeastOne
+        if (flat_struct.groups.items.len == 0) {
+            const full = try self.renderLeafObject(all.items);
+            if (require_at_least_one) {
+                return try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{full});
+            }
+            return full;
+        }
+
+        // One RequireTogether per group, the independent keys as a plain object,
+        // and RequireAtLeastOne over everything if the constraint is set.
+        var components: ArrayList([]const u8) = .empty;
+
+        // Each group object contains only its own keys.
+        for (flat_struct.groups.items) |group| {
+            try components.append(self.arena_alloc, try allocPrint(
+                self.arena_alloc,
+                "RequireTogether<{s}>",
+                .{try self.renderLeafObject(group.items)},
+            ));
+        }
+
+        if (flat_struct.independent.items.len > 0) {
+            try components.append(self.arena_alloc, try self.renderLeafObject(flat_struct.independent.items));
+        }
+
+        if (require_at_least_one) {
+            try components.append(self.arena_alloc, try allocPrint(
+                self.arena_alloc,
+                "RequireAtLeastOne<{s}>",
+                .{try self.renderLeafObject(all.items)},
+            ));
+        }
+
+        var res: ArrayList(u8) = .empty;
+        for (components.items, 0..) |component, i| {
+            if (i != 0) try res.appendSlice(self.arena_alloc, " & ");
+            try res.appendSlice(self.arena_alloc, component);
+        }
+        return try res.toOwnedSlice(self.arena_alloc);
+    }
+
+    /// Returns if the field is a non-Optional tagged union (without `paramParse`).
+    fn isUnionField(field: Type.StructField) bool {
+        return (comptime @typeInfo(field.type) == .@"union" //
+        and !isOptional(field.type) //
+        and !hasParamParse(field.type));
+    }
+
+    /// Whether `T` is a struct with at least one field
+    /// that is a non-Optional tagged union (without `paramParse`),
+    /// i.e. a union to be lifted into the flat query key space.
+    fn isStructContainingUnionField(comptime T: type) bool {
+        if (@typeInfo(T) != .@"struct") return false;
+        inline for (@typeInfo(T).@"struct".fields) |field| {
+            if (comptime isUnionField(field)) return true;
+        }
+        return false;
+    }
+
+    /// Emits the flat TS shape for a query param struct which contains lifted union fields.
+    /// Each union field's variant alternatives live directly in the flat key space,
+    /// so the result is the intersection of every union's flat shape,
+    /// with the base object built from the remaining fields.
+    fn parseFlatQueryStruct(self: *Self, comptime T: type, S: Type.Struct) !ParseResult {
+        var components: ArrayList([]const u8) = .empty;
+
+        inline for (S.fields) |field| {
+            if (comptime isUnionField(field)) {
+                const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
+                try components.append(
+                    self.arena_alloc,
+                    try allocPrint(self.arena_alloc, "({s})", .{shape.parsed}),
+                );
+            }
+        }
+
+        // Base object from the non-union fields (collectFlatLeaves skips unions).
+        if (try self.buildFlatStruct(T, S)) |base| {
+            try components.append(self.arena_alloc, base);
+        }
+
+        var res: ArrayList(u8) = .empty;
+        for (components.items, 0..) |component, i| {
+            if (i != 0) try res.appendSlice(self.arena_alloc, " & ");
+            try res.appendSlice(self.arena_alloc, component);
+        }
+        // A union always needs at least one matching key, so it is required.
+        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+    }
+
+    /// Recursively flattens a struct into leaf keys, hoisting nested plain structs.
+    /// `parent_optional` - Propagates optionality through Optional (or defaulted) wrappers.
+    /// `current_group` - The open group that required leaves will join.
+    ///   It is opened by an Optional nested struct.
+    ///   Optional leaves never join a group, since they never have to exist with other leaves.
+    fn collectFlatLeaves(
+        self: *Self,
+        flat_struct: *FlatStruct,
+        S: Type.Struct,
+        parent_optional: bool,
+        current_group: ?*ArrayList(FlatLeaf),
+    ) !void {
+        inline for (S.fields) |field| {
+            // Non-Optional tagged unions are lifted into the flat key space by the caller.
+            if (comptime isUnionField(field)) continue;
+
+            const is_optional = comptime isOptional(field.type);
+            const introduces_optional = is_optional or field.defaultValue() != null;
+            const T = if (is_optional) field.type.childType() else field.type;
+            const info = @typeInfo(T);
+            const wrapper_optional = parent_optional or introduces_optional;
+
+            if (info == .@"struct" and !hasParamParse(T)) {
+                if (introduces_optional and current_group == null) {
+                    // An optional nested struct opens a new group
+                    var group: ArrayList(FlatLeaf) = .empty;
+                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, &group);
+                    // RequireTogether needs >= 2 keys, a single key is just independent.
+                    if (group.items.len >= 2) {
+                        try flat_struct.groups.append(self.arena_alloc, group);
+                    } else {
+                        try flat_struct.independent.appendSlice(self.arena_alloc, group.items);
+                    }
+                } else {
+                    // Required nested struct, or one already inside a group
+                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group);
+                }
+            } else {
+                const ident = try self.queryLeafType(T);
+                const leaf: FlatLeaf = .{
+                    .name = field.name,
+                    .ts_type = ident.parsed,
+                    .optional = wrapper_optional or ident.optional,
+                };
+                // A required leaf inside an open group is required together.
+                // Everything else (optional, or no open group) is independent.
+                const list = if (current_group != null and !introduces_optional)
+                    current_group.?
+                else
+                    &flat_struct.independent;
+                try list.append(self.arena_alloc, leaf);
+            }
+        }
+    }
+
+    /// Renders a TS object literal from the given leaves.
+    fn renderLeafObject(self: *Self, leaves: []const FlatLeaf) ![]const u8 {
+        var res: ArrayList(u8) = .empty;
+        try res.appendSlice(self.arena_alloc, "{\n");
+        for (leaves) |leaf| {
+            try res.appendSlice(self.arena_alloc, leaf.name);
+            try res.appendSlice(self.arena_alloc, if (leaf.optional) "?: " else ": ");
+            try res.appendSlice(self.arena_alloc, leaf.ts_type);
+            try res.appendSlice(self.arena_alloc, "\n");
+        }
+        try res.appendSlice(self.arena_alloc, "}");
+        return res.toOwnedSlice(self.arena_alloc);
     }
 
     fn extractIdentifier(self: *Self, T: type) !ParseResult {
@@ -873,7 +1082,7 @@ const TypeGenerator = struct {
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
                 if (@hasDecl(T, "constraints")) {
-                    return try self.applyConstraints(T, T.constraints, res);
+                    return try self.applyConstraints(T.constraints, res);
                 }
                 return res;
             },
