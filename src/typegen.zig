@@ -1007,6 +1007,38 @@ const TypeGenerator = struct {
         }
     }
 
+    /// Like `getFlatLeafNames`, but only the required leaves.
+    /// Fields that are optional (`Optional` wrapper or a native `?T`) or have a default, are skipped.
+    fn getRequiredLeafNames(comptime T: type) []const []const u8 {
+        comptime {
+            var names: []const []const u8 = &.{};
+            for (@typeInfo(T).@"struct".fields) |field| {
+                if (isLiftableUnion(field.type)) continue;
+
+                const not_required = isOptional(field.type) or
+                    @typeInfo(field.type) == .optional or
+                    field.defaultValue() != null;
+                if (not_required) continue;
+
+                if (@typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+                    names = names ++ getRequiredLeafNames(field.type);
+                } else {
+                    names = names ++ &[_][]const u8{field.name};
+                }
+            }
+            return names;
+        }
+    }
+
+    /// Returns the required key names a variant needs in order to be selected.
+    fn getVariantRequiredKeyNames(comptime variant: Type.UnionField) []const []const u8 {
+        comptime {
+            const V = variant.type;
+            if (@typeInfo(V) == .@"struct" and !hasParamParse(V)) return getRequiredLeafNames(V);
+            return &[_][]const u8{variant.name};
+        }
+    }
+
     /// Returns the first string that appears in both lists.
     fn findFirstCommonString(
         comptime listA: []const []const u8,
@@ -1046,19 +1078,18 @@ const TypeGenerator = struct {
         }
     }
 
-    /// Rejects if any two union variants are subsets of each other,
-    /// because it would be too ambiguous to select a proper variant.
+    /// Rejects any two union variants with identical required key sets.
     fn assertUnambiguousUnion(comptime U: Type.Union, comptime label: []const u8) void {
         comptime {
             for (U.fields, 0..) |a, i| {
-                const a_keys = getVariantKeyNames(a);
+                const a_keys = getVariantRequiredKeyNames(a);
                 for (U.fields[i + 1 ..]) |b| {
-                    const b_keys = getVariantKeyNames(b);
+                    const b_keys = getVariantRequiredKeyNames(b);
                     if (isSubset(a_keys, b_keys) and isSubset(b_keys, a_keys)) {
                         @compileError(
                             "Variants '" ++ a.name ++ "' and '" ++ b.name ++ "' of " ++ label ++
-                                " have identical keys and cannot be told apart. " ++
-                                "Make their keys distinct.",
+                                " have identical required keys and cannot be told apart. " ++
+                                "Make their required keys distinct (e.g. mark a distinguishing key as required).",
                         );
                     }
                 }
@@ -1442,36 +1473,6 @@ test "extractQueryParams: union with subset variants" {
     );
 }
 
-test "extractQueryParams: union subset with additional optional key" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    const Filter = union(enum) {
-        basic: struct { start_date: []const u8 },
-        detailed: struct {
-            start_date: []const u8,
-            end_date: ?[]const u8 = null,
-        },
-    };
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
-    const parse_result = try type_generator.extractQueryParams(Filter);
-    try std.testing.expectEqualStrings(
-        \\XOR<({
-        \\start_date: string
-        \\}), ({
-        \\start_date: string
-        \\end_date?: string|null
-        \\})>
-    ,
-        parse_result.parsed,
-    );
-}
-
 test "extractQueryParams: LostProductionFilter (scalar + struct variants + shared optionals)" {
     const alloc = std.testing.allocator;
 
@@ -1545,10 +1546,17 @@ test "extractQueryParams: base keys + union variant keys" {
 
 // Tests I'd like to cover if we can figure out how to test compilation errors:
 //
-//   - Identical keys:
+//   - Identical required keys:
 //       union(enum) {
 //         a: struct{ x:[]const u8 },
 //         b: struct{ x:[]const u8 },
+//       }
+//
+//   - Identical required keys differing only by an optional key
+//     (optional keys never participate in selection, so both variants only require `start_date`):
+//       union(enum) {
+//         basic: struct{ start_date: []const u8 },
+//         detailed: struct{ start_date: []const u8, end_date: ?[]const u8 = null },
 //       }
 //
 //   - Colliding base keys with variant keys:
