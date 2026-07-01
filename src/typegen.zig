@@ -41,21 +41,25 @@ const EndpointData = struct {
 const PrivateUtilityTypes = [_][]const u8{
     \\ type SetRequired<T, K extends keyof T> = Omit<T, K> & Required<Pick<T, K>>;
     ,
-    \\ type RequireAtLeastOne<T, K extends keyof T = keyof T> = {
+    \\ type AnyOf<T, K extends keyof T = keyof T> = {
     \\   [P in K]: SetRequired<T, P>;
     \\ }[K];
     ,
-    \\ type RequireTogether<T, K extends keyof T = keyof T> =
+    \\ type AllOf<T, K extends keyof T = keyof T> =
     \\   | (T & Required<Pick<T, K>>)
     \\   | (Omit<T, K> & { [P in K]?: never });
     ,
-    \\ type MutuallyExclusive<T, K extends keyof T> =
+    \\ type OneOf<T, K extends keyof T> =
     \\   | (Omit<T, K> & { [P in K]?: never })
     \\   | {
     \\     [E in K]: Omit<T, K> & { [P in E]?: T[P] } & {
     \\       [P in Exclude<K, E>]?: never;
     \\     };
     \\   }[K];
+    ,
+    \\ type Without<T, U> = { [P in Exclude<keyof T, keyof U>]?: never };
+    ,
+    \\ type XOR<T, U> = (T | U) extends object ? (Without<T, U> & U) | (Without<U, T> & T) : T | U;
 };
 
 pub fn generateTypesFile(
@@ -787,7 +791,7 @@ const TypeGenerator = struct {
     fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: ParseResult) !ParseResult {
         if (comptime constraints.require_at_least_one) {
             return .{
-                .parsed = try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{res.parsed}),
+                .parsed = try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{res.parsed}),
                 .optional = false,
             };
         }
@@ -830,24 +834,22 @@ const TypeGenerator = struct {
     /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
     /// and a plain struct variant is flattened into its leaf keys.
     fn parseFlatUnion(self: *Self, U: Type.Union) !ParseResult {
-        var res: ArrayList(u8) = .empty;
-        inline for (U.fields, 0..) |field, i| {
-            if (i != 0) try res.appendSlice(self.arena_alloc, "\n | ");
-
+        var variants: ArrayList([]const u8) = .empty;
+        inline for (U.fields) |field| {
             const info = @typeInfo(field.type);
             if (field.type == void) {
-                try res.appendSlice(self.arena_alloc, try allocPrint(
+                try variants.append(self.arena_alloc, try allocPrint(
                     self.arena_alloc,
                     "{{ {s}: \"\" }}",
                     .{field.name},
                 ));
             } else if (info == .@"struct" and !hasParamParse(field.type)) {
-                const shape = (try self.buildFlatStruct(field.type, info.@"struct")) orelse "{}";
-                try res.appendSlice(self.arena_alloc, shape);
+                const variant = (try self.buildFlatStruct(field.type, info.@"struct")) orelse "{}";
+                try variants.append(self.arena_alloc, variant);
             } else {
                 // Scalar / array / enum / paramParse struct: variant name is key.
                 const ident = try self.queryLeafType(field.type);
-                try res.appendSlice(self.arena_alloc, try allocPrint(
+                try variants.append(self.arena_alloc, try allocPrint(
                     self.arena_alloc,
                     "{{ {s}: {s} }}",
                     .{ field.name, ident.parsed },
@@ -855,7 +857,24 @@ const TypeGenerator = struct {
             }
         }
         // A union always needs at least one matching key, so it is required.
-        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+        return .{ .parsed = try self.renderExclusiveUnion(variants.items), .optional = false };
+    }
+
+    /// Combines variants so exactly one may be present.
+    fn renderExclusiveUnion(self: *Self, variants: []const []const u8) ![]const u8 {
+        if (variants.len == 0) return "{}";
+
+        // Emit the chain of XORs from left to right.
+        // Each leading variant opens an `XOR<(variant), `,
+        // the last variant sits in the middle,
+        // then the openers are closed with a run of `>`.
+        var res: ArrayList(u8) = .empty;
+        for (variants, 0..) |variant, i| {
+            const str = if (i == variants.len - 1) "({s})" else "XOR<({s}), ";
+            try res.appendSlice(self.arena_alloc, try allocPrint(self.arena_alloc, str, .{variant}));
+        }
+        try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
+        return res.toOwnedSlice(self.arena_alloc);
     }
 
     /// A single flattened query-param leaf key.
@@ -867,7 +886,7 @@ const TypeGenerator = struct {
 
     /// A `query_params` struct represented as a flat structure.
     /// `independent` - Leaves that are not in any kind of group.
-    /// `groups` - Each set of leaves that must exist together in a group (for `RequireTogether`).
+    /// `groups` - Each set of leaves that must exist together in a group (for `AllOf`).
     const FlatStruct = struct {
         independent: ArrayList(FlatLeaf) = .empty,
         groups: ArrayList(ArrayList(FlatLeaf)) = .empty,
@@ -896,24 +915,24 @@ const TypeGenerator = struct {
 
         if (all.items.len == 0 and !require_at_least_one) return null;
 
-        // No groups means the full object is the base, optionally wrapped in RequireAtLeastOne
+        // No groups means the full object is the base, optionally wrapped in AnyOf
         if (flat_struct.groups.items.len == 0) {
             const full = try self.renderLeafObject(all.items);
             if (require_at_least_one) {
-                return try allocPrint(self.arena_alloc, "RequireAtLeastOne<{s}>", .{full});
+                return try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{full});
             }
             return full;
         }
 
-        // One RequireTogether per group, the independent keys as a plain object,
-        // and RequireAtLeastOne over everything if the constraint is set.
+        // One AllOf per group, the independent keys as a plain object,
+        // and AnyOf over everything if the constraint is set.
         var components: ArrayList([]const u8) = .empty;
 
         // Each group object contains only its own keys.
         for (flat_struct.groups.items) |group| {
             try components.append(self.arena_alloc, try allocPrint(
                 self.arena_alloc,
-                "RequireTogether<{s}>",
+                "AllOf<{s}>",
                 .{try self.renderLeafObject(group.items)},
             ));
         }
@@ -925,7 +944,7 @@ const TypeGenerator = struct {
         if (require_at_least_one) {
             try components.append(self.arena_alloc, try allocPrint(
                 self.arena_alloc,
-                "RequireAtLeastOne<{s}>",
+                "AnyOf<{s}>",
                 .{try self.renderLeafObject(all.items)},
             ));
         }
@@ -1014,7 +1033,7 @@ const TypeGenerator = struct {
                     // An optional nested struct opens a new group
                     var group: ArrayList(FlatLeaf) = .empty;
                     try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, &group);
-                    // RequireTogether needs >= 2 keys, a single key is just independent.
+                    // AllOf needs >= 2 keys, a single key is just independent.
                     if (group.items.len >= 2) {
                         try flat_struct.groups.append(self.arena_alloc, group);
                     } else {
