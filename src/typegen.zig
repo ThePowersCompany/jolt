@@ -821,10 +821,12 @@ const TypeGenerator = struct {
     fn extractQueryParams(self: *Self, T: type) !ParseResult {
         const info = @typeInfo(T);
         if (comptime info == .@"union" and !isOptional(T)) {
+            comptime assertNoQueryKeyCollisions(T);
             return try self.parseFlatUnion(info.@"union");
         }
 
         if (comptime isStructContainingUnionField(T)) {
+            comptime assertNoQueryKeyCollisions(T);
             return try self.parseFlatQueryStruct(T, info.@"struct");
         }
         return try self.extractIdentifier(T);
@@ -960,11 +962,11 @@ const TypeGenerator = struct {
         return try res.toOwnedSlice(self.arena_alloc);
     }
 
-    /// Returns if the field is a non-Optional tagged union (without `paramParse`).
-    fn isUnionField(field: Type.StructField) bool {
-        return (comptime @typeInfo(field.type) == .@"union" //
-        and !isOptional(field.type) //
-        and !hasParamParse(field.type));
+    /// Returns if `T` is a tagged union that should be lifted into the flat query key space.
+    /// This ignores the `Optional` wrapper,
+    /// and unions with a `paramParse` function (which is parsed as a single leaf key).
+    fn isLiftableUnion(comptime T: type) bool {
+        return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T);
     }
 
     /// Whether `T` is a struct with at least one field
@@ -973,9 +975,168 @@ const TypeGenerator = struct {
     fn isStructContainingUnionField(comptime T: type) bool {
         if (@typeInfo(T) != .@"struct") return false;
         inline for (@typeInfo(T).@"struct".fields) |field| {
-            if (comptime isUnionField(field)) return true;
+            if (comptime isLiftableUnion(field.type)) return true;
         }
         return false;
+    }
+
+    /// Returns the flattened leaf key names of a plain struct,
+    /// hoisting nested plain structs and skipping lifted union fields (handled by the caller).
+    fn getFlatLeafNames(comptime T: type) []const []const u8 {
+        comptime {
+            var names: []const []const u8 = &.{};
+            for (@typeInfo(T).@"struct".fields) |field| {
+                if (isLiftableUnion(field.type)) continue;
+                const Child = if (isOptional(field.type)) field.type.childType() else field.type;
+                if (@typeInfo(Child) == .@"struct" and !hasParamParse(Child)) {
+                    names = names ++ getFlatLeafNames(Child);
+                } else {
+                    names = names ++ &[_][]const u8{field.name};
+                }
+            }
+            return names;
+        }
+    }
+
+    /// Returns the flat key names contributed by a single union variant.
+    fn getVariantKeyNames(comptime variant: Type.UnionField) []const []const u8 {
+        comptime {
+            const V = variant.type;
+            if (@typeInfo(V) == .@"struct" and !hasParamParse(V)) return getFlatLeafNames(V);
+            return &[_][]const u8{variant.name};
+        }
+    }
+
+    /// Returns the first string that appears in both lists.
+    fn findFirstCommonString(
+        comptime listA: []const []const u8,
+        comptime listB: []const []const u8,
+    ) ?[]const u8 {
+        comptime {
+            for (listA) |x| for (listB) |y| {
+                if (std.mem.eql(u8, x, y)) return x;
+            };
+            return null;
+        }
+    }
+
+    /// Returns the first string appearing more than once in the list.
+    fn findFirstDuplicate(comptime list: []const []const u8) ?[]const u8 {
+        comptime {
+            for (list, 0..) |x, i| {
+                for (list[i + 1 ..]) |y| {
+                    if (std.mem.eql(u8, x, y)) return x;
+                }
+            }
+            return null;
+        }
+    }
+
+    /// Returns if every string in `listA` also appears in `listB`.
+    fn isSubset(
+        comptime listA: []const []const u8,
+        comptime listB: []const []const u8,
+    ) bool {
+        comptime {
+            for (listA) |str| {
+                // TODO: Can this be simplified?
+                if (findFirstCommonString(&[_][]const u8{str}, listB) == null) return false;
+            }
+            return true;
+        }
+    }
+
+    /// Rejects if any two union variants are subsets of each other,
+    /// because it would be too ambiguous to select a proper variant.
+    fn assertUnambiguousUnion(comptime U: Type.Union, comptime label: []const u8) void {
+        comptime {
+            for (U.fields, 0..) |a, i| {
+                const a_keys = getVariantKeyNames(a);
+                for (U.fields[i + 1 ..]) |b| {
+                    const b_keys = getVariantKeyNames(b);
+                    if (isSubset(a_keys, b_keys) and isSubset(b_keys, a_keys)) {
+                        @compileError(
+                            "Variants '" ++ a.name ++ "' and '" ++ b.name ++ "' of " ++ label ++
+                                " have identical keys and cannot be told apart. " ++
+                                "Make their keys distinct.",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Query params share a flat key structure,
+    /// i.e. one value can't be assigned to two different fields in the zig query_params structure.
+    /// These collisions are ambiguous, so we reject here at compile time.
+    fn assertNoQueryKeyCollisions(comptime T: type) void {
+        comptime {
+            const info = @typeInfo(T);
+
+            // Check that a variant's own keys do not conflict with themselves
+            if (isLiftableUnion(T)) {
+                for (info.@"union".fields) |variant| {
+                    if (findFirstDuplicate(getVariantKeyNames(variant))) |key| {
+                        @compileError(
+                            "Duplicate query key '" ++ key ++ "' within variant '" ++
+                                variant.name ++ "' of union " ++ @typeName(T),
+                        );
+                    }
+                }
+                assertUnambiguousUnion(info.@"union", "union " ++ @typeName(T));
+                return;
+            }
+
+            if (info != .@"struct") return;
+
+            // Base keys first, checked for internal duplicates.
+            const base_keys = getFlatLeafNames(T);
+            if (findFirstDuplicate(base_keys)) |key| {
+                @compileError("Duplicate query key '" ++ key ++ "' in " ++ @typeName(T));
+            }
+
+            // List of keys that all exist in the flat key space
+            var seen: []const []const u8 = base_keys;
+            for (info.@"struct".fields) |field| {
+                if (!isLiftableUnion(field.type)) continue;
+
+                assertUnambiguousUnion(
+                    @typeInfo(field.type).@"union",
+                    "union field '" ++ field.name ++ "' in " ++ @typeName(T),
+                );
+
+                var union_names: []const []const u8 = &.{};
+                for (@typeInfo(field.type).@"union".fields) |variant| {
+                    const variant_names = getVariantKeyNames(variant);
+
+                    if (findFirstDuplicate(variant_names)) |key| {
+                        @compileError(
+                            "Duplicate query key '" ++ key ++ "' within variant '" ++
+                                variant.name ++ "' of union field '" ++ field.name ++
+                                "' in " ++ @typeName(T),
+                        );
+                    }
+
+                    if (findFirstCommonString(variant_names, seen)) |key| {
+                        @compileError(
+                            "Query key '" ++ key ++ "' from variant '" ++ variant.name ++
+                                "' of union field '" ++ field.name ++
+                                "' collides with another query key in " ++
+                                @typeName(T) ++
+                                ". Rename or restructure so each coexisting key is unique.",
+                        );
+                    }
+
+                    // Variants of the same union may share names, so dedupe before merging into `seen`.
+                    for (variant_names) |n| {
+                        if (findFirstCommonString(&[_][]const u8{n}, union_names) == null) {
+                            union_names = union_names ++ &[_][]const u8{n};
+                        }
+                    }
+                }
+                seen = seen ++ union_names;
+            }
+        }
     }
 
     /// Emits the flat TS shape for a query param struct which contains lifted union fields.
@@ -986,7 +1147,7 @@ const TypeGenerator = struct {
         var components: ArrayList([]const u8) = .empty;
 
         inline for (S.fields) |field| {
-            if (comptime isUnionField(field)) {
+            if (comptime isLiftableUnion(field.type)) {
                 const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
                 try components.append(
                     self.arena_alloc,
@@ -1023,7 +1184,7 @@ const TypeGenerator = struct {
     ) !void {
         inline for (S.fields) |field| {
             // Non-Optional tagged unions are lifted into the flat key space by the caller.
-            if (comptime isUnionField(field)) continue;
+            if (comptime isLiftableUnion(field.type)) continue;
 
             const is_optional = comptime isOptional(field.type);
             const introduces_optional = is_optional or field.defaultValue() != null;
@@ -1251,3 +1412,161 @@ test "JsonArray(T)" {
         \\}
     );
 }
+
+// Query parameter edge case tests
+
+test "extractQueryParams: union with subset variants" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Filter = union(enum) {
+        basic: struct { start_date: []const u8 },
+        detailed: struct { start_date: []const u8, end_date: []const u8 },
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(Filter);
+    try std.testing.expectEqualStrings(
+        \\XOR<({
+        \\start_date: string
+        \\}), ({
+        \\start_date: string
+        \\end_date: string
+        \\})>
+    ,
+        parse_result.parsed,
+    );
+}
+
+test "extractQueryParams: union subset with additional optional key" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Filter = union(enum) {
+        basic: struct { start_date: []const u8 },
+        detailed: struct {
+            start_date: []const u8,
+            end_date: ?[]const u8 = null,
+        },
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(Filter);
+    try std.testing.expectEqualStrings(
+        \\XOR<({
+        \\start_date: string
+        \\}), ({
+        \\start_date: string
+        \\end_date?: string|null
+        \\})>
+    ,
+        parse_result.parsed,
+    );
+}
+
+test "extractQueryParams: LostProductionFilter (scalar + struct variants + shared optionals)" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    // TODO: Talk to Bradley about this, end_date being nullable with no default, etc.
+    // Use Optional?
+    const LostProductionFilter = union(enum) {
+        id: i32,
+        dsc_row: i32,
+        date_range: struct {
+            start_date: []const u8,
+            end_date: ?[]const u8,
+            line: ?i32 = null,
+            shift: ?i32 = null,
+        },
+        all: struct {
+            line: ?i32 = null,
+            shift: ?i32 = null,
+        },
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
+    try std.testing.expectEqualStrings(
+        \\XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
+        \\start_date: string
+        \\end_date: string|null
+        \\line?: number|null
+        \\shift?: number|null
+        \\}), ({
+        \\line?: number|null
+        \\shift?: number|null
+        \\})>>>
+    ,
+        parse_result.parsed,
+    );
+}
+
+test "extractQueryParams: base keys + union variant keys" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    const Query = struct {
+        page: i32,
+        filter: union(enum) {
+            by_id: i32,
+            by_date: struct { start_date: []const u8 },
+        },
+    };
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(Query);
+    try std.testing.expectEqualStrings(
+        \\(XOR<({ by_id: number }), ({
+        \\start_date: string
+        \\})>) & {
+        \\page: number
+        \\}
+    ,
+        parse_result.parsed,
+    );
+}
+
+// Tests I'd like to cover if we can figure out how to test compilation errors:
+//
+//   - Identical keys:
+//       union(enum) {
+//         a: struct{ x:[]const u8 },
+//         b: struct{ x:[]const u8 },
+//       }
+//
+//   - Colliding base keys with variant keys:
+//       struct {
+//         start_date: []const u8,
+//         f: union(enum) {
+//           a: struct {
+//             start_date:[]const u8,
+//           },
+//         }
+//       }
+//
+//   - More than one variant with all optional keys:
+//       union(enum) {
+//         a: struct {
+//           x: ?i32 = null,
+//         },
+//         b: struct {
+//           y: ?i32 = null,
+//         },
+//       }
