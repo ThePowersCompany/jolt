@@ -870,8 +870,11 @@ const TypeGenerator = struct {
         // then the openers are closed with a run of `>`.
         var res: ArrayList(u8) = .empty;
         for (variants, 0..) |variant, i| {
-            const str = if (i == variants.len - 1) "({s})" else "XOR<({s}), ";
-            try res.appendSlice(self.arena_alloc, try allocPrint(self.arena_alloc, str, .{variant}));
+            const last = i == variants.len - 1;
+            try res.appendSlice(self.arena_alloc, if (last)
+                try allocPrint(self.arena_alloc, "({s})", .{variant})
+            else
+                try allocPrint(self.arena_alloc, "XOR<({s}), ", .{variant}));
         }
         try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
         return res.toOwnedSlice(self.arena_alloc);
