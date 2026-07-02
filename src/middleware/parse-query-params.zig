@@ -21,6 +21,172 @@ const Optional = types.Optional;
 
 const query_params = "query_params";
 
+const VariantChoice = union(enum) {
+    /// Field index of the unique most specific matching variant
+    selected: usize,
+    /// Two or more variants match (a tie between variants)
+    ambiguous,
+    /// No specific variant matched, the caller may use the all optional fallback
+    none,
+};
+
+/// - `all_req_keys_present[i]`: if variant i's required keys are all present
+/// - `num_req_keys[i]`: variant i's number of required keys.
+///
+/// A variant requiring more keys is more specific than one requiring a subset of them.
+/// If the highest score is shared by two or more matches, selection is `ambiguous`.
+///
+/// With no matches at all, the result is `none`.
+fn chooseVariant(comptime n: usize, all_req_keys_present: [n]bool, num_req_keys: [n]usize) VariantChoice {
+    var winner: ?usize = null;
+    var highest_score: usize = 0;
+    var tied = false;
+    for (0..n) |i| {
+        if (!all_req_keys_present[i]) continue;
+        if (winner == null or num_req_keys[i] > highest_score) {
+            winner = i;
+            highest_score = num_req_keys[i];
+            tied = false;
+        } else if (num_req_keys[i] == highest_score) {
+            tied = true;
+        }
+    }
+
+    if (tied) {
+        return .ambiguous;
+    } else if (winner) |i| {
+        return .{ .selected = i };
+    }
+    return .none;
+}
+
+/// Whether a struct/union type carries a custom `paramParse`
+/// and therefore stays a single query key (its value parsed from a string),
+/// rather than being flattened into leaf keys.
+fn hasParamParse(comptime T: type) bool {
+    return comptime hasFn(T, "paramParse");
+}
+
+/// Returns if a leaf/field is not required
+/// (a custom `Optional`, a native `?T`, or a field with a default value).
+fn isNotRequired(comptime field: Type.StructField) bool {
+    return comptime isOptional(field.type) or
+        @typeInfo(field.type) == .optional or
+        field.defaultValue() != null;
+}
+
+/// Number of required leaf keys of the struct, recursing into nested plain
+/// structs (which are flattened into their leaf keys).
+fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
+    comptime {
+        var count: usize = 0;
+        for (S.fields) |field| {
+            if (isNotRequired(field)) continue;
+
+            const info = @typeInfo(field.type);
+            if (info == .@"struct" and !hasParamParse(field.type)) {
+                count += getStructRequiredKeyCount(info.@"struct");
+            } else {
+                count += 1;
+            }
+        }
+        return count;
+    }
+}
+
+fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
+    const info = @typeInfo(variant.type);
+    if (comptime info != .@"struct" or hasParamParse(variant.type)) {
+        // Normal union variants are keyed by name, so we only have to return 1.
+        return 1;
+    }
+    return getStructRequiredKeyCount(info.@"struct");
+}
+
+fn keysContain(keys: []const []const u8, name: []const u8) bool {
+    for (keys) |k| {
+        if (std.mem.eql(u8, k, name)) return true;
+    }
+    return false;
+}
+
+/// Returns if every required leaf key of struct `T` is in `present_keys`.
+fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime isNotRequired(field)) continue;
+
+        if (comptime @typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+            if (!requiredKeysPresent(field.type, present_keys)) return false;
+        } else if (!keysContain(present_keys, field.name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Returns if the present query `keys` satisfy `variant`.
+/// A struct variant needs all its required keys present,
+/// and any other variant needs its name key to be present.
+fn variantMatchesKeys(comptime variant: Type.UnionField, keys: []const []const u8) bool {
+    const T = variant.type;
+    if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
+        return requiredKeysPresent(T, keys);
+    }
+    return keysContain(keys, variant.name);
+}
+
+/// Field index of union `T`'s all-optional fallback variant (zero required keys),
+/// or null if it has none.
+/// At most one may exist (enforced here at compile time).
+fn fallbackVariantIndex(comptime T: type) ?usize {
+    comptime {
+        var found: ?usize = null;
+        for (@typeInfo(T).@"union".fields, 0..) |variant, i| {
+            if (getVariantRequiredKeyCount(variant) == 0) {
+                if (found != null) {
+                    @compileError("Union " ++ @typeName(T) ++
+                        " has more than one all-optional variant;" ++
+                        " at most one may act as the fallback.");
+                }
+                found = i;
+            }
+        }
+        return found;
+    }
+}
+
+/// Variant selection for union `T` from the set of present query keys.
+///
+/// Each specific variant (>= 1 required key) is scored by its required key count,
+/// and `chooseVariant` picks the most specific match.
+///
+/// When no specific variant matches, the all-optional fallback variant is selected if one exists.
+/// Otherwise, the result is `.none`.
+///
+/// `.selected` always names a variant ready to build, and `.none` means there is nothing to build.
+fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoice {
+    const fields = @typeInfo(T).@"union".fields;
+    // Tracking data for each variant, by index
+    var all_req_keys_present = [_]bool{false} ** fields.len;
+    var num_req_keys = [_]usize{0} ** fields.len;
+
+    inline for (fields, 0..) |variant, i| {
+        const required = comptime getVariantRequiredKeyCount(variant);
+        if (required == 0) continue;
+
+        if (variantMatchesKeys(variant, present_keys)) {
+            all_req_keys_present[i] = true;
+            num_req_keys[i] = required;
+        }
+    }
+
+    const choice = chooseVariant(fields.len, all_req_keys_present, num_req_keys);
+    if (choice == .none) {
+        if (comptime fallbackVariantIndex(T)) |i| return .{ .selected = i };
+    }
+    return choice;
+}
+
 /// Parses the query params of the request and attaches it to the given Context.
 /// Context must have a member named after each query param,
 /// which resolves to the type meant to be parsed into an object.
@@ -97,7 +263,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     }
                 },
                 .@"struct", .@"union" => {
-                    if (hasFn(FieldType, "paramParse")) {
+                    if (hasParamParse(FieldType)) {
                         const parsed: FieldType = FieldType.paramParse(alloc, param) catch {
                             std.log.err(
                                 "query param failed to parse as custom: {s} - {s}",
@@ -192,14 +358,14 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         fn anyLeafPresent(comptime T: type, alloc: Allocator, req: Request) !bool {
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 const is_optional = comptime isOptional(field.type);
-                const Child = if (is_optional) field.type.childType() else field.type;
-                if (comptime !is_optional and @typeInfo(Child) == .@"union" and !hasFn(Child, "paramParse")) {
+                const F = if (is_optional) field.type.childType() else field.type;
+                if (comptime !is_optional and @typeInfo(F) == .@"union" and !hasParamParse(F)) {
                     // A lifted union is present if any of its variant keys are.
-                    inline for (@typeInfo(Child).@"union".fields) |variant| {
-                        if (try variantPresent(variant, alloc, req)) return true;
+                    inline for (@typeInfo(F).@"union".fields) |variant| {
+                        if (try isVariantPresent(variant, alloc, req)) return true;
                     }
-                } else if (comptime @typeInfo(Child) == .@"struct" and !hasFn(Child, "paramParse")) {
-                    if (try anyLeafPresent(Child, alloc, req)) return true;
+                } else if (comptime @typeInfo(F) == .@"struct" and !hasParamParse(F)) {
+                    if (try anyLeafPresent(F, alloc, req)) return true;
                 } else if ((try req.getParamDecoded(alloc, field.name)) != null) {
                     return true;
                 }
@@ -207,37 +373,53 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             return false;
         }
 
+        /// A successfully parsed value together with the number of query keys it consumed.
+        fn Parsed(comptime T: type) type {
+            return struct { value: T, consumed: usize };
+        }
+
         /// Creates a struct from the query's key/value pairs.
         /// Returns null if an error response was sent.
-        fn parseFlatStruct(comptime T: type, alloc: Allocator, req: Request) !?T {
+        fn parseFlatStruct(comptime T: type, alloc: Allocator, req: Request) !?Parsed(T) {
             var result: T = undefined;
+            var consumed: usize = 0;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 const is_optional = comptime isOptional(field.type);
-                const Child = if (is_optional) field.type.childType() else field.type;
-                const child_info = @typeInfo(Child);
+                const FieldType = if (is_optional) field.type.childType() else field.type;
+                const field_info = @typeInfo(FieldType);
 
-                if (comptime !is_optional and child_info == .@"union" and !hasFn(Child, "paramParse")) {
-                    @field(result, field.name) = (try parseFlatUnionValue(Child, alloc, req)) orelse return null;
-                } else if (comptime child_info == .@"struct" and !hasFn(Child, "paramParse")) {
-                    if (try anyLeafPresent(Child, alloc, req)) {
-                        const nested = (try parseFlatStruct(Child, alloc, req)) orelse return null;
-                        @field(result, field.name) = if (is_optional) .to(nested) else nested;
+                if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
+                    const u = (try parseFlatUnionValue(FieldType, alloc, req)) orelse return null;
+                    @field(result, field.name) = u.value;
+                    consumed += u.consumed;
+                } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
+                    if (try anyLeafPresent(FieldType, alloc, req)) {
+                        const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
+                        @field(result, field.name) = if (is_optional) .to(s.value) else s.value;
+                        consumed += s.consumed;
                     } else if (is_optional) {
                         @field(result, field.name) = .not_provided;
                     } else if (field.defaultValue()) |v| {
                         @field(result, field.name) = v;
                     } else {
                         // Required nested struct with no keys present.
-                        // Parse it anyway so the specific missing leaf error is propagated.
-                        @field(result, field.name) = (try parseFlatStruct(Child, alloc, req)) orelse return null;
+                        //
+                        // If it has a required leaf,
+                        // parseFlatStruct sends the specific "Missing query parameter" error and returns null.
+                        //
+                        // If it's entirely optional/has defaults,
+                        // it succeeds and we assign that all-optional value here.
+                        const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
+                        @field(result, field.name) = s.value;
+                        consumed += s.consumed;
                     }
                 } else {
-                    const param_opt = try req.getParamDecoded(alloc, field.name);
-                    if (param_opt) |param| {
-                        switch (_handleQueryParam(Child, alloc, param.items)) {
+                    if (try req.getParamDecoded(alloc, field.name)) |param| {
+                        consumed += 1;
+                        switch (_handleQueryParam(FieldType, alloc, param.items)) {
                             .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
                             .not_provided => {
-                                try sendInvalidParamTypeResponse(alloc, req, Child, field.name);
+                                try sendInvalidParamTypeResponse(alloc, req, FieldType, field.name);
                                 return null;
                             },
                         }
@@ -245,7 +427,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         @field(result, field.name) = v;
                     } else if (is_optional) {
                         @field(result, field.name) = .not_provided;
-                    } else if (child_info == .optional) {
+                    } else if (field_info == .optional) {
                         @field(result, field.name) = null;
                     } else {
                         try req.respondWithError(
@@ -256,78 +438,124 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                     }
                 }
             }
-            return result;
+            return .{ .value = result, .consumed = consumed };
         }
 
         /// Returns whether the keys identifying `variant` are present.
         /// A plain struct variant matches on any of its flattened leaf keys.
         /// Any other variant matches on its variant name used as a key.
-        fn variantPresent(comptime variant: Type.UnionField, alloc: Allocator, req: Request) !bool {
+        fn isVariantPresent(comptime variant: Type.UnionField, alloc: Allocator, req: Request) !bool {
             const T = variant.type;
-            if (comptime @typeInfo(T) == .@"struct" and !hasFn(T, "paramParse")) {
+            if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
                 return try anyLeafPresent(T, alloc, req);
             }
             return (try req.getParamDecoded(alloc, variant.name)) != null;
         }
 
-        /// Resolves a tagged union `T` from flat query keys.
-        /// The active variant is inferred from which keys are present.
+        /// Builds the `variant` of union `T` from the request's flat query keys.
         /// Returns null if an error response was sent.
-        fn parseFlatUnionValue(comptime T: type, alloc: Allocator, req: Request) !?T {
-            const fields = @typeInfo(T).@"union".fields;
-            var present = [_]bool{false} ** fields.len;
-
-            inline for (fields, 0..) |variant, i| {
-                present[i] = try variantPresent(variant, alloc, req);
-            }
-
-            var match_count: usize = 0;
-            for (present) |p| {
-                if (p) match_count += 1;
-            }
-
-            if (match_count == 0) {
-                try req.respondWithError(StatusCode.bad_request, "No matching query parameters were provided.");
-                return null;
-            }
-
-            if (match_count > 1) {
-                try req.respondWithError(StatusCode.bad_request, "Query parameters match more than one variant.");
-                return null;
-            }
-
-            inline for (fields, 0..) |variant, i| {
-                if (!present[i]) continue;
-
-                const V = variant.type;
-                if (V == void) {
-                    return @unionInit(T, variant.name, {});
-                } else if (comptime @typeInfo(V) == .@"struct" and !hasFn(V, "paramParse")) {
-                    const value = (try parseFlatStruct(V, alloc, req)) orelse return null;
-                    if (types.validateConstraints(V, value)) |err_msg| {
-                        try req.respondWithError(StatusCode.bad_request, err_msg);
+        fn buildVariant(
+            comptime T: type,
+            comptime variant: Type.UnionField,
+            alloc: Allocator,
+            req: Request,
+        ) !?Parsed(T) {
+            const V = variant.type;
+            if (V == void) {
+                return .{
+                    .value = @unionInit(T, variant.name, {}),
+                    .consumed = 1,
+                };
+            } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
+                const s = try parseFlatStruct(V, alloc, req) orelse return null;
+                if (types.validateConstraints(V, s.value)) |err_msg| {
+                    try req.respondWithError(StatusCode.bad_request, err_msg);
+                    return null;
+                }
+                return .{
+                    .value = @unionInit(T, variant.name, s.value),
+                    .consumed = s.consumed,
+                };
+            } else {
+                const param = try req.getParamDecoded(alloc, variant.name) orelse return error.Unreachable;
+                switch (_handleQueryParam(V, alloc, param.items)) {
+                    .value => |v| return .{
+                        .value = @unionInit(T, variant.name, v),
+                        .consumed = 1,
+                    },
+                    .not_provided => {
+                        try sendInvalidParamTypeResponse(alloc, req, V, variant.name);
                         return null;
-                    }
-                    return @unionInit(T, variant.name, value);
-                } else {
-                    const param = (try req.getParamDecoded(alloc, variant.name)).?;
-                    switch (_handleQueryParam(V, alloc, param.items)) {
-                        .value => |v| return @unionInit(T, variant.name, v),
-                        .not_provided => {
-                            try sendInvalidParamTypeResponse(alloc, req, V, variant.name);
-                            return null;
-                        },
-                    }
+                    },
                 }
             }
-            return error.Unreachable;
         }
 
-        /// Parses a tagged-union `query_params` and attaches it to the context.
-        fn parseUnionQueryParams(comptime T: type, ctx: *Context, alloc: Allocator, req: Request) !void {
-            if (try parseFlatUnionValue(T, alloc, req)) |value| {
-                @field(ctx, query_params) = value;
+        /// Resolves a tagged union `T` from flat query keys.
+        ///
+        /// A variant matches when all of its required keys are present,
+        /// and the most specific match wins.
+        /// Among matching variants, we pick the one requiring the most keys.
+        /// Optional keys never affect selection.
+        ///
+        /// This mirrors the generated `XOR` types:
+        /// a variant requiring `{start_date, end_date}` is chosen over one requiring only `{start_date}`
+        /// when both keys are present,
+        /// while `start_date` alone selects the latter.
+        ///
+        /// Variants with equal required key sets are rejected at compile time,
+        /// so they can always be told apart by their required keys.
+        ///
+        /// A runtime tie is still possible
+        /// when a request supplies the keys of two different same-count variants at once
+        /// (e.g. `{x}` and `{y}` both present),
+        /// which results in a 400 error.
+        ///
+        /// A single all-optional variant (zero required keys) acts as the fallback,
+        /// used when no other variant matches, including an empty query.
+        /// At most one fallback may exist (enforced at compile time).
+        ///
+        /// Returns null if an error response was sent.
+        fn parseFlatUnionValue(comptime T: type, alloc: Allocator, req: Request) !?Parsed(T) {
+            const fields = @typeInfo(T).@"union".fields;
+
+            var present_keys: std.ArrayList([]const u8) = .empty;
+            var it = req.getParamSlices();
+            while (it.next()) |pair| try present_keys.append(alloc, pair.name);
+
+            switch (selectVariant(T, present_keys.items)) {
+                .selected => |selected_index| {
+                    inline for (fields, 0..) |variant, i| {
+                        if (i == selected_index) {
+                            return try buildVariant(T, variant, alloc, req);
+                        }
+                    }
+                    // Shouldn't be possible, would be a logic error
+                    return error.Unreachable;
+                },
+                .ambiguous => {
+                    try req.respondWithError(
+                        StatusCode.bad_request,
+                        "Query parameters match more than one variant",
+                    );
+                    return null;
+                },
+                .none => {
+                    try req.respondWithError(
+                        StatusCode.bad_request,
+                        "No matching query parameters were provided",
+                    );
+                    return null;
+                },
             }
+        }
+
+        /// Returns the number of key/value pairs in the request's query string.
+        fn getQueryKeyCount(req: Request) usize {
+            var count: usize = 0;
+            var it = req.getParamSlices();
+            while (it.next()) |_| count += 1;
+            return count;
         }
 
         fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
@@ -337,7 +565,14 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             // with the active variant inferred from which keys are present.
             // `Optional` is also a union, so we have to exclude it.
             if (comptime @typeInfo(QueryType) == .@"union" and !isOptional(QueryType)) {
-                try parseUnionQueryParams(QueryType, ctx.ctx, ctx.alloc, ctx.req);
+                const parsed = (try parseFlatUnionValue(QueryType, ctx.alloc, ctx.req)) orelse return;
+                if (getQueryKeyCount(ctx.req) > parsed.consumed) {
+                    return try ctx.req.respondWithError(
+                        StatusCode.bad_request,
+                        "Unexpected query parameters were provided",
+                    );
+                }
+                @field(ctx.ctx, query_params) = parsed.value;
                 return;
             }
 
@@ -360,12 +595,171 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 );
             }
 
-            const value = (try parseFlatStruct(QueryType, ctx.alloc, ctx.req)) orelse return;
-            @field(ctx.ctx, query_params) = value;
+            const parsed = (try parseFlatStruct(QueryType, ctx.alloc, ctx.req)) orelse return;
 
-            if (types.validateConstraints(QueryType, value)) |err_msg| {
+            if (types.validateConstraints(QueryType, parsed.value)) |err_msg| {
                 return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
             }
+
+            if (getQueryKeyCount(ctx.req) > parsed.consumed) {
+                return try ctx.req.respondWithError(
+                    StatusCode.bad_request,
+                    "Unexpected query parameters were provided",
+                );
+            }
+
+            @field(ctx.ctx, query_params) = parsed.value;
         }
     }.parseQueryParams;
+}
+
+// selectVariant tests
+
+const Basic = struct {
+    start_date: []const u8,
+};
+
+const Detailed = struct {
+    start_date: []const u8,
+    end_date: []const u8,
+};
+
+const RangeUnion = union(enum) {
+    basic: Basic,
+    detailed: Detailed,
+    all: struct {
+        page: ?u32 = null,
+    },
+};
+
+const CustomParam = struct {
+    n: u32,
+    pub fn paramParse(_: []const u8) ?@This() {
+        return null;
+    }
+};
+
+test "getVariantRequiredKeyCount: scores by required key count" {
+    const fields = @typeInfo(RangeUnion).@"union".fields;
+    // basic
+    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[0]));
+    // detailed
+    try std.testing.expectEqual(2, getVariantRequiredKeyCount(fields[1]));
+    // fallback (all optional leaves = score of 0)
+    try std.testing.expectEqual(0, getVariantRequiredKeyCount(fields[2]));
+}
+
+test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants score 1" {
+    const U = union(enum) {
+        nested: struct {
+            range: struct {
+                start: []const u8,
+                end: []const u8,
+            },
+            opt: ?u32 = null,
+        },
+        custom: CustomParam,
+        flag,
+    };
+
+    const fields = @typeInfo(U).@"union".fields;
+    // Nested flattens to { start, end }, and `opt` is optional and excluded
+    try std.testing.expectEqual(2, getVariantRequiredKeyCount(fields[0]));
+    // Structs using `paramParse` resolve to a single key
+    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[1]));
+    // void variant is keyed by its name
+    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[2]));
+}
+
+test "selectVariant: single required key selects Basic variant" {
+    const choice = selectVariant(RangeUnion, &.{"start_date"});
+    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expectEqual(0, choice.selected);
+}
+
+test "selectVariant: most specific match wins (Detailed over Basic)" {
+    const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" });
+    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expectEqual(1, choice.selected);
+}
+
+test "selectVariant: empty query selects the all optional fallback" {
+    const choice = selectVariant(RangeUnion, &.{});
+    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expectEqual(2, choice.selected);
+}
+
+test "selectVariant: fallback only keys select the all optional fallback" {
+    const choice = selectVariant(RangeUnion, &.{"page"});
+    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expectEqual(2, choice.selected);
+}
+
+test "selectVariant: no specific match and no fallback -> none" {
+    // Neither variant is all-optional, so an unmatched query selects `.none`
+    const U = union(enum) {
+        a: struct { x: []const u8 },
+        b: struct { y: []const u8 },
+    };
+    try std.testing.expect(selectVariant(U, &.{"z"}) == .none);
+}
+
+test "selectVariant: different same-count variants are ambiguous" {
+    const Xor = union(enum) {
+        a: struct { x: []const u8 },
+        b: struct { y: []const u8 },
+    };
+    try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }) == .ambiguous);
+
+    const a = selectVariant(Xor, &.{"x"});
+    try std.testing.expect(a == .selected and a.selected == 0);
+
+    const b = selectVariant(Xor, &.{"y"});
+    try std.testing.expect(b == .selected and b.selected == 1);
+}
+
+test "selectVariant: nested struct needs all its required leaf keys" {
+    const U = union(enum) {
+        nested: struct {
+            range: struct {
+                start: []const u8,
+                end: []const u8,
+            },
+        },
+        other: struct {
+            z: []const u8,
+        },
+    };
+
+    // Only one nested leaf present -> nested does not match
+    try std.testing.expect(selectVariant(U, &.{"start"}) == .none);
+
+    // Both nested leaves present -> nested selected
+    const both = selectVariant(U, &.{ "start", "end" });
+    try std.testing.expect(both == .selected and both.selected == 0);
+}
+
+test "selectVariant: name keyed variants match on their variant name" {
+    const U = union(enum) {
+        custom: CustomParam,
+        flag,
+        other: struct {
+            z: []const u8,
+        },
+    };
+
+    {
+        const choice = selectVariant(U, &.{"custom"});
+        try std.testing.expect(choice == .selected and choice.selected == 0);
+    }
+
+    {
+        const choice = selectVariant(U, &.{"flag"});
+        try std.testing.expect(choice == .selected and choice.selected == 1);
+    }
+
+    {
+        const choice = selectVariant(U, &.{"z"});
+        try std.testing.expect(choice == .selected and choice.selected == 2);
+    }
 }
