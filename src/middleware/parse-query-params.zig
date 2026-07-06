@@ -190,12 +190,9 @@ fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoi
 pub fn ParseQueryResult(comptime ReturnType: type) type {
     return union(enum) {
         success: ReturnType,
-        fail: struct {
-            status: zap.StatusCode,
-            message: []const u8,
-        },
+        fail: []const u8,
 
-        pub fn assert(self: *const @This()) !ReturnType {
+        pub fn assert(self: @This()) !ReturnType {
             if (self != .success) return error.AssertFail;
             return self.success;
         }
@@ -678,7 +675,7 @@ const RangeUnion = union(enum) {
 
 const CustomParam = struct {
     n: u32,
-    pub fn paramParse(_: []const u8) ?@This() {
+    pub fn paramParse(_: Allocator, _: []const u8) !@This() {
         return null;
     }
 };
@@ -808,45 +805,88 @@ test "selectVariant: name keyed variants match on their variant name" {
     }
 }
 
-/// This is a "scalar" union type (`id` doesn't get flattened)
-const IdOrAuto = union(enum) {
-    id: i32,
-    auto,
-};
+test "scalar union type" {
+    // Scalar types (structs and unions) should not be flattened
+    // because they can be constructed from a single query parameter value
 
-test "parseQuery: IdOrAuto" {
+    // If all the variant types of a union are scalars, then the union itself is scalar
+    const IdOrAuto = union(enum) {
+        id: i32,
+        auto,
+    };
+
     const QP = struct {
         site: Optional(IdOrAuto) = .not_provided,
         company: Optional(IdOrAuto) = .not_provided,
     };
 
     {
-        const result = try parseQuery(QP, std.testing.allocator, "site=auto").assert();
-        try std.testing.expect(result == .site and result.site.value == .auto);
+        const result = try parseQuery(QP, std.testing.allocator, "").assert();
+        try std.testing.expect(result.site == .not_provided and result.company == .not_provided);
     }
-
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "site=auto").assert();
+        try std.testing.expect(result.site.value == .auto);
+        try std.testing.expect(result.company == .not_provided);
+    }
     {
         const result = try parseQuery(QP, std.testing.allocator, "site=123").assert();
-        try std.testing.expect(result == .site and result.site.value == .id and result.site.value.id == 123);
+        try std.testing.expect(result.site.value == .id and result.site.value.id == 123);
+        try std.testing.expect(result.company == .not_provided);
     }
-
     {
         const result = try parseQuery(QP, std.testing.allocator, "company=auto").assert();
-        try std.testing.expect(result == .company and result.company.value == .auto);
+        try std.testing.expect(result.site == .not_provided);
+        try std.testing.expect(result.company.value == .auto);
     }
-
     {
         const result = try parseQuery(QP, std.testing.allocator, "company=123").assert();
-        try std.testing.expect(result == .company and result.company.value == .id and result.company.value.id == 123);
+        try std.testing.expect(result.site == .not_provided);
+        try std.testing.expect(result.company.value == .id and result.company.value.id == 123);
     }
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "site=123&company=auto").assert();
+        try std.testing.expect(result.site.value == .id and result.site.value.id == 123 and result.company.value == .auto);
+    }
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "site=auto&company=auto").assert();
+        try std.testing.expect(result.site.value == .auto and result.company.value == .auto);
+    }
+    {
+        const result = parseQuery(QP, std.testing.allocator, "id=123"); // unknown parameter named 'id'
+        try std.testing.expect(result == .fail);
+    }
+    {
+        const result = parseQuery(QP, std.testing.allocator, "auto");
+        try std.testing.expect(result == .fail);
+    }
+}
+
+test "scalar struct type" {
+    const DateStr = struct {
+        year: i32,
+        month: i32,
+        day: i32,
+
+        pub fn paramParse(_: Allocator, _: []const u8) !@This() {
+            return .{ .year = 2026, .month = 7, .day = 6 };
+        }
+    };
+
+    const QP = struct {
+        date: DateStr,
+    };
 
     {
-        const result = try parseQuery(QP, std.testing.allocator, "company=auto").assert();
-        try std.testing.expect(result == .company and result.company.value == .auto);
+        const result = try parseQuery(QP, std.testing.allocator, "date=2026-07-06").assert();
+        try std.testing.expect(result.date.year == 2026 and result.date.month == 7 and result.date.day == 6);
     }
-
     {
-        const result = try parseQuery(QP, std.testing.allocator, "company=123").assert();
-        try std.testing.expect(result == .company and result.company.value == .id and result.company.value.id == 123);
+        const result = parseQuery(QP, std.testing.allocator, "year=2026&month=7&day=6");
+        try std.testing.expect(result == .fail);
+    }
+    {
+        const result = parseQuery(QP, std.testing.allocator, "day=2026");
+        try std.testing.expect(result == .fail);
     }
 }
