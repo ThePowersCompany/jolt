@@ -1,6 +1,5 @@
 const std = @import("std");
 const comptimePrint = std.fmt.comptimePrint;
-const json = std.json;
 const Allocator = std.mem.Allocator;
 
 const zap = @import("../zap/zap.zig");
