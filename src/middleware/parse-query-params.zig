@@ -200,6 +200,15 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
         );
     }
 
+    if (comptime isOptional(@FieldType(Context, query_params))) {
+        @compileError(
+            comptimePrint(
+                "{s} must not be optional.",
+                .{query_params},
+            ),
+        );
+    }
+
     return struct {
         fn sendInvalidParamTypeResponse(
             alloc: Allocator,
@@ -373,16 +382,16 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             return false;
         }
 
-        /// A successfully parsed value together with the number of query keys it consumed.
+        /// A successfully parsed value together with the query keys it consumed.
         fn Parsed(comptime T: type) type {
-            return struct { value: T, consumed: usize };
+            return struct { value: T, consumed: std.ArrayList([]const u8) };
         }
 
         /// Creates a struct from the query's key/value pairs.
         /// Returns null if an error response was sent.
         fn parseFlatStruct(comptime T: type, alloc: Allocator, req: Request) !?Parsed(T) {
             var result: T = undefined;
-            var consumed: usize = 0;
+            var consumed: std.ArrayList([]const u8) = .empty;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 const is_optional = comptime isOptional(field.type);
                 const FieldType = if (is_optional) field.type.childType() else field.type;
@@ -391,12 +400,12 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
                     const u = (try parseFlatUnionValue(FieldType, alloc, req)) orelse return null;
                     @field(result, field.name) = u.value;
-                    consumed += u.consumed;
+                    try consumed.appendSlice(alloc, u.consumed.items);
                 } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
                     if (try anyLeafPresent(FieldType, alloc, req)) {
                         const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
                         @field(result, field.name) = if (is_optional) .to(s.value) else s.value;
-                        consumed += s.consumed;
+                        try consumed.appendSlice(alloc, s.consumed.items);
                     } else if (is_optional) {
                         @field(result, field.name) = .not_provided;
                     } else if (field.defaultValue()) |v| {
@@ -411,11 +420,11 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                         // it succeeds and we assign that all-optional value here.
                         const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
                         @field(result, field.name) = s.value;
-                        consumed += s.consumed;
+                        try consumed.appendSlice(alloc, s.consumed.items);
                     }
                 } else {
                     if (try req.getParamDecoded(alloc, field.name)) |param| {
-                        consumed += 1;
+                        try consumed.append(alloc, field.name);
                         switch (_handleQueryParam(FieldType, alloc, param.items)) {
                             .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
                             .not_provided => {
@@ -461,10 +470,13 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             req: Request,
         ) !?Parsed(T) {
             const V = variant.type;
+            var consumed: std.ArrayList([]const u8) = .empty;
+
             if (V == void) {
+                try consumed.append(alloc, variant.name);
                 return .{
                     .value = @unionInit(T, variant.name, {}),
-                    .consumed = 1,
+                    .consumed = consumed,
                 };
             } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
                 const s = try parseFlatStruct(V, alloc, req) orelse return null;
@@ -479,9 +491,12 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             } else {
                 const param = try req.getParamDecoded(alloc, variant.name) orelse return error.Unreachable;
                 switch (_handleQueryParam(V, alloc, param.items)) {
-                    .value => |v| return .{
-                        .value = @unionInit(T, variant.name, v),
-                        .consumed = 1,
+                    .value => |v| {
+                        try consumed.append(alloc, variant.name);
+                        return .{
+                            .value = @unionInit(T, variant.name, v),
+                            .consumed = consumed,
+                        };
                     },
                     .not_provided => {
                         try sendInvalidParamTypeResponse(alloc, req, V, variant.name);
@@ -550,12 +565,30 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             }
         }
 
-        /// Returns the number of key/value pairs in the request's query string.
-        fn getQueryKeyCount(req: Request) usize {
-            var count: usize = 0;
+        /// Sends a 400 error if there are any unexpected query params.
+        /// Returns true if an error response was sent.
+        fn rejectUnexpectedParams(alloc: Allocator, req: Request, consumed: []const []const u8) !bool {
+            var unexpected: std.ArrayList([]const u8) = .empty;
+
+            // Find any supplied query_params that aren't in `consumed`.
             var it = req.getParamSlices();
-            while (it.next()) |_| count += 1;
-            return count;
+            while (it.next()) |param| {
+                if (!keysContain(consumed, param.name)) {
+                    try unexpected.append(alloc, param.name);
+                }
+            }
+            if (unexpected.items.len == 0) return false;
+
+            var msg: std.ArrayList(u8) = .empty;
+            try msg.appendSlice(alloc, "Unexpected query parameters were provided: ");
+
+            for (unexpected.items, 0..) |name, i| {
+                if (i != 0) try msg.appendSlice(alloc, ", ");
+                try msg.appendSlice(alloc, name);
+            }
+
+            try req.respondWithError(StatusCode.bad_request, msg.items);
+            return true;
         }
 
         fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
@@ -563,15 +596,9 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
 
             // `query_params` as a tagged union is parsed from a flat key/value set,
             // with the active variant inferred from which keys are present.
-            // `Optional` is also a union, so we have to exclude it.
-            if (comptime @typeInfo(QueryType) == .@"union" and !isOptional(QueryType)) {
+            if (comptime @typeInfo(QueryType) == .@"union") {
                 const parsed = (try parseFlatUnionValue(QueryType, ctx.alloc, ctx.req)) orelse return;
-                if (getQueryKeyCount(ctx.req) > parsed.consumed) {
-                    return try ctx.req.respondWithError(
-                        StatusCode.bad_request,
-                        "Unexpected query parameters were provided",
-                    );
-                }
+                if (try rejectUnexpectedParams(ctx.alloc, ctx.req, parsed.consumed.items)) return;
                 @field(ctx.ctx, query_params) = parsed.value;
                 return;
             }
@@ -601,12 +628,7 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
                 return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
             }
 
-            if (getQueryKeyCount(ctx.req) > parsed.consumed) {
-                return try ctx.req.respondWithError(
-                    StatusCode.bad_request,
-                    "Unexpected query parameters were provided",
-                );
-            }
+            if (try rejectUnexpectedParams(ctx.alloc, ctx.req, parsed.consumed.items)) return;
 
             @field(ctx.ctx, query_params) = parsed.value;
         }
