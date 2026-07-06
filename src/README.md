@@ -2,7 +2,7 @@
 
 Source code goes here, obviously.
 
-## Query Parameters
+## Query Parameter Parsing Algorithm
 
 Jolt includes powerful query parameter parsing middleware out of the box.
 This section documents the parsing behavior and provides useful samples.
@@ -77,8 +77,8 @@ const IdOrAuto = union(enum) {
 };
 
 const Number = union(enum) {
-    small: i32,
-    big: i64,
+    small: i32, // first, attempt to parse into small integer type
+    big: i64, // then try to parse into larger integer type
 };
 
 const DateStr = struct {
@@ -101,10 +101,10 @@ const QP = struct {
 It's invalid to set a scalar value directly as the query params type:
 
 ```zig
-const QP = IdOrAuto;
+const QP = IdOrAuto; // comptime error because `auto`-variant is unrepresentable
 ```
 
-However, if all of the variants of the scalar type are non-void, then the union can be set directly as the query params. These types are called "weak scalars". Types with a `void` variant (e.g. `IdOrAuto`) are called "strong scalars".
+However, if all of the variants of the scalar type are non-`void`, then the union can be set directly as the query params. These types are called "weak scalars". Types with a `void` variant (e.g. `IdOrAuto`) are called "strong scalars".
 
 ```zig
 const QP = union(enum) {
