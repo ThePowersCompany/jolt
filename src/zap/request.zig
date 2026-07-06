@@ -735,13 +735,12 @@ pub fn getParamStr(
 }
 
 /// Returns a URL decoded query param as a string.
-/// Does not require parseQuery() or anything to be called in advance.
-pub fn getParamDecoded(
-    self: *const Self,
+pub fn getParamDecodedFromQuery(
     alloc: std.mem.Allocator,
+    query: []const u8,
     name: []const u8,
 ) !?std.ArrayList(u8) {
-    const s = self.getParamSlice(name) orelse return null;
+    const s = getParamSliceFromQuery(query, name) orelse return null;
 
     var dest: std.ArrayList(u8) = try .initCapacity(alloc, s.len);
     errdefer dest.deinit(alloc);
@@ -755,26 +754,39 @@ pub fn getParamDecoded(
     return dest;
 }
 
-/// similar to getParamStr, except it will return the part of the querystring
-/// after the equals sign, non-decoded, and always as character slice.
-/// - no allocation!
-/// - does not require parseQuery() or anything to be called in advance
-pub fn getParamSlice(self: *const Self, name: []const u8) ?[]const u8 {
-    if (self.query) |query| {
-        var amp_it = std.mem.tokenizeScalar(u8, query, '&');
-        while (amp_it.next()) |maybe_pair| {
-            if (std.mem.indexOfScalar(u8, maybe_pair, '=')) |pos_of_eq| {
-                const pname = maybe_pair[0..pos_of_eq];
-                if (std.mem.eql(u8, pname, name)) {
-                    if (maybe_pair.len > pos_of_eq) {
-                        const pval = maybe_pair[pos_of_eq + 1 ..];
-                        return pval;
-                    }
+/// Non-decoded value of a query param, parsed directly from a raw query string.
+pub fn getParamSliceFromQuery(query: []const u8, name: []const u8) ?[]const u8 {
+    var amp_it = std.mem.tokenizeScalar(u8, query, '&');
+    while (amp_it.next()) |maybe_pair| {
+        if (std.mem.indexOfScalar(u8, maybe_pair, '=')) |pos_of_eq| {
+            const pname = maybe_pair[0..pos_of_eq];
+            if (std.mem.eql(u8, pname, name)) {
+                if (maybe_pair.len > pos_of_eq) {
+                    const pval = maybe_pair[pos_of_eq + 1 ..];
+                    return pval;
                 }
             }
         }
     }
     return null;
+}
+
+/// Returns a URL decoded query param as a string.
+/// Does not require parseQuery() or anything to be called in advance.
+pub fn getParamDecoded(
+    self: *const Self,
+    alloc: std.mem.Allocator,
+    name: []const u8,
+) !?std.ArrayList(u8) {
+    return getParamDecodedFromQuery(alloc, self.query orelse "", name);
+}
+
+/// similar to getParamStr, except it will return the part of the querystring
+/// after the equals sign, non-decoded, and always as character slice.
+/// - no allocation!
+/// - does not require parseQuery() or anything to be called in advance
+pub fn getParamSlice(self: *const Self, name: []const u8) ?[]const u8 {
+    return getParamSliceFromQuery(self.query orelse "", name);
 }
 
 pub const ParameterSlices = struct { name: []const u8, value: []const u8 };
