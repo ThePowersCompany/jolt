@@ -174,7 +174,7 @@ const QP = union(enum) {
 };
 ```
 
-If only `a` is provided at runtime, both `foo` and `bar` could successfully parse. An argument could be made that `foo` parses more "completely", but we figured this could lead to bugs if allowed.
+If only `a` is provided at runtime, both `foo` and `bar` would successfully parse. An argument could be made that `foo` parses more "completely", but we figured this could lead to bugs if allowed.
 
 If `bar` is changed to require `b`, then the ambiguity is removed:
 
