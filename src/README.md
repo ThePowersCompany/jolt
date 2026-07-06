@@ -122,7 +122,75 @@ const QP = struct {
 };
 ```
 
-### Sample 4: Complex Nested Structs and Unions
+### Sample 5: Require Together
+
+Structs can be used to require multiple query parameters to be provided together, or none at all:
+
+```zig
+const QP = struct {
+    date_range: ?struct {
+        start_date: []const u8,
+        end_date: []const u8,
+    } = null,
+};
+```
+
+If only `start_date` is provided, or only `end_date`, the middleware will produce a query param validation error.
+
+### Sample 6: Error - Duplicate Fields
+
+After flattening the structure, there may be duplicate fields:
+
+```zig
+const QP = struct {
+    foo: struct {
+        a: i32,
+    },
+    bar: struct {
+        a: i32,
+    },
+};
+```
+
+It doesn't matter if the fields are different types or different optionality.
+
+Unions can disrupt this requirement because only one variant can be selected at once,
+but **ONLY** if the variant can be unambiguously parsed.
+
+### Sample 6: Error - Ambiguous Variants
+
+If two or more union variants have the same required fields,
+then a compile error will be raised because it won't be possible to unambiguously select a variant at runtime.
+
+```zig
+const QP = union(enum) {
+    foo: struct {
+        a: []const u8,
+    },
+    bar: struct {
+        a: []const u8,
+        b: ?[]const u8 = null,
+    },
+};
+```
+
+If only `a` is provided at runtime, both `foo` and `bar` could successfully parse. An argument could be made that `foo` parses more "completely", but we figured this could lead to bugs if allowed.
+
+If `bar` is changed to require `b`, then the ambiguity is removed:
+
+```zig
+const QP = union(enum) {
+    foo: struct {
+        a: []const u8,
+    },
+    bar: struct {
+        a: []const u8,
+        b: []const u8,
+    },
+};
+```
+
+### Sample 7: Complex Nested Structs and Unions
 
 The middleware can handle heavily nested combinations of unions and structs - the flattening logic will be applied recursively.
 
