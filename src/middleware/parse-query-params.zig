@@ -187,6 +187,28 @@ fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoi
     return choice;
 }
 
+pub fn ParseQueryResult(comptime ReturnType: type) type {
+    return union(enum) {
+        success: ReturnType,
+        fail: struct {
+            status: zap.StatusCode,
+            message: []const u8,
+        },
+
+        pub fn assert(self: *const @This()) !ReturnType {
+            if (self != .success) return error.AssertFail;
+            return self.success;
+        }
+    };
+}
+
+/// Entry point for all query param parsing
+fn parseQuery(comptime QP: type, alloc: Allocator, query: []const u8) ParseQueryResult(QP) {
+    _ = alloc;
+    _ = query;
+    unreachable;
+}
+
 /// Parses the query params of the request and attaches it to the given Context.
 /// Context must have a member named after each query param,
 /// which resolves to the type meant to be parsed into an object.
@@ -783,5 +805,48 @@ test "selectVariant: name keyed variants match on their variant name" {
     {
         const choice = selectVariant(U, &.{"z"});
         try std.testing.expect(choice == .selected and choice.selected == 2);
+    }
+}
+
+/// This is a "scalar" union type (`id` doesn't get flattened)
+const IdOrAuto = union(enum) {
+    id: i32,
+    auto,
+};
+
+test "parseQuery: IdOrAuto" {
+    const QP = struct {
+        site: Optional(IdOrAuto) = .not_provided,
+        company: Optional(IdOrAuto) = .not_provided,
+    };
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "site=auto").assert();
+        try std.testing.expect(result == .site and result.site.value == .auto);
+    }
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "site=123").assert();
+        try std.testing.expect(result == .site and result.site.value == .id and result.site.value.id == 123);
+    }
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "company=auto").assert();
+        try std.testing.expect(result == .company and result.company.value == .auto);
+    }
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "company=123").assert();
+        try std.testing.expect(result == .company and result.company.value == .id and result.company.value.id == 123);
+    }
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "company=auto").assert();
+        try std.testing.expect(result == .company and result.company.value == .auto);
+    }
+
+    {
+        const result = try parseQuery(QP, std.testing.allocator, "company=123").assert();
+        try std.testing.expect(result == .company and result.company.value == .id and result.company.value.id == 123);
     }
 }

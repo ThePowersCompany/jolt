@@ -16,6 +16,9 @@ const CreateUserRequest = struct {
 
 const PostContext = struct {
     body: CreateUserRequest,
+    query_params: struct {
+        a: i32,
+    },
 };
 
 pub fn post(ctx: *PostContext, alloc: Allocator) !Response(void) {
