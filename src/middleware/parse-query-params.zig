@@ -813,10 +813,12 @@ test "selectVariant: different same-count variants are ambiguous" {
     try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }) == .ambiguous);
 
     const a = selectVariant(Xor, &.{"x"});
-    try std.testing.expect(a == .selected and a.selected == 0);
+    try std.testing.expect(a == .selected);
+    try std.testing.expectEqual(0, a.selected);
 
     const b = selectVariant(Xor, &.{"y"});
-    try std.testing.expect(b == .selected and b.selected == 1);
+    try std.testing.expect(b == .selected);
+    try std.testing.expectEqual(1, b.selected);
 }
 
 test "selectVariant: nested struct needs all its required leaf keys" {
@@ -837,7 +839,8 @@ test "selectVariant: nested struct needs all its required leaf keys" {
 
     // Both nested leaves present -> nested selected
     const both = selectVariant(U, &.{ "start", "end" });
-    try std.testing.expect(both == .selected and both.selected == 0);
+    try std.testing.expect(both == .selected);
+    try std.testing.expectEqual(0, both.selected);
 }
 
 test "selectVariant: name keyed variants match on their variant name" {
@@ -851,17 +854,20 @@ test "selectVariant: name keyed variants match on their variant name" {
 
     {
         const choice = selectVariant(U, &.{"custom"});
-        try std.testing.expect(choice == .selected and choice.selected == 0);
+        try std.testing.expect(choice == .selected);
+        try std.testing.expectEqual(0, choice.selected);
     }
 
     {
         const choice = selectVariant(U, &.{"flag"});
-        try std.testing.expect(choice == .selected and choice.selected == 1);
+        try std.testing.expect(choice == .selected);
+        try std.testing.expectEqual(1, choice.selected);
     }
 
     {
         const choice = selectVariant(U, &.{"z"});
-        try std.testing.expect(choice == .selected and choice.selected == 2);
+        try std.testing.expect(choice == .selected);
+        try std.testing.expectEqual(2, choice.selected);
     }
 }
 
@@ -884,7 +890,8 @@ test "scalar union type" {
         const parsed = try parseQuery(QP, std.testing.allocator, "");
         defer parsed.deinit();
         const result = try parsed.assert();
-        try std.testing.expect(result.site == .not_provided and result.company == .not_provided);
+        try std.testing.expect(result.site == .not_provided);
+        try std.testing.expect(result.company == .not_provided);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "site=auto");
@@ -897,7 +904,8 @@ test "scalar union type" {
         const parsed = try parseQuery(QP, std.testing.allocator, "site=123");
         defer parsed.deinit();
         const result = try parsed.assert();
-        try std.testing.expect(result.site.value == .id and result.site.value.id == 123);
+        try std.testing.expect(result.site.value == .id);
+        try std.testing.expectEqual(123, result.site.value.id);
         try std.testing.expect(result.company == .not_provided);
     }
     {
@@ -912,19 +920,23 @@ test "scalar union type" {
         defer parsed.deinit();
         const result = try parsed.assert();
         try std.testing.expect(result.site == .not_provided);
-        try std.testing.expect(result.company.value == .id and result.company.value.id == 123);
+        try std.testing.expect(result.company.value == .id);
+        try std.testing.expectEqual(123, result.company.value.id);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "site=123&company=auto");
         defer parsed.deinit();
         const result = try parsed.assert();
-        try std.testing.expect(result.site.value == .id and result.site.value.id == 123 and result.company.value == .auto);
+        try std.testing.expect(result.site.value == .id);
+        try std.testing.expectEqual(123, result.site.value.id);
+        try std.testing.expect(result.company.value == .auto);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "site=auto&company=auto");
         defer parsed.deinit();
         const result = try parsed.assert();
-        try std.testing.expect(result.site.value == .auto and result.company.value == .auto);
+        try std.testing.expect(result.site.value == .auto);
+        try std.testing.expect(result.company.value == .auto);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "id=123"); // unknown parameter named 'id'
@@ -957,7 +969,9 @@ test "scalar struct type" {
         const parsed = try parseQuery(QP, std.testing.allocator, "date=2026-07-06");
         defer parsed.deinit();
         const result = try parsed.assert();
-        try std.testing.expect(result.date.year == 2026 and result.date.month == 7 and result.date.day == 6);
+        try std.testing.expectEqual(2026, result.date.year);
+        try std.testing.expectEqual(7, result.date.month);
+        try std.testing.expectEqual(6, result.date.day);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "year=2026&month=7&day=6");
