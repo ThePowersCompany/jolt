@@ -77,7 +77,7 @@ fn isNotRequired(comptime field: Type.StructField) bool {
 /// Number of required leaf keys of the struct, recursing into nested plain
 /// structs (which are flattened into their leaf keys).
 fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
-    comptime {
+    return comptime blk: {
         var count: usize = 0;
         for (S.fields) |field| {
             if (isNotRequired(field)) continue;
@@ -89,8 +89,8 @@ fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
                 count += 1;
             }
         }
-        return count;
-    }
+        break :blk count;
+    };
 }
 
 fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
@@ -198,16 +198,492 @@ pub fn ParseQueryResult(comptime ReturnType: type) type {
     };
 }
 
-/// Entry point for all query param parsing
-fn parseQuery(comptime QP: type, alloc: Allocator, query: []const u8) ParseQueryResult(QP) {
-    _ = alloc;
-    _ = query;
-    unreachable;
+/// A parse result that owns all of its allocations via an internal arena.
+pub fn ParsedQuery(comptime ReturnType: type) type {
+    return struct {
+        const Self = @This();
+
+        arena: *std.heap.ArenaAllocator,
+        result: ParseQueryResult(ReturnType),
+
+        pub fn deinit(self: Self) void {
+            const alloc = self.arena.child_allocator;
+            self.arena.deinit();
+            alloc.destroy(self.arena);
+        }
+
+        pub fn assert(self: Self) !ReturnType {
+            return self.result.assert();
+        }
+    };
+}
+
+const ParseCtx = struct {
+    pub const Self = @This();
+
+    alloc: Allocator,
+    query: []const u8,
+    /// The recorded failure message.
+    /// Lives on `alloc`, so it needs no separate cleanup.
+    failure: ?[]const u8 = null,
+    /// The query keys consumed while parsing.
+    consumed: std.ArrayList([]const u8) = .empty,
+
+    /// Records a failure message.
+    /// The message must live at least as long as the parse result,
+    /// so pass a string literal or a string allocated with `alloc`.
+    /// The caller should return null after calling this function.
+    fn fail(self: *Self, message: []const u8) void {
+        if (self.failure == null) self.failure = message;
+    }
+
+    /// Records `name` as a consumed query key.
+    fn markConsumed(self: *Self, name: []const u8) !void {
+        try self.consumed.append(self.alloc, name);
+    }
+
+    fn getParamDecoded(self: *const Self, name: []const u8) !?std.ArrayList(u8) {
+        return Request.getParamDecodedFromQuery(self.alloc, self.query, name);
+    }
+
+    fn paramSlices(self: *const Self) Request.ParamSliceIterator {
+        return Request.ParamSliceIterator.init(self.query);
+    }
+};
+
+/// Records a 400 for a query parameter whose value could not be parsed to `ExpectedType`.
+fn recordInvalidParamType(ctx: *ParseCtx, comptime ExpectedType: type, field_name: []const u8) !void {
+    ctx.fail(try allocPrint(
+        ctx.alloc,
+        "Incorrect query parameter type for {s} - Expected {any}",
+        .{ field_name, ExpectedType },
+    ));
+}
+
+/// Parses a single query value string into `FieldType`.
+/// Returns `.not_provided` when the value does not parse as that type.
+fn _handleQueryParam(comptime FieldType: type, alloc: Allocator, param: []const u8) Optional(FieldType) {
+    const info = @typeInfo(FieldType);
+    switch (info) {
+        .bool => {
+            if (std.mem.eql(u8, param, "true")) {
+                return .{ .value = true };
+            } else if (std.mem.eql(u8, param, "false")) {
+                return .{ .value = false };
+            } else {
+                return .not_provided;
+            }
+        },
+        .int => {
+            const val = parseInt(FieldType, param, 10) catch {
+                return .not_provided;
+            };
+            return .{ .value = val };
+        },
+        .float => {
+            const val = parseFloat(FieldType, param) catch {
+                return .not_provided;
+            };
+            return .{ .value = val };
+        },
+        .pointer => {
+            const ChildT = info.pointer.child;
+            if (ChildT == u8) {
+                // Strings arrive here. The value references the decoded buffer,
+                // which lives on the parse arena, so we can hand it back directly.
+                return .{ .value = param };
+            } else {
+                const value = parseArrayFromString(alloc, ChildT, param) catch {
+                    return .not_provided;
+                };
+                return .{ .value = value };
+            }
+        },
+        .@"enum" => {
+            if (std.meta.stringToEnum(FieldType, param)) |v| {
+                return .{ .value = v };
+            } else {
+                return .not_provided;
+            }
+        },
+        .@"struct", .@"union" => {
+            if (comptime hasParamParse(FieldType)) {
+                const parsed: FieldType = FieldType.paramParse(alloc, param) catch {
+                    std.log.err(
+                        "query param failed to parse as custom: {s} - {s}",
+                        .{ @typeName(FieldType), param },
+                    );
+                    return .not_provided;
+                };
+                return .{ .value = parsed };
+            }
+
+            if (info == .@"struct") {
+                @compileError("Must define paramParse for struct: " ++ @typeName(FieldType));
+            }
+
+            // Note: `untagged` union parsing
+            inline for (@typeInfo(FieldType).@"union".fields) |f| {
+                if (f.type == void) {
+                    if (std.mem.eql(u8, f.name, param)) {
+                        return .{ .value = @unionInit(FieldType, f.name, {}) };
+                    }
+                } else if (_handleQueryParam(f.type, alloc, param).get()) |v| {
+                    return .{ .value = @unionInit(FieldType, f.name, v) };
+                }
+            }
+            return .not_provided;
+        },
+        .optional => {
+            if (std.mem.eql(u8, param, "null")) {
+                return .{ .value = null };
+            } else {
+                // Optional(T) -> Optional(?T)
+                switch (_handleQueryParam(info.optional.child, alloc, param)) {
+                    .value => |v| {
+                        // Implicit conversion: ?T -> T
+                        return .{ .value = v };
+                    },
+                    .not_provided => {
+                        return .not_provided;
+                    },
+                }
+            }
+        },
+        else => {
+            return .not_provided;
+        },
+    }
+    @compileError("unreachable");
+}
+
+fn parseArrayFromString(alloc: Allocator, comptime T: type, str: []const u8) ![]T {
+    if (str.len < 1) return error.InvalidArray;
+
+    var list: std.ArrayList(T) = .empty;
+    var it = std.mem.splitSequence(u8, str, ",");
+    while (it.next()) |val_str| {
+        var val: T = undefined;
+        switch (@typeInfo(T)) {
+            .int => {
+                val = parseInt(T, std.mem.trim(u8, val_str, " "), 10) catch return error.InvalidArray;
+            },
+            .float => {
+                val = parseFloat(T, std.mem.trim(u8, val_str, " ")) catch return error.InvalidArray;
+            },
+            .pointer => {
+                // Array of strings
+                const ChildT = @typeInfo(T).pointer.child;
+                if (ChildT != u8) @compileError("Only array of strings is supported");
+                val = val_str;
+            },
+            .@"enum" => {
+                if (std.meta.stringToEnum(T, val_str)) |v| {
+                    val = v;
+                } else {
+                    return error.InvalidEnumVariant;
+                }
+            },
+            else => @compileError(
+                std.fmt.comptimePrint("Unsupported query param array child type: {s}", .{@typeName(T)}),
+            ),
+        }
+        try list.append(alloc, val);
+    }
+    return try list.toOwnedSlice(alloc);
+}
+
+/// Returns whether any leaf key of struct `T` is present in the query.
+/// This recurses into nested plain structs, which are flattened.
+fn anyLeafPresent(comptime T: type, ctx: *ParseCtx) !bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const is_optional = comptime isOptional(field.type);
+        const F = if (is_optional) field.type.childType() else field.type;
+        if (comptime !is_optional and @typeInfo(F) == .@"union" and !hasParamParse(F)) {
+            // A lifted union is present if any of its variant keys are.
+            inline for (@typeInfo(F).@"union".fields) |variant| {
+                if (try isVariantPresent(variant, ctx)) return true;
+            }
+        } else if (comptime @typeInfo(F) == .@"struct" and !hasParamParse(F)) {
+            if (try anyLeafPresent(F, ctx)) return true;
+        } else if ((try ctx.getParamDecoded(field.name)) != null) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Creates a struct from the query's key/value pairs,
+/// recording each consumed query key on `ctx`.
+/// Returns null if a failure was recorded on `ctx`.
+fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
+    var result: T = undefined;
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const is_optional = comptime isOptional(field.type);
+        const FieldType = if (is_optional) field.type.childType() else field.type;
+        const field_info = @typeInfo(FieldType);
+
+        if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
+            const u = (try parseFlatUnionValue(FieldType, ctx)) orelse return null;
+            @field(result, field.name) = u;
+        } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
+            if (try anyLeafPresent(FieldType, ctx)) {
+                const s = (try parseFlatStruct(FieldType, ctx)) orelse return null;
+                @field(result, field.name) = if (is_optional) .to(s) else s;
+            } else if (is_optional) {
+                @field(result, field.name) = .not_provided;
+            } else if (field.defaultValue()) |v| {
+                @field(result, field.name) = v;
+            } else {
+                // Required nested struct with no keys present.
+                //
+                // If it has a required leaf,
+                // parseFlatStruct records the specific "Missing query parameter" failure and returns null.
+                //
+                // If it's entirely optional/has defaults,
+                // it succeeds and we assign that all-optional value here.
+                const s = (try parseFlatStruct(FieldType, ctx)) orelse return null;
+                @field(result, field.name) = s;
+            }
+        } else {
+            if (try ctx.getParamDecoded(field.name)) |param| {
+                try ctx.markConsumed(field.name);
+                switch (_handleQueryParam(FieldType, ctx.alloc, param.items)) {
+                    .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
+                    .not_provided => {
+                        try recordInvalidParamType(ctx, FieldType, field.name);
+                        return null;
+                    },
+                }
+            } else if (field.defaultValue()) |v| {
+                @field(result, field.name) = v;
+            } else if (is_optional) {
+                @field(result, field.name) = .not_provided;
+            } else if (field_info == .optional) {
+                @field(result, field.name) = null;
+            } else {
+                ctx.fail(
+                    try allocPrint(ctx.alloc, "Missing query parameter: {s}", .{field.name}),
+                );
+                return null;
+            }
+        }
+    }
+    return result;
+}
+
+/// Returns whether the keys identifying `variant` are present.
+/// A plain struct variant matches on any of its flattened leaf keys.
+/// Any other variant matches on its variant name used as a key.
+fn isVariantPresent(comptime variant: Type.UnionField, ctx: *ParseCtx) !bool {
+    const T = variant.type;
+    if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
+        return try anyLeafPresent(T, ctx);
+    }
+    return (try ctx.getParamDecoded(variant.name)) != null;
+}
+
+/// Builds the `variant` of union `T` from the flat query keys,
+/// recording each consumed query key on `ctx`.
+/// Returns null if a failure was recorded on `ctx`.
+fn buildVariant(comptime T: type, comptime variant: Type.UnionField, ctx: *ParseCtx) !?T {
+    const V = variant.type;
+
+    if (V == void) {
+        try ctx.markConsumed(variant.name);
+        return @unionInit(T, variant.name, {});
+    } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
+        const s = try parseFlatStruct(V, ctx) orelse return null;
+        if (types.validateConstraints(V, s)) |err_msg| {
+            ctx.fail(err_msg);
+            return null;
+        }
+        return @unionInit(T, variant.name, s);
+    } else {
+        const param = try ctx.getParamDecoded(variant.name) orelse return error.Unreachable;
+        switch (_handleQueryParam(V, ctx.alloc, param.items)) {
+            .value => |v| {
+                try ctx.markConsumed(variant.name);
+                return @unionInit(T, variant.name, v);
+            },
+            .not_provided => {
+                try recordInvalidParamType(ctx, V, variant.name);
+                return null;
+            },
+        }
+    }
+}
+
+/// Resolves a tagged union `T` from flat query keys.
+///
+/// A variant matches when all of its required keys are present,
+/// and the most specific match wins.
+/// Among matching variants, we pick the one requiring the most keys.
+/// Optional keys never affect selection.
+///
+/// This mirrors the generated `XOR` types:
+/// a variant requiring `{start_date, end_date}` is chosen over one requiring only `{start_date}`
+/// when both keys are present,
+/// while `start_date` alone selects the latter.
+///
+/// Variants with equal required key sets are rejected at compile time,
+/// so they can always be told apart by their required keys.
+///
+/// A runtime tie is still possible
+/// when a request supplies the keys of two different same-count variants at once
+/// (e.g. `{x}` and `{y}` both present),
+/// which results in a 400 error.
+///
+/// A single all-optional variant (zero required keys) acts as the fallback,
+/// used when no other variant matches, including an empty query.
+/// At most one fallback may exist (enforced at compile time).
+///
+/// Returns null if a failure was recorded on `ctx`.
+fn parseFlatUnionValue(comptime T: type, ctx: *ParseCtx) !?T {
+    const fields = @typeInfo(T).@"union".fields;
+
+    var present_keys: std.ArrayList([]const u8) = .empty;
+    var it = ctx.paramSlices();
+    while (it.next()) |pair| try present_keys.append(ctx.alloc, pair.name);
+
+    switch (selectVariant(T, present_keys.items)) {
+        .selected => |selected_index| {
+            inline for (fields, 0..) |variant, i| {
+                if (i == selected_index) {
+                    return try buildVariant(T, variant, ctx);
+                }
+            }
+            // Shouldn't be possible, would be a logic error
+            return error.Unreachable;
+        },
+        .ambiguous => {
+            ctx.fail("Query parameters match more than one variant");
+            return null;
+        },
+        .none => {
+            ctx.fail("No matching query parameters were provided");
+            return null;
+        },
+    }
+}
+
+/// Records a 400 if there are any unexpected query params.
+/// Returns true if a failure was recorded on `ctx`.
+fn rejectUnexpectedParams(ctx: *ParseCtx) !bool {
+    var unexpected: std.ArrayList([]const u8) = .empty;
+
+    // Find any supplied query params that aren't in `ctx.consumed`.
+    var it = std.mem.tokenizeScalar(u8, ctx.query, '&');
+    while (it.next()) |token| {
+        const name = if (std.mem.indexOfScalar(u8, token, '=')) |eq| token[0..eq] else token;
+        if (!keysContain(ctx.consumed.items, name)) {
+            try unexpected.append(ctx.alloc, name);
+        }
+    }
+    if (unexpected.items.len == 0) return false;
+
+    var msg: std.ArrayList(u8) = .empty;
+    try msg.appendSlice(ctx.alloc, "Unexpected query parameters were provided: ");
+
+    for (unexpected.items, 0..) |name, i| {
+        if (i != 0) try msg.appendSlice(ctx.alloc, ", ");
+        try msg.appendSlice(ctx.alloc, name);
+    }
+
+    ctx.fail(msg.items);
+    return true;
+}
+
+/// Whether every field of struct `QP` is optional (a custom `Optional` or has a default value),
+/// meaning an empty query is acceptable.
+fn allFieldsOptional(comptime QP: type) bool {
+    inline for (@typeInfo(QP).@"struct".fields) |field| {
+        if (!isOptional(field.type) and field.defaultValue() == null) return false;
+    }
+    return true;
+}
+
+/// Runs the full parse pipeline for `QP` against `ctx`.
+/// Returns the parsed value, or null if a failure was recorded on `ctx`.
+fn _parseQuery(comptime QP: type, ctx: *ParseCtx) !?QP {
+    // `query_params` as a tagged union is parsed from a flat key/value set,
+    // with the active variant inferred from which keys are present.
+    // The consumed query keys are stored on `ctx`,
+    // so `rejectUnexpectedParams` can see every key that was used.
+    if (comptime @typeInfo(QP) == .@"union") {
+        const value = (try parseFlatUnionValue(QP, ctx)) orelse return null;
+        if (try rejectUnexpectedParams(ctx)) return null;
+        return value;
+    }
+
+    if (comptime !allFieldsOptional(QP)) {
+        if (ctx.query.len == 0) {
+            ctx.fail("No query params were provided");
+            return null;
+        }
+    }
+
+    const value = (try parseFlatStruct(QP, ctx)) orelse return null;
+    if (types.validateConstraints(QP, value)) |err_msg| {
+        ctx.fail(err_msg);
+        return null;
+    }
+
+    if (try rejectUnexpectedParams(ctx)) return null;
+
+    return value;
+}
+
+/// Entry point for query param parsing that owns its allocations.
+/// Use `parseQueryLeaky` instead when you already have an arena
+/// whose lifetime covers the result (e.g. a per-request arena in middleware).
+///
+/// Parses the raw `query` string into `QP`.
+///
+/// All parsing allocations go on an internal arena that is returned alongside the result:
+/// call `deinit()` on the returned value to free everything at once.
+/// The parsed value/failure message are valid until then.
+///
+/// The result is `.success` with the parsed value,
+/// or `.fail` with a message describing why the query was rejected.
+///
+fn parseQuery(comptime QP: type, alloc: Allocator, query: []const u8) !ParsedQuery(QP) {
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    errdefer alloc.destroy(arena);
+    arena.* = .init(alloc);
+    errdefer arena.deinit();
+
+    const result = try parseQueryLeaky(QP, arena.allocator(), query);
+    return .{ .arena = arena, .result = result };
+}
+
+/// Same as `parseQuery`, but allocates into `alloc` and frees nothing: `alloc`
+/// owns every allocation. `alloc` should be an arena (or similar) whose lifetime
+/// covers the parsed value and any failure message. This is what the middleware
+/// uses with the per-request arena.
+fn parseQueryLeaky(comptime QP: type, alloc: Allocator, query: []const u8) !ParseQueryResult(QP) {
+    var ctx = ParseCtx{ .alloc = alloc, .query = query };
+
+    if (try _parseQuery(QP, &ctx)) |value| return .{ .success = value };
+
+    if (ctx.failure) |message| return .{ .fail = message };
+
+    // A null value should always carry a recorded failure; guard defensively.
+    return .{ .fail = "Invalid query parameters" };
 }
 
 /// Parses the query params of the request and attaches it to the given Context.
 /// Context must have a member named after each query param,
 /// which resolves to the type meant to be parsed into an object.
+///
+/// This is a thin adapter over `parseQueryLeaky`:
+/// it feeds the request's query string in,
+/// then either assigns the parsed value onto the context
+/// or translates a failure into `respondWithError`.
+///
+/// This uses the leaky variant because the per-request arena in `ctx.alloc`
+/// already owns the parsed value for the whole request.
+/// Parsing must not free the data when the middleware returns.
 pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
     if (!@hasField(Context, query_params)) {
         @compileError(
@@ -228,427 +704,12 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
     }
 
     return struct {
-        fn sendInvalidParamTypeResponse(
-            alloc: Allocator,
-            req: Request,
-            ExpectedType: type,
-            field_name: []const u8,
-        ) !void {
-            return try req.respondWithError(
-                StatusCode.bad_request,
-                try allocPrint(
-                    alloc,
-                    "Incorrect query parameter type for {s} - Expected {any}",
-                    .{ field_name, ExpectedType },
-                ),
-            );
-        }
-
-        /// Helper function for handleQueryParam.
-        /// Returns true if the middleware should exit early.
-        fn _handleQueryParam(comptime FieldType: type, alloc: Allocator, param: []const u8) Optional(FieldType) {
-            const info = @typeInfo(FieldType);
-            switch (info) {
-                .bool => {
-                    if (std.mem.eql(u8, param, "true")) {
-                        return .{ .value = true };
-                    } else if (std.mem.eql(u8, param, "false")) {
-                        return .{ .value = false };
-                    } else {
-                        return .not_provided;
-                    }
-                },
-                .int => {
-                    const val = parseInt(FieldType, param, 10) catch {
-                        return .not_provided;
-                    };
-                    return .{ .value = val };
-                },
-                .float => {
-                    const val = parseFloat(FieldType, param) catch {
-                        return .not_provided;
-                    };
-                    return .{ .value = val };
-                },
-                .pointer => {
-                    const ChildT = info.pointer.child;
-                    if (ChildT == u8) {
-                        // Strings arrive here
-                        return .{ .value = param };
-                    } else {
-                        const value = parseArrayFromString(alloc, ChildT, param) catch {
-                            return .not_provided;
-                        };
-                        return .{ .value = value };
-                    }
-                },
-                .@"enum" => {
-                    if (std.meta.stringToEnum(FieldType, param)) |v| {
-                        return .{ .value = v };
-                    } else {
-                        return .not_provided;
-                    }
-                },
-                .@"struct", .@"union" => {
-                    if (hasParamParse(FieldType)) {
-                        const parsed: FieldType = FieldType.paramParse(alloc, param) catch {
-                            std.log.err(
-                                "query param failed to parse as custom: {s} - {s}",
-                                .{ @typeName(FieldType), param },
-                            );
-                            return .not_provided;
-                        };
-                        return .{ .value = parsed };
-                    }
-
-                    if (info == .@"struct") {
-                        @compileError("Must define paramParse for struct: " ++ @typeName(FieldType));
-                    }
-
-                    // Note: `untagged` union parsing
-                    inline for (@typeInfo(FieldType).@"union".fields) |f| {
-                        if (f.type == void) {
-                            if (std.mem.eql(u8, f.name, param)) {
-                                return .{ .value = @unionInit(FieldType, f.name, {}) };
-                            }
-                        } else if (_handleQueryParam(f.type, alloc, param).get()) |v| {
-                            return .{ .value = @unionInit(FieldType, f.name, v) };
-                        }
-                    }
-                    return .not_provided;
-                },
-                .optional => {
-                    if (std.mem.eql(u8, param, "null")) {
-                        return .{ .value = null };
-                    } else {
-                        // Optional(T) -> Optional(?T)
-                        switch (_handleQueryParam(info.optional.child, alloc, param)) {
-                            .value => |v| {
-                                // Implicit conversion: ?T -> T
-                                return .{ .value = v };
-                            },
-                            .not_provided => {
-                                return .not_provided;
-                            },
-                        }
-                    }
-                },
-                else => {
-                    return .not_provided;
-                },
-            }
-            @compileError("unreachable");
-        }
-
-        fn parseArrayFromString(alloc: Allocator, comptime T: type, str: []const u8) ![]T {
-            if (str.len < 1) {
-                return error.InvalidArray;
-            }
-
-            var list: std.ArrayList(T) = .empty;
-            var it = std.mem.splitSequence(u8, str, ",");
-            while (it.next()) |val_str| {
-                var val: T = undefined;
-                switch (@typeInfo(T)) {
-                    .int => {
-                        val = parseInt(T, std.mem.trim(u8, val_str, " "), 10) catch return error.InvalidArray;
-                    },
-                    .float => {
-                        val = parseFloat(T, std.mem.trim(u8, val_str, " ")) catch return error.InvalidArray;
-                    },
-                    .pointer => {
-                        // Array of strings
-                        const ChildT = @typeInfo(T).pointer.child;
-                        if (ChildT != u8) @compileError("Only array of strings is supported");
-                        val = val_str;
-                    },
-                    .@"enum" => {
-                        if (std.meta.stringToEnum(T, val_str)) |v| {
-                            val = v;
-                        } else {
-                            return error.InvalidEnumVariant;
-                        }
-                    },
-                    else => @compileError(
-                        std.fmt.comptimePrint("Unsupported query param array child type: {s}", .{@typeName(T)}),
-                    ),
-                }
-                try list.append(alloc, val);
-            }
-            return try list.toOwnedSlice(
-                alloc,
-            );
-        }
-
-        /// Returns whether any leaf key of struct `T` is present in the request.
-        /// This recurses into nested plain structs, which are flattened.
-        fn anyLeafPresent(comptime T: type, alloc: Allocator, req: Request) !bool {
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const is_optional = comptime isOptional(field.type);
-                const F = if (is_optional) field.type.childType() else field.type;
-                if (comptime !is_optional and @typeInfo(F) == .@"union" and !hasParamParse(F)) {
-                    // A lifted union is present if any of its variant keys are.
-                    inline for (@typeInfo(F).@"union".fields) |variant| {
-                        if (try isVariantPresent(variant, alloc, req)) return true;
-                    }
-                } else if (comptime @typeInfo(F) == .@"struct" and !hasParamParse(F)) {
-                    if (try anyLeafPresent(F, alloc, req)) return true;
-                } else if ((try req.getParamDecoded(alloc, field.name)) != null) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /// A successfully parsed value together with the query keys it consumed.
-        fn Parsed(comptime T: type) type {
-            return struct { value: T, consumed: std.ArrayList([]const u8) };
-        }
-
-        /// Creates a struct from the query's key/value pairs.
-        /// Returns null if an error response was sent.
-        fn parseFlatStruct(comptime T: type, alloc: Allocator, req: Request) !?Parsed(T) {
-            var result: T = undefined;
-            var consumed: std.ArrayList([]const u8) = .empty;
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const is_optional = comptime isOptional(field.type);
-                const FieldType = if (is_optional) field.type.childType() else field.type;
-                const field_info = @typeInfo(FieldType);
-
-                if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
-                    const u = (try parseFlatUnionValue(FieldType, alloc, req)) orelse return null;
-                    @field(result, field.name) = u.value;
-                    try consumed.appendSlice(alloc, u.consumed.items);
-                } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
-                    if (try anyLeafPresent(FieldType, alloc, req)) {
-                        const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
-                        @field(result, field.name) = if (is_optional) .to(s.value) else s.value;
-                        try consumed.appendSlice(alloc, s.consumed.items);
-                    } else if (is_optional) {
-                        @field(result, field.name) = .not_provided;
-                    } else if (field.defaultValue()) |v| {
-                        @field(result, field.name) = v;
-                    } else {
-                        // Required nested struct with no keys present.
-                        //
-                        // If it has a required leaf,
-                        // parseFlatStruct sends the specific "Missing query parameter" error and returns null.
-                        //
-                        // If it's entirely optional/has defaults,
-                        // it succeeds and we assign that all-optional value here.
-                        const s = (try parseFlatStruct(FieldType, alloc, req)) orelse return null;
-                        @field(result, field.name) = s.value;
-                        try consumed.appendSlice(alloc, s.consumed.items);
-                    }
-                } else {
-                    if (try req.getParamDecoded(alloc, field.name)) |param| {
-                        try consumed.append(alloc, field.name);
-                        switch (_handleQueryParam(FieldType, alloc, param.items)) {
-                            .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
-                            .not_provided => {
-                                try sendInvalidParamTypeResponse(alloc, req, FieldType, field.name);
-                                return null;
-                            },
-                        }
-                    } else if (field.defaultValue()) |v| {
-                        @field(result, field.name) = v;
-                    } else if (is_optional) {
-                        @field(result, field.name) = .not_provided;
-                    } else if (field_info == .optional) {
-                        @field(result, field.name) = null;
-                    } else {
-                        try req.respondWithError(
-                            StatusCode.bad_request,
-                            try allocPrint(alloc, "Missing query parameter: {s}", .{field.name}),
-                        );
-                        return null;
-                    }
-                }
-            }
-            return .{ .value = result, .consumed = consumed };
-        }
-
-        /// Returns whether the keys identifying `variant` are present.
-        /// A plain struct variant matches on any of its flattened leaf keys.
-        /// Any other variant matches on its variant name used as a key.
-        fn isVariantPresent(comptime variant: Type.UnionField, alloc: Allocator, req: Request) !bool {
-            const T = variant.type;
-            if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
-                return try anyLeafPresent(T, alloc, req);
-            }
-            return (try req.getParamDecoded(alloc, variant.name)) != null;
-        }
-
-        /// Builds the `variant` of union `T` from the request's flat query keys.
-        /// Returns null if an error response was sent.
-        fn buildVariant(
-            comptime T: type,
-            comptime variant: Type.UnionField,
-            alloc: Allocator,
-            req: Request,
-        ) !?Parsed(T) {
-            const V = variant.type;
-            var consumed: std.ArrayList([]const u8) = .empty;
-
-            if (V == void) {
-                try consumed.append(alloc, variant.name);
-                return .{
-                    .value = @unionInit(T, variant.name, {}),
-                    .consumed = consumed,
-                };
-            } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
-                const s = try parseFlatStruct(V, alloc, req) orelse return null;
-                if (types.validateConstraints(V, s.value)) |err_msg| {
-                    try req.respondWithError(StatusCode.bad_request, err_msg);
-                    return null;
-                }
-                return .{
-                    .value = @unionInit(T, variant.name, s.value),
-                    .consumed = s.consumed,
-                };
-            } else {
-                const param = try req.getParamDecoded(alloc, variant.name) orelse return error.Unreachable;
-                switch (_handleQueryParam(V, alloc, param.items)) {
-                    .value => |v| {
-                        try consumed.append(alloc, variant.name);
-                        return .{
-                            .value = @unionInit(T, variant.name, v),
-                            .consumed = consumed,
-                        };
-                    },
-                    .not_provided => {
-                        try sendInvalidParamTypeResponse(alloc, req, V, variant.name);
-                        return null;
-                    },
-                }
-            }
-        }
-
-        /// Resolves a tagged union `T` from flat query keys.
-        ///
-        /// A variant matches when all of its required keys are present,
-        /// and the most specific match wins.
-        /// Among matching variants, we pick the one requiring the most keys.
-        /// Optional keys never affect selection.
-        ///
-        /// This mirrors the generated `XOR` types:
-        /// a variant requiring `{start_date, end_date}` is chosen over one requiring only `{start_date}`
-        /// when both keys are present,
-        /// while `start_date` alone selects the latter.
-        ///
-        /// Variants with equal required key sets are rejected at compile time,
-        /// so they can always be told apart by their required keys.
-        ///
-        /// A runtime tie is still possible
-        /// when a request supplies the keys of two different same-count variants at once
-        /// (e.g. `{x}` and `{y}` both present),
-        /// which results in a 400 error.
-        ///
-        /// A single all-optional variant (zero required keys) acts as the fallback,
-        /// used when no other variant matches, including an empty query.
-        /// At most one fallback may exist (enforced at compile time).
-        ///
-        /// Returns null if an error response was sent.
-        fn parseFlatUnionValue(comptime T: type, alloc: Allocator, req: Request) !?Parsed(T) {
-            const fields = @typeInfo(T).@"union".fields;
-
-            var present_keys: std.ArrayList([]const u8) = .empty;
-            var it = req.getParamSlices();
-            while (it.next()) |pair| try present_keys.append(alloc, pair.name);
-
-            switch (selectVariant(T, present_keys.items)) {
-                .selected => |selected_index| {
-                    inline for (fields, 0..) |variant, i| {
-                        if (i == selected_index) {
-                            return try buildVariant(T, variant, alloc, req);
-                        }
-                    }
-                    // Shouldn't be possible, would be a logic error
-                    return error.Unreachable;
-                },
-                .ambiguous => {
-                    try req.respondWithError(
-                        StatusCode.bad_request,
-                        "Query parameters match more than one variant",
-                    );
-                    return null;
-                },
-                .none => {
-                    try req.respondWithError(
-                        StatusCode.bad_request,
-                        "No matching query parameters were provided",
-                    );
-                    return null;
-                },
-            }
-        }
-
-        /// Sends a 400 error if there are any unexpected query params.
-        /// Returns true if an error response was sent.
-        fn rejectUnexpectedParams(alloc: Allocator, req: Request, consumed: []const []const u8) !bool {
-            var unexpected: std.ArrayList([]const u8) = .empty;
-
-            // Find any supplied query_params that aren't in `consumed`.
-            var it = req.getParamSlices();
-            while (it.next()) |param| {
-                if (!keysContain(consumed, param.name)) {
-                    try unexpected.append(alloc, param.name);
-                }
-            }
-            if (unexpected.items.len == 0) return false;
-
-            var msg: std.ArrayList(u8) = .empty;
-            try msg.appendSlice(alloc, "Unexpected query parameters were provided: ");
-
-            for (unexpected.items, 0..) |name, i| {
-                if (i != 0) try msg.appendSlice(alloc, ", ");
-                try msg.appendSlice(alloc, name);
-            }
-
-            try req.respondWithError(StatusCode.bad_request, msg.items);
-            return true;
-        }
-
         fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
             const QueryType = @FieldType(Context, query_params);
-
-            // `query_params` as a tagged union is parsed from a flat key/value set,
-            // with the active variant inferred from which keys are present.
-            if (comptime @typeInfo(QueryType) == .@"union") {
-                const parsed = (try parseFlatUnionValue(QueryType, ctx.alloc, ctx.req)) orelse return;
-                if (try rejectUnexpectedParams(ctx.alloc, ctx.req, parsed.consumed.items)) return;
-                @field(ctx.ctx, query_params) = parsed.value;
-                return;
+            switch (try parseQueryLeaky(QueryType, ctx.alloc, ctx.req.query orelse "")) {
+                .success => |value| @field(ctx.ctx, query_params) = value,
+                .fail => |message| try ctx.req.respondWithError(StatusCode.bad_request, message),
             }
-
-            var all_fields_are_optional = true;
-            outer: inline for (@typeInfo(Context).@"struct".fields) |ctx_field| {
-                if (comptime std.mem.eql(u8, ctx_field.name, query_params)) {
-                    inline for (@typeInfo(ctx_field.type).@"struct".fields) |field| {
-                        if (!isOptional(field.type) and field.defaultValue() == null) {
-                            all_fields_are_optional = false;
-                            break :outer;
-                        }
-                    }
-                }
-            }
-
-            if (!all_fields_are_optional and ctx.req.isQueryEmpty()) {
-                return try ctx.req.respondWithError(
-                    StatusCode.bad_request,
-                    "No query params were provided",
-                );
-            }
-
-            const parsed = (try parseFlatStruct(QueryType, ctx.alloc, ctx.req)) orelse return;
-
-            if (types.validateConstraints(QueryType, parsed.value)) |err_msg| {
-                return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
-            }
-
-            if (try rejectUnexpectedParams(ctx.alloc, ctx.req, parsed.consumed.items)) return;
-
-            @field(ctx.ctx, query_params) = parsed.value;
         }
     }.parseQueryParams;
 }
@@ -713,25 +774,25 @@ test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants sc
 
 test "selectVariant: single required key selects Basic variant" {
     const choice = selectVariant(RangeUnion, &.{"start_date"});
-    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expect(choice == .selected);
     try std.testing.expectEqual(0, choice.selected);
 }
 
 test "selectVariant: most specific match wins (Detailed over Basic)" {
     const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" });
-    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expect(choice == .selected);
     try std.testing.expectEqual(1, choice.selected);
 }
 
 test "selectVariant: empty query selects the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{});
-    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expect(choice == .selected);
     try std.testing.expectEqual(2, choice.selected);
 }
 
 test "selectVariant: fallback only keys select the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{"page"});
-    try std.testing.expectEqual(.selected, choice);
+    try std.testing.expect(choice == .selected);
     try std.testing.expectEqual(2, choice.selected);
 }
 
@@ -820,44 +881,60 @@ test "scalar union type" {
     };
 
     {
-        const result = try parseQuery(QP, std.testing.allocator, "").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site == .not_provided and result.company == .not_provided);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "site=auto").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "site=auto");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site.value == .auto);
         try std.testing.expect(result.company == .not_provided);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "site=123").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "site=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site.value == .id and result.site.value.id == 123);
         try std.testing.expect(result.company == .not_provided);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "company=auto").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "company=auto");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site == .not_provided);
         try std.testing.expect(result.company.value == .auto);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "company=123").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "company=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site == .not_provided);
         try std.testing.expect(result.company.value == .id and result.company.value.id == 123);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "site=123&company=auto").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "site=123&company=auto");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site.value == .id and result.site.value.id == 123 and result.company.value == .auto);
     }
     {
-        const result = try parseQuery(QP, std.testing.allocator, "site=auto&company=auto").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "site=auto&company=auto");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.site.value == .auto and result.company.value == .auto);
     }
     {
-        const result = parseQuery(QP, std.testing.allocator, "id=123"); // unknown parameter named 'id'
-        try std.testing.expect(result == .fail);
+        const parsed = try parseQuery(QP, std.testing.allocator, "id=123"); // unknown parameter named 'id'
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
     }
     {
-        const result = parseQuery(QP, std.testing.allocator, "auto");
-        try std.testing.expect(result == .fail);
+        const parsed = try parseQuery(QP, std.testing.allocator, "auto");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
     }
 }
 
@@ -877,15 +954,19 @@ test "scalar struct type" {
     };
 
     {
-        const result = try parseQuery(QP, std.testing.allocator, "date=2026-07-06").assert();
+        const parsed = try parseQuery(QP, std.testing.allocator, "date=2026-07-06");
+        defer parsed.deinit();
+        const result = try parsed.assert();
         try std.testing.expect(result.date.year == 2026 and result.date.month == 7 and result.date.day == 6);
     }
     {
-        const result = parseQuery(QP, std.testing.allocator, "year=2026&month=7&day=6");
-        try std.testing.expect(result == .fail);
+        const parsed = try parseQuery(QP, std.testing.allocator, "year=2026&month=7&day=6");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
     }
     {
-        const result = parseQuery(QP, std.testing.allocator, "day=2026");
-        try std.testing.expect(result == .fail);
+        const parsed = try parseQuery(QP, std.testing.allocator, "day=2026");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
     }
 }
