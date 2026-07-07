@@ -22,40 +22,42 @@ const query_params = "query_params";
 
 const VariantChoice = union(enum) {
     /// Field index of the unique most specific matching variant
-    selected: usize,
+    single: usize,
     /// Two or more variants match (a tie between variants)
-    ambiguous,
+    multiple,
     /// No specific variant matched, the caller may use the all optional fallback
     none,
 };
 
-/// - `all_req_keys_present[i]`: if variant i's required keys are all present
-/// - `num_req_keys[i]`: variant i's number of required keys.
+const Variant = struct {
+    /// Whether all of this variant's required keys are present in the query.
+    matched: bool,
+    /// The variant's number of required keys, used as its specificity score.
+    /// A variant requiring more keys is more specific than one requiring a subset.
+    required_key_count: usize,
+};
+
+/// Chooses the most specific matching variant from `variants` (indexed by union field index).
 ///
-/// A variant requiring more keys is more specific than one requiring a subset of them.
-/// If the highest score is shared by two or more matches, selection is `ambiguous`.
-///
-/// With no matches at all, the result is `none`.
-fn chooseVariant(comptime n: usize, all_req_keys_present: [n]bool, num_req_keys: [n]usize) VariantChoice {
+/// Each matched variant is scored by its `required_key_count`.
+/// The highest score wins, a tie for the highest score is `.multiple`, and no matches is `.none`.
+fn chooseVariant(variants: []const Variant) VariantChoice {
     var winner: ?usize = null;
     var highest_score: usize = 0;
     var tied = false;
-    for (0..n) |i| {
-        if (!all_req_keys_present[i]) continue;
-        if (winner == null or num_req_keys[i] > highest_score) {
+    for (variants, 0..) |variant, i| {
+        if (!variant.matched) continue;
+        if (winner == null or variant.required_key_count > highest_score) {
             winner = i;
-            highest_score = num_req_keys[i];
+            highest_score = variant.required_key_count;
             tied = false;
-        } else if (num_req_keys[i] == highest_score) {
+        } else if (variant.required_key_count == highest_score) {
             tied = true;
         }
     }
 
-    if (tied) {
-        return .ambiguous;
-    } else if (winner) |i| {
-        return .{ .selected = i };
-    }
+    if (tied) return .multiple;
+    if (winner) |i| return .{ .single = i };
     return .none;
 }
 
@@ -162,26 +164,24 @@ fn fallbackVariantIndex(comptime T: type) ?usize {
 /// When no specific variant matches, the all-optional fallback variant is selected if one exists.
 /// Otherwise, the result is `.none`.
 ///
-/// `.selected` always names a variant ready to build, and `.none` means there is nothing to build.
+/// `.single` always names a variant ready to build, and `.none` means there is nothing to build.
 fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoice {
     const fields = @typeInfo(T).@"union".fields;
-    // Tracking data for each variant, by index
-    var all_req_keys_present = [_]bool{false} ** fields.len;
-    var num_req_keys = [_]usize{0} ** fields.len;
+    // One selection candidate per variant, indexed by union field index.
+    var variants = [_]Variant{.{ .matched = false, .required_key_count = 0 }} ** fields.len;
 
     inline for (fields, 0..) |variant, i| {
         const required = comptime getVariantRequiredKeyCount(variant);
         if (required == 0) continue;
 
         if (variantMatchesKeys(variant, present_keys)) {
-            all_req_keys_present[i] = true;
-            num_req_keys[i] = required;
+            variants[i] = .{ .matched = true, .required_key_count = required };
         }
     }
 
-    const choice = chooseVariant(fields.len, all_req_keys_present, num_req_keys);
+    const choice = chooseVariant(&variants);
     if (choice == .none) {
-        if (comptime fallbackVariantIndex(T)) |i| return .{ .selected = i };
+        if (comptime fallbackVariantIndex(T)) |i| return .{ .single = i };
     }
     return choice;
 }
@@ -547,16 +547,16 @@ fn parseFlatUnionValue(comptime T: type, ctx: *ParseCtx) !?T {
     while (it.next()) |pair| try present_keys.append(ctx.alloc, pair.name);
 
     switch (selectVariant(T, present_keys.items)) {
-        .selected => |selected_index| {
+        .single => |single_index| {
             inline for (fields, 0..) |variant, i| {
-                if (i == selected_index) {
+                if (i == single_index) {
                     return try buildVariant(T, variant, ctx);
                 }
             }
             // Shouldn't be possible, would be a logic error
             return error.Unreachable;
         },
-        .ambiguous => {
+        .multiple => {
             ctx.fail("Query parameters match more than one variant");
             return null;
         },
@@ -774,26 +774,26 @@ test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants sc
 
 test "selectVariant: single required key selects Basic variant" {
     const choice = selectVariant(RangeUnion, &.{"start_date"});
-    try std.testing.expect(choice == .selected);
-    try std.testing.expectEqual(0, choice.selected);
+    try std.testing.expect(choice == .single);
+    try std.testing.expectEqual(0, choice.single);
 }
 
 test "selectVariant: most specific match wins (Detailed over Basic)" {
     const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" });
-    try std.testing.expect(choice == .selected);
-    try std.testing.expectEqual(1, choice.selected);
+    try std.testing.expect(choice == .single);
+    try std.testing.expectEqual(1, choice.single);
 }
 
 test "selectVariant: empty query selects the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{});
-    try std.testing.expect(choice == .selected);
-    try std.testing.expectEqual(2, choice.selected);
+    try std.testing.expect(choice == .single);
+    try std.testing.expectEqual(2, choice.single);
 }
 
 test "selectVariant: fallback only keys select the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{"page"});
-    try std.testing.expect(choice == .selected);
-    try std.testing.expectEqual(2, choice.selected);
+    try std.testing.expect(choice == .single);
+    try std.testing.expectEqual(2, choice.single);
 }
 
 test "selectVariant: no specific match and no fallback -> none" {
@@ -810,15 +810,15 @@ test "selectVariant: different same-count variants are ambiguous" {
         a: struct { x: []const u8 },
         b: struct { y: []const u8 },
     };
-    try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }) == .ambiguous);
+    try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }) == .multiple);
 
     const a = selectVariant(Xor, &.{"x"});
-    try std.testing.expect(a == .selected);
-    try std.testing.expectEqual(0, a.selected);
+    try std.testing.expect(a == .single);
+    try std.testing.expectEqual(0, a.single);
 
     const b = selectVariant(Xor, &.{"y"});
-    try std.testing.expect(b == .selected);
-    try std.testing.expectEqual(1, b.selected);
+    try std.testing.expect(b == .single);
+    try std.testing.expectEqual(1, b.single);
 }
 
 test "selectVariant: nested struct needs all its required leaf keys" {
@@ -839,8 +839,8 @@ test "selectVariant: nested struct needs all its required leaf keys" {
 
     // Both nested leaves present -> nested selected
     const both = selectVariant(U, &.{ "start", "end" });
-    try std.testing.expect(both == .selected);
-    try std.testing.expectEqual(0, both.selected);
+    try std.testing.expect(both == .single);
+    try std.testing.expectEqual(0, both.single);
 }
 
 test "selectVariant: name keyed variants match on their variant name" {
@@ -854,20 +854,20 @@ test "selectVariant: name keyed variants match on their variant name" {
 
     {
         const choice = selectVariant(U, &.{"custom"});
-        try std.testing.expect(choice == .selected);
-        try std.testing.expectEqual(0, choice.selected);
+        try std.testing.expect(choice == .single);
+        try std.testing.expectEqual(0, choice.single);
     }
 
     {
         const choice = selectVariant(U, &.{"flag"});
-        try std.testing.expect(choice == .selected);
-        try std.testing.expectEqual(1, choice.selected);
+        try std.testing.expect(choice == .single);
+        try std.testing.expectEqual(1, choice.single);
     }
 
     {
         const choice = selectVariant(U, &.{"z"});
-        try std.testing.expect(choice == .selected);
-        try std.testing.expectEqual(2, choice.selected);
+        try std.testing.expect(choice == .single);
+        try std.testing.expectEqual(2, choice.single);
     }
 }
 
