@@ -20,38 +20,43 @@ const Optional = types.Optional;
 
 const query_params = "query_params";
 
-const VariantChoice = union(enum) {
-    /// Field index of the unique most specific matching variant
-    single: usize,
-    /// Two or more variants match (a tie between variants)
-    multiple,
-    /// No specific variant matched, the caller may use the all optional fallback
-    none,
-};
+pub fn VariantChoice(comptime T: type) type {
+    return union(enum) {
+        /// Field index of the unique most specific matching variant
+        single: std.meta.Tag(T),
+        /// Two or more variants match (a tie between variants)
+        multiple,
+        /// No specific variant matched, the caller may use the all optional fallback
+        none,
+    };
+}
 
-const Variant = struct {
-    /// Whether all of this variant's required keys are present in the query.
-    matched: bool,
-    /// The variant's number of required keys, used as its specificity score.
-    /// A variant requiring more keys is more specific than one requiring a subset.
-    required_key_count: usize,
-};
+pub fn Variant(comptime T: type) type {
+    return struct {
+        tag: std.meta.Tag(T),
+        /// Whether all of this variant's required keys are present in the query.
+        matched: bool = false,
+        /// The variant's number of required keys, used as its specificity score.
+        /// A variant requiring more keys is more specific than one requiring a subset.
+        required_key_count: usize = 0,
+    };
+}
 
 /// Chooses the most specific matching variant from `variants` (indexed by union field index).
 ///
 /// Each matched variant is scored by its `required_key_count`.
 /// The highest score wins, a tie for the highest score is `.multiple`, and no matches is `.none`.
-fn chooseVariant(variants: []const Variant) VariantChoice {
-    var winner: ?usize = null;
+fn chooseVariant(comptime T: type, variants: []const Variant(T)) VariantChoice(T) {
+    var winner: ?std.meta.Tag(T) = null;
     var highest_score: usize = 0;
     var tied = false;
-    for (variants, 0..) |variant, i| {
-        if (!variant.matched) continue;
-        if (winner == null or variant.required_key_count > highest_score) {
-            winner = i;
-            highest_score = variant.required_key_count;
+    for (variants) |v| {
+        if (!v.matched) continue;
+        if (winner == null or v.required_key_count > highest_score) {
+            winner = v.tag;
+            highest_score = v.required_key_count;
             tied = false;
-        } else if (variant.required_key_count == highest_score) {
+        } else if (v.required_key_count == highest_score) {
             tied = true;
         }
     }
@@ -139,17 +144,17 @@ fn variantMatchesKeys(comptime variant: Type.UnionField, keys: []const []const u
 /// Field index of union `T`'s all-optional fallback variant (zero required keys),
 /// or null if it has none.
 /// At most one may exist (enforced here at compile time).
-fn fallbackVariantIndex(comptime T: type) ?usize {
+fn fallbackVariantIndex(comptime T: type) ?std.meta.Tag(T) {
     comptime {
-        var found: ?usize = null;
-        for (@typeInfo(T).@"union".fields, 0..) |variant, i| {
-            if (getVariantRequiredKeyCount(variant) == 0) {
+        var found: ?std.meta.Tag(T) = null;
+        for (@typeInfo(T).@"union".fields) |f| {
+            if (getVariantRequiredKeyCount(f) == 0) {
                 if (found != null) {
                     @compileError("Union " ++ @typeName(T) ++
                         " has more than one all-optional variant;" ++
                         " at most one may act as the fallback.");
                 }
-                found = i;
+                found = @field(T, f.name);
             }
         }
         return found;
@@ -165,21 +170,22 @@ fn fallbackVariantIndex(comptime T: type) ?usize {
 /// Otherwise, the result is `.none`.
 ///
 /// `.single` always names a variant ready to build, and `.none` means there is nothing to build.
-fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoice {
-    const fields = @typeInfo(T).@"union".fields;
-    // One selection candidate per variant, indexed by union field index.
-    var variants = [_]Variant{.{ .matched = false, .required_key_count = 0 }} ** fields.len;
-
-    inline for (fields, 0..) |variant, i| {
-        const required = comptime getVariantRequiredKeyCount(variant);
-        if (required == 0) continue;
-
-        if (variantMatchesKeys(variant, present_keys)) {
-            variants[i] = .{ .matched = true, .required_key_count = required };
+fn selectVariant(comptime T: type, present_keys: []const []const u8) VariantChoice(T) {
+    const variants = variants: {
+        const fields = @typeInfo(T).@"union".fields;
+        var variants = [_]Variant(T){.{ .tag = undefined }} ** fields.len;
+        inline for (fields, 0..) |f, i| {
+            const required = comptime getVariantRequiredKeyCount(f);
+            variants[i] = .{
+                .tag = @field(T, f.name),
+                .matched = required != 0 and variantMatchesKeys(f, present_keys),
+                .required_key_count = required,
+            };
         }
-    }
+        break :variants variants;
+    };
 
-    const choice = chooseVariant(&variants);
+    const choice = chooseVariant(T, &variants);
     if (choice == .none) {
         if (comptime fallbackVariantIndex(T)) |i| return .{ .single = i };
     }
@@ -192,7 +198,10 @@ pub fn ParseQueryResult(comptime ReturnType: type) type {
         fail: []const u8,
 
         pub fn assert(self: @This()) !ReturnType {
-            if (self != .success) return error.AssertFail;
+            if (self != .success) {
+                std.log.err("{s}", .{self.fail});
+                try std.testing.expect(false);
+            }
             return self.success;
         }
     };
@@ -486,28 +495,27 @@ fn isVariantPresent(comptime variant: Type.UnionField, ctx: *ParseCtx) !bool {
 /// Builds the `variant` of union `T` from the flat query keys,
 /// recording each consumed query key on `ctx`.
 /// Returns null if a failure was recorded on `ctx`.
-fn buildVariant(comptime T: type, comptime variant: Type.UnionField, ctx: *ParseCtx) !?T {
-    const V = variant.type;
-
+fn buildVariant(comptime T: type, comptime field: Type.UnionField, ctx: *ParseCtx) !?T {
+    const V = field.type;
     if (V == void) {
-        try ctx.markConsumed(variant.name);
-        return @unionInit(T, variant.name, {});
+        try ctx.markConsumed(field.name);
+        return @unionInit(T, field.name, {});
     } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
         const s = try parseFlatStruct(V, ctx) orelse return null;
         if (types.validateConstraints(V, s)) |err_msg| {
             ctx.fail(err_msg);
             return null;
         }
-        return @unionInit(T, variant.name, s);
+        return @unionInit(T, field.name, s);
     } else {
-        const param = try ctx.getParamDecoded(variant.name) orelse return error.Unreachable;
+        const param = try ctx.getParamDecoded(field.name) orelse return error.Unreachable;
         switch (_handleQueryParam(V, ctx.alloc, param.items)) {
             .value => |v| {
-                try ctx.markConsumed(variant.name);
-                return @unionInit(T, variant.name, v);
+                try ctx.markConsumed(field.name);
+                return @unionInit(T, field.name, v);
             },
             .not_provided => {
-                try recordInvalidParamType(ctx, V, variant.name);
+                try recordInvalidParamType(ctx, V, field.name);
                 return null;
             },
         }
@@ -540,17 +548,17 @@ fn buildVariant(comptime T: type, comptime variant: Type.UnionField, ctx: *Parse
 ///
 /// Returns null if a failure was recorded on `ctx`.
 fn parseFlatUnionValue(comptime T: type, ctx: *ParseCtx) !?T {
-    const fields = @typeInfo(T).@"union".fields;
-
     var present_keys: std.ArrayList([]const u8) = .empty;
     var it = ctx.paramSlices();
     while (it.next()) |pair| try present_keys.append(ctx.alloc, pair.name);
 
     switch (selectVariant(T, present_keys.items)) {
-        .single => |single_index| {
-            inline for (fields, 0..) |variant, i| {
-                if (i == single_index) {
-                    return try buildVariant(T, variant, ctx);
+        .single => |variant| {
+            const fields = @typeInfo(T).@"union".fields;
+            inline for (fields) |f| {
+                const V = @field(T, f.name);
+                if (V == variant) {
+                    return try buildVariant(T, f, ctx);
                 }
             }
             // Shouldn't be possible, would be a logic error
@@ -775,25 +783,25 @@ test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants sc
 test "selectVariant: single required key selects Basic variant" {
     const choice = selectVariant(RangeUnion, &.{"start_date"});
     try std.testing.expect(choice == .single);
-    try std.testing.expectEqual(0, choice.single);
+    try std.testing.expectEqual(RangeUnion.basic, choice.single);
 }
 
 test "selectVariant: most specific match wins (Detailed over Basic)" {
     const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" });
     try std.testing.expect(choice == .single);
-    try std.testing.expectEqual(1, choice.single);
+    try std.testing.expectEqual(RangeUnion.detailed, choice.single);
 }
 
 test "selectVariant: empty query selects the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{});
     try std.testing.expect(choice == .single);
-    try std.testing.expectEqual(2, choice.single);
+    try std.testing.expectEqual(RangeUnion.all, choice.single);
 }
 
 test "selectVariant: fallback only keys select the all optional fallback" {
     const choice = selectVariant(RangeUnion, &.{"page"});
     try std.testing.expect(choice == .single);
-    try std.testing.expectEqual(2, choice.single);
+    try std.testing.expectEqual(RangeUnion.all, choice.single);
 }
 
 test "selectVariant: no specific match and no fallback -> none" {
@@ -814,11 +822,11 @@ test "selectVariant: different same-count variants are ambiguous" {
 
     const a = selectVariant(Xor, &.{"x"});
     try std.testing.expect(a == .single);
-    try std.testing.expectEqual(0, a.single);
+    try std.testing.expectEqual(Xor.a, a.single);
 
     const b = selectVariant(Xor, &.{"y"});
     try std.testing.expect(b == .single);
-    try std.testing.expectEqual(1, b.single);
+    try std.testing.expectEqual(Xor.b, b.single);
 }
 
 test "selectVariant: nested struct needs all its required leaf keys" {
@@ -840,7 +848,7 @@ test "selectVariant: nested struct needs all its required leaf keys" {
     // Both nested leaves present -> nested selected
     const both = selectVariant(U, &.{ "start", "end" });
     try std.testing.expect(both == .single);
-    try std.testing.expectEqual(0, both.single);
+    try std.testing.expectEqual(U.nested, both.single);
 }
 
 test "selectVariant: name keyed variants match on their variant name" {
@@ -855,19 +863,19 @@ test "selectVariant: name keyed variants match on their variant name" {
     {
         const choice = selectVariant(U, &.{"custom"});
         try std.testing.expect(choice == .single);
-        try std.testing.expectEqual(0, choice.single);
+        try std.testing.expectEqual(U.custom, choice.single);
     }
 
     {
         const choice = selectVariant(U, &.{"flag"});
         try std.testing.expect(choice == .single);
-        try std.testing.expectEqual(1, choice.single);
+        try std.testing.expectEqual(U.flag, choice.single);
     }
 
     {
         const choice = selectVariant(U, &.{"z"});
         try std.testing.expect(choice == .single);
-        try std.testing.expectEqual(2, choice.single);
+        try std.testing.expectEqual(U.other, choice.single);
     }
 }
 
@@ -881,9 +889,15 @@ test "scalar union type" {
         auto,
     };
 
+    const Number = union(enum) {
+        small: i32, // first, attempt to parse into small integer type
+        big: i64, // then try to parse into larger integer type
+    };
+
     const QP = struct {
         site: Optional(IdOrAuto) = .not_provided,
         company: Optional(IdOrAuto) = .not_provided,
+        n: Optional(Number) = .not_provided,
     };
 
     {
@@ -948,6 +962,25 @@ test "scalar union type" {
         defer parsed.deinit();
         try std.testing.expect(parsed.result == .fail);
     }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "n=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.n.value == .small);
+        try std.testing.expectEqual(123, result.n.value.small);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "n=12345678900");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.n.value == .big);
+        try std.testing.expectEqual(12345678900, result.n.value.big);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "n=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
 }
 
 test "scalar struct type" {
@@ -983,4 +1016,120 @@ test "scalar struct type" {
         defer parsed.deinit();
         try std.testing.expect(parsed.result == .fail);
     }
+}
+
+test "optional require together" {
+    const QP = struct {
+        n: Optional(struct {
+            a: i32,
+            b: i32,
+        }) = .not_provided,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.n == .not_provided);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "b=123");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123&b=456");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .success);
+        try std.testing.expect(parsed.result.success.n == .value);
+        try std.testing.expectEqual(123, parsed.result.success.n.value.a);
+        try std.testing.expectEqual(456, parsed.result.success.n.value.b);
+    }
+}
+
+test "scalar union with null" {
+    const U = union(enum) {
+        a: []const u8,
+        b: ?i32,
+    };
+
+    const W = union(enum) {
+        b: ?i32,
+        a: []const u8,
+    };
+
+    const QP = struct {
+        u: U,
+        w: W,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "u=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.u == .a);
+        try std.testing.expectEqualStrings("null", result.u.a);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=null");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "w=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.w == .b);
+        try std.testing.expectEqual(null, result.w.b);
+    }
+}
+
+test "non-scalar union with null" {
+    const QP = union(enum) {
+        a: []const u8,
+        b: ?i32,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .a);
+        try std.testing.expectEqualStrings("null", result.a);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .a);
+        try std.testing.expectEqualStrings("abc", result.a);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "b=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expectEqual(null, result.b);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "b=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expectEqual(123, result.b);
+    }
+}
+
+test "complex" {
+    // TODO
 }
