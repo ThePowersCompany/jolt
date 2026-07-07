@@ -16,8 +16,14 @@ const CreateUserRequest = struct {
 
 const PostContext = struct {
     body: CreateUserRequest,
-    query_params: struct {
-        a: i32,
+    query_params: union(enum) {
+        foo: struct {
+            a: []const u8,
+        },
+        bar: struct {
+            a: []const u8,
+            b: ?[]const u8 = null,
+        },
     },
 };
 

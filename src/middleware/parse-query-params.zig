@@ -15,6 +15,7 @@ const Type = std.builtin.Type;
 const hasFn = std.meta.hasFn;
 
 const types = @import("../utils/types.zig");
+const Unwrap = types.Unwrap;
 const isOptional = types.isOptional;
 const Optional = types.Optional;
 
@@ -429,7 +430,7 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
     var result: T = undefined;
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const is_optional = comptime isOptional(field.type);
-        const FieldType = if (is_optional) field.type.childType() else field.type;
+        const FieldType = Unwrap(if (is_optional) field.type.childType() else field.type);
         const field_info = @typeInfo(FieldType);
 
         if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
@@ -1018,6 +1019,40 @@ test "scalar struct type" {
     }
 }
 
+test "nullable require together" {
+    const QP = struct {
+        n: ?struct {
+            a: i32,
+            b: i32,
+        } = null,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.n == null);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "b=123");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123&b=456");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.n != null);
+        try std.testing.expectEqual(123, result.n.?.a);
+        try std.testing.expectEqual(456, result.n.?.b);
+    }
+}
+
 test "optional require together" {
     const QP = struct {
         n: Optional(struct {
@@ -1045,10 +1080,10 @@ test "optional require together" {
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "a=123&b=456");
         defer parsed.deinit();
-        try std.testing.expect(parsed.result == .success);
-        try std.testing.expect(parsed.result.success.n == .value);
-        try std.testing.expectEqual(123, parsed.result.success.n.value.a);
-        try std.testing.expectEqual(456, parsed.result.success.n.value.b);
+        const result = try parsed.assert();
+        try std.testing.expect(result.n == .value);
+        try std.testing.expectEqual(123, result.n.value.a);
+        try std.testing.expectEqual(456, result.n.value.b);
     }
 }
 
