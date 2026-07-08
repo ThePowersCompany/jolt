@@ -1311,6 +1311,37 @@ test "optional require together" {
     }
 }
 
+test "require at least one" {
+    const QP = struct {
+        a: Optional(i32) = .not_provided,
+        b: Optional(i32) = .not_provided,
+        c: Optional(i32) = .not_provided,
+        d: Optional(i32) = .not_provided,
+
+        pub const constraints: types.Constraints = .{ .any_of = true };
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(123, result.a.value);
+        try std.testing.expect(result.b == .not_provided);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123&b=456");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(123, result.a.value);
+        try std.testing.expectEqual(456, result.b.value);
+    }
+}
+
 test "scalar union with null" {
     const U = union(enum) {
         a: []const u8,
