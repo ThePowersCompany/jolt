@@ -1410,5 +1410,98 @@ test "non-scalar union with null" {
 }
 
 test "complex" {
-    // TODO
+    const DateStr = struct {
+        year: i32,
+        month: i32,
+        day: i32,
+
+        pub fn paramParse(_: Allocator, _: []const u8) !@This() {
+            return .{ .year = 2026, .month = 7, .day = 6 };
+        }
+    };
+
+    const QP = struct {
+        filter: union(enum) {
+            id: i32,
+            name: union(enum) {
+                first: []const u8,
+                last: []const u8,
+                full: struct {
+                    first: []const u8,
+                    last: []const u8,
+                },
+            },
+            date_range: struct {
+                start_date: DateStr,
+                end_date: DateStr,
+            },
+            pagination: struct {
+                cursor: ?u64 = null,
+                limit: ?u32 = null,
+            },
+        },
+        order_by: ?enum {
+            asc,
+            desc,
+        } = null,
+        inactive: Optional(bool) = .not_provided,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .pagination);
+        try std.testing.expectEqual(null, result.filter.pagination.cursor);
+        try std.testing.expectEqual(null, result.filter.pagination.limit);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "id=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .id);
+        try std.testing.expectEqual(123, result.filter.id);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "first=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .name);
+        try std.testing.expect(result.filter.name == .first);
+        try std.testing.expectEqualStrings("abc", result.filter.name.first);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "last=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .name);
+        try std.testing.expect(result.filter.name == .last);
+        try std.testing.expectEqualStrings("abc", result.filter.name.last);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "first=abc&last=def");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .name);
+        try std.testing.expect(result.filter.name == .full);
+        try std.testing.expectEqualStrings("abc", result.filter.name.full.first);
+        try std.testing.expectEqualStrings("def", result.filter.name.full.last);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=2026-07-06&end_date=2026-07-08&order_by=asc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .date_range);
+        try std.testing.expectEqual(2026, result.filter.date_range.start_date.year);
+        try std.testing.expectEqual(7, result.filter.date_range.end_date.month);
+        try std.testing.expect(result.order_by == .asc);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "cursor=999");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.filter == .pagination);
+        try std.testing.expectEqual(999, result.filter.pagination.cursor);
+        try std.testing.expectEqual(null, result.filter.pagination.limit);
+    }
 }
