@@ -16,8 +16,10 @@ const hasFn = std.meta.hasFn;
 
 const types = @import("../utils/types.zig");
 const Unwrap = types.Unwrap;
-const isOptional = types.isOptional;
 const Optional = types.Optional;
+const isOptional = types.isOptional;
+
+const assertNoQueryKeyCollisions = @import("./query_params/validation.zig").assertNoQueryKeyCollisions;
 
 const query_params = "query_params";
 
@@ -793,6 +795,8 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
             ),
         );
     }
+
+    comptime assertNoQueryKeyCollisions(@FieldType(Context, query_params));
 
     return struct {
         fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {

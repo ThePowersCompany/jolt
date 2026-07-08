@@ -28,7 +28,6 @@ const qp_validation = @import("../middleware/query_params/validation.zig");
 const hasParamParse = qp_validation.hasParamParse;
 const isLiftableUnion = qp_validation.isLiftableUnion;
 const isStructContainingUnionField = qp_validation.isStructContainingUnionField;
-const assertNoQueryKeyCollisions = qp_validation.assertNoQueryKeyCollisions;
 
 pub const TypeGenerator = struct {
     const Self = @This();
@@ -709,12 +708,10 @@ pub const TypeGenerator = struct {
     fn extractQueryParams(self: *Self, T: type) !ParseResult {
         const info = @typeInfo(T);
         if (comptime info == .@"union" and !isOptional(T)) {
-            comptime assertNoQueryKeyCollisions(T);
             return try self.parseFlatUnion(info.@"union");
         }
 
         if (comptime isStructContainingUnionField(T)) {
-            comptime assertNoQueryKeyCollisions(T);
             return try self.parseFlatQueryStruct(T, info.@"struct");
         }
         return try self.extractIdentifier(T);

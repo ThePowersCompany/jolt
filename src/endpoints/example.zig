@@ -21,8 +21,8 @@ const PostContext = struct {
             a: []const u8,
         },
         bar: struct {
-            a: []const u8,
-            b: ?[]const u8 = null,
+            b: []const u8,
+            c: ?[]const u8 = null,
         },
     },
 };
