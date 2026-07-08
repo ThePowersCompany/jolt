@@ -1013,6 +1013,148 @@ test "scalar union type" {
     }
 }
 
+test "weak scalar union" {
+    // A weak scalar union can be interpreted differently based on how it is used.
+    const Weak = union(enum) {
+        id: i32,
+        name: []const u8,
+    };
+
+    {
+        // Used as scalar
+        const QP = struct {
+            v: Weak,
+        };
+
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "v=123");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expect(result.v == .id);
+            try std.testing.expectEqual(123, result.v.id);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "v=abc");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expect(result.v == .name);
+            try std.testing.expectEqualStrings("abc", result.v.name);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "id=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "name=abc");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+    }
+    {
+        // Used as composite
+        const QP = Weak;
+
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "id=123&name=abc");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "id=123");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expect(result == .id);
+            try std.testing.expectEqual(123, result.id);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "name=abc");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expect(result == .name);
+            try std.testing.expectEqualStrings("abc", result.name);
+        }
+    }
+    {
+        // Weak union inside composite union
+        const QP = struct {
+            scalar: union(enum) {
+                weak: Weak,
+                // adding this `strong` variant causes the outer union to be composite
+                strong: struct {
+                    a: i32,
+                    b: []const u8,
+                },
+            },
+            c: ?i32 = null,
+        };
+
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "c=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "weak=abc&strong=abc");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "c=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "id=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "name=abc");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "strong=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "strong=abc");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "a=123");
+            defer parsed.deinit();
+            try std.testing.expect(parsed.result == .fail);
+        }
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "a=123&b=abc");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expect(result.scalar == .strong);
+            try std.testing.expectEqual(123, result.scalar.strong.a);
+            try std.testing.expectEqualStrings("abc", result.scalar.strong.b);
+        }
+    }
+}
+
 test "scalar struct type" {
     const DateStr = struct {
         year: i32,
