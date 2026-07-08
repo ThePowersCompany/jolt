@@ -110,6 +110,23 @@ fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
     return getStructRequiredKeyCount(info.@"struct");
 }
 
+/// Whether a union is "flat":
+/// at least one variant carries a nested plain struct with its own leaf keys.
+/// Flat unions are resolved by which variant keys are present (`parseFlatUnionValue`).
+///
+/// A union with no such variant is "scalar":
+/// every variant is parseable from a single value string,
+/// so as a struct field it is resolved by value against the field's own key (`_handleQueryParam`),
+/// the same as an `Optional(union)` field.
+fn isFlatUnion(comptime U: type) bool {
+    inline for (@typeInfo(U).@"union".fields) |variant| {
+        if (comptime @typeInfo(variant.type) == .@"struct" and !hasParamParse(variant.type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn keysContain(keys: []const []const u8, name: []const u8) bool {
     for (keys) |k| {
         if (std.mem.eql(u8, k, name)) return true;
@@ -338,8 +355,15 @@ fn _handleQueryParam(comptime FieldType: type, alloc: Allocator, param: []const 
                     if (std.mem.eql(u8, f.name, param)) {
                         return .{ .value = @unionInit(FieldType, f.name, {}) };
                     }
-                } else if (_handleQueryParam(f.type, alloc, param).get()) |v| {
-                    return .{ .value = @unionInit(FieldType, f.name, v) };
+                } else {
+                    // Switch on the tag rather than `.get()`:
+                    // when `f.type` is itself optional (e.g. `?i32`),
+                    // a successfully parsed `null` value would collapse through `.get()`
+                    // and be indistinguishable from `.not_provided`, wrongly skipping this variant.
+                    switch (_handleQueryParam(f.type, alloc, param)) {
+                        .value => |v| return .{ .value = @unionInit(FieldType, f.name, v) },
+                        .not_provided => {},
+                    }
                 }
             }
             return .not_provided;
@@ -433,7 +457,12 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
         const FieldType = Unwrap(if (is_optional) field.type.childType() else field.type);
         const field_info = @typeInfo(FieldType);
 
-        if (comptime !is_optional and field_info == .@"union" and !hasParamParse(FieldType)) {
+        if (comptime !is_optional and field_info == .@"union" and //
+            hasParamParse(FieldType) and isFlatUnion(FieldType))
+        {
+            // Flat unions are key-selected from the variant keys present.
+            // Scalar unions fall through to be value-selected against `field.name`,
+            // exactly like an `Optional(union)` field.
             const u = (try parseFlatUnionValue(FieldType, ctx)) orelse return null;
             @field(result, field.name) = u;
         } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
@@ -1104,7 +1133,7 @@ test "scalar union with null" {
     };
 
     {
-        const parsed = try parseQuery(QP, std.testing.allocator, "u=null");
+        const parsed = try parseQuery(QP, std.testing.allocator, "u=null&w=null");
         defer parsed.deinit();
         const result = try parsed.assert();
         try std.testing.expect(result.u == .a);
@@ -1116,11 +1145,84 @@ test "scalar union with null" {
         try std.testing.expect(parsed.result == .fail);
     }
     {
-        const parsed = try parseQuery(QP, std.testing.allocator, "w=null");
+        const parsed = try parseQuery(QP, std.testing.allocator, "u=null&w=null");
         defer parsed.deinit();
         const result = try parsed.assert();
         try std.testing.expect(result.w == .b);
         try std.testing.expectEqual(null, result.w.b);
+    }
+}
+
+test "nested scalar union" {
+    // A scalar union whose first variant is itself a scalar union.
+    // This is the shape the `.get()` -> tag-switch fix protects:
+    // a successfully parsed `null` from the inner `b: ?i32` must survive being bubbled up
+    // through the outer union instead of collapsing and being mistaken for "no match".
+    const QP = struct {
+        outer: union(enum) {
+            inner: union(enum) {
+                b: ?i32,
+                a: []const u8,
+            },
+            c: bool,
+        },
+    };
+
+    {
+        // "null" -> outer.inner -> inner.b (?i32) parses to a real `null`.
+        const parsed = try parseQuery(QP, std.testing.allocator, "outer=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.outer == .inner);
+        try std.testing.expect(result.outer.inner == .b);
+        try std.testing.expectEqual(null, result.outer.inner.b);
+    }
+    {
+        // "123" -> outer.inner -> inner.b (?i32) parses to 123.
+        const parsed = try parseQuery(QP, std.testing.allocator, "outer=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.outer == .inner);
+        try std.testing.expect(result.outer.inner == .b);
+        try std.testing.expectEqual(123, result.outer.inner.b);
+    }
+    {
+        // "abc" is not an i32, so inner.b is skipped and inner.a ([]const u8) wins.
+        const parsed = try parseQuery(QP, std.testing.allocator, "outer=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.outer == .inner);
+        try std.testing.expect(result.outer.inner == .a);
+        try std.testing.expectEqualStrings("abc", result.outer.inner.a);
+    }
+}
+
+test "scalar union: greedy string variant shadows later variants by order" {
+    // A scalar union has no keys to disambiguate variants, only the value string.
+    // A `[]const u8` variant always parses, so when it is declared first it shadows every later variant.
+    const QP = struct {
+        m: union(enum) {
+            a: []const u8, // greedy: matches any value
+            b: ?i32,
+        },
+    };
+
+    {
+        // Even a valid integer is captured by `a` because it is tried first;
+        // `b: ?i32` is never reached.
+        const parsed = try parseQuery(QP, std.testing.allocator, "m=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.m == .a);
+        try std.testing.expectEqualStrings("123", result.m.a);
+    }
+    {
+        // `null` lands on `a` rather than `b: ?i32`.
+        const parsed = try parseQuery(QP, std.testing.allocator, "m=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.m == .a);
+        try std.testing.expectEqualStrings("null", result.m.a);
     }
 }
 

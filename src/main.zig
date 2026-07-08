@@ -236,7 +236,7 @@ pub fn main() !void {
         @import("tasks/example_task.zig"),
     };
 
-    try generateTypesFile(alloc, "types.d.ts", &endpoints);
+    // try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
     try server.run(&endpoints, &tasks, auto);
 }
