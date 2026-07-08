@@ -8,13 +8,6 @@ pub fn startsWith(haystack: []const u8, needle: []const u8) bool {
     return std.mem.startsWith(u8, haystack, needle);
 }
 
-/// Whether a struct type carries a custom `paramParse`
-/// and therefore stays a single query key (its value parsed from a string),
-/// rather than being flattened into leaf keys.
-pub fn hasParamParse(comptime T: type) bool {
-    return comptime std.meta.hasFn(T, "paramParse");
-}
-
 pub const Method = enum {
     get,
     post,

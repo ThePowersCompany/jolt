@@ -1,7 +1,13 @@
 const std = @import("std");
 const Type = std.builtin.Type;
-const isOptional = @import("../utils/types.zig").isOptional;
-const hasParamParse = @import("./common.zig").hasParamParse;
+const isOptional = @import("../../utils/types.zig").isOptional;
+
+/// Whether a struct type carries a custom `paramParse`
+/// and therefore stays a single query key (its value parsed from a string),
+/// rather than being flattened into leaf keys.
+pub fn hasParamParse(comptime T: type) bool {
+    return comptime std.meta.hasFn(T, "paramParse");
+}
 
 /// Returns if `T` is a tagged union that should be lifted into the flat query key space.
 /// This ignores the `Optional` wrapper,

@@ -18,17 +18,17 @@ const JsonArray = types.JsonArray;
 const common = @import("./common.zig");
 const strEqls = common.strEqls;
 const startsWith = common.startsWith;
-const hasParamParse = common.hasParamParse;
 const Method = common.Method;
 const EndpointData = common.EndpointData;
 const ParseResult = common.ParseResult;
 const AdjacentUnion = common.AdjacentUnion;
 const FlatLeaf = common.FlatLeaf;
 
-const qp = @import("./query_params.zig");
-const isLiftableUnion = qp.isLiftableUnion;
-const isStructContainingUnionField = qp.isStructContainingUnionField;
-const assertNoQueryKeyCollisions = qp.assertNoQueryKeyCollisions;
+const qp_validation = @import("../middleware/query_params/validation.zig");
+const hasParamParse = qp_validation.hasParamParse;
+const isLiftableUnion = qp_validation.isLiftableUnion;
+const isStructContainingUnionField = qp_validation.isStructContainingUnionField;
+const assertNoQueryKeyCollisions = qp_validation.assertNoQueryKeyCollisions;
 
 pub const TypeGenerator = struct {
     const Self = @This();
