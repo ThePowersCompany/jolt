@@ -682,9 +682,9 @@ pub const TypeGenerator = struct {
 
     /// Combines an already-emitted struct object (`res`)
     /// with the TS utility types implied by its `constraints` decl.
-    /// The `require_at_least_one` rule additionally forces the field to be required.
+    /// The `any_of` rule additionally forces the field to be required.
     fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: ParseResult) !ParseResult {
-        if (comptime constraints.require_at_least_one) {
+        if (comptime constraints.any_of) {
             return .{
                 .parsed = try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{res.parsed}),
                 .optional = false,
@@ -780,7 +780,7 @@ pub const TypeGenerator = struct {
 
     /// Builds the flat TS shape for a struct query parameter.
     ///
-    /// Returns null when the struct contributes no keys (no leaves and no `require_at_least_one`),
+    /// Returns null when the struct contributes no keys (no leaves and no `any_of`),
     /// so it can be omitted from the generated types.
     ///
     /// Union fields are skipped here (see `collectFlatLeaves`) and handled by the caller.
@@ -788,8 +788,8 @@ pub const TypeGenerator = struct {
         var flat_struct: FlatStruct = .{};
         try self.collectFlatLeaves(&flat_struct, S, false, null);
 
-        const require_at_least_one = comptime blk: {
-            if (@hasDecl(T, "constraints")) break :blk T.constraints.require_at_least_one;
+        const any_of = comptime blk: {
+            if (@hasDecl(T, "constraints")) break :blk T.constraints.any_of;
             break :blk false;
         };
 
@@ -799,12 +799,12 @@ pub const TypeGenerator = struct {
             try all.appendSlice(self.arena_alloc, group.items);
         }
 
-        if (all.items.len == 0 and !require_at_least_one) return null;
+        if (all.items.len == 0 and !any_of) return null;
 
         // No groups means the full object is the base, optionally wrapped in AnyOf
         if (flat_struct.groups.items.len == 0) {
             const full = try self.renderLeafObject(all.items);
-            if (require_at_least_one) {
+            if (any_of) {
                 return try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{full});
             }
             return full;
@@ -827,7 +827,7 @@ pub const TypeGenerator = struct {
             try components.append(self.arena_alloc, try self.renderLeafObject(flat_struct.independent.items));
         }
 
-        if (require_at_least_one) {
+        if (any_of) {
             try components.append(self.arena_alloc, try allocPrint(
                 self.arena_alloc,
                 "AnyOf<{s}>",

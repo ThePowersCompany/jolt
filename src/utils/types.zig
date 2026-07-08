@@ -547,12 +547,12 @@ test "Json(JsonArray(T))" {
 /// Attach as a decl inside the struct:
 ///
 ///   pub const constraints: Constraints = .{
-///       .require_at_least_one = true,
+///       .any_of = true,
 ///   };
 ///
 /// Use tagged unions for distinct shapes, e.g. "a & b" OR "c & d".
 pub const Constraints = struct {
-    require_at_least_one: bool = false,
+    any_of: bool = false,
 };
 
 /// Returns whether a (possibly `Optional` wrapped) field carries a provided value.
@@ -573,7 +573,7 @@ pub fn validateConstraints(comptime T: type, value: T) ?[]const u8 {
     if (comptime @typeInfo(T) != .@"struct" or !@hasDecl(T, "constraints")) return null;
 
     const c: Constraints = T.constraints;
-    if (comptime c.require_at_least_one) {
+    if (comptime c.any_of) {
         var any_present = false;
         inline for (@typeInfo(T).@"struct".fields) |f| {
             if (fieldPresent(value, f.name)) {
@@ -587,12 +587,12 @@ pub fn validateConstraints(comptime T: type, value: T) ?[]const u8 {
     return null;
 }
 
-test "validateConstraints require_at_least_one" {
+test "validateConstraints any_of" {
     const Body = struct {
         a: Optional(i32) = .not_provided,
         b: Optional(?i32) = .not_provided,
 
-        pub const constraints: Constraints = .{ .require_at_least_one = true };
+        pub const constraints: Constraints = .{ .any_of = true };
     };
 
     var error_msg: ?[]const u8 = null;
