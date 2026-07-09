@@ -1600,21 +1600,19 @@ test "complex" {
     }
 }
 
-test "edge cases" {
-    {
-        const QP = struct {
-            shift: Optional(?i32) = .not_provided,
-            area: Optional(?i32) = .not_provided,
-            line: Optional(?i32) = .not_provided,
-        };
+test "optional nullable" {
+    const QP = struct {
+        shift: Optional(?i32) = .not_provided,
+        area: Optional(?i32) = .not_provided,
+        line: Optional(?i32) = .not_provided,
+    };
 
-        {
-            const parsed = try parseQuery(QP, std.testing.allocator, "shift=63&area=61&line=null");
-            defer parsed.deinit();
-            const result = try parsed.assert();
-            try std.testing.expectEqual(63, result.shift.get());
-            try std.testing.expectEqual(61, result.area.get());
-            try std.testing.expectEqual(null, result.line.get());
-        }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "shift=63&area=61&line=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(63, result.shift.get());
+        try std.testing.expectEqual(61, result.area.get());
+        try std.testing.expectEqual(null, result.line.get());
     }
 }
