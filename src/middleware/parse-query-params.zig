@@ -491,7 +491,8 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
     var result: T = undefined;
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const is_optional = comptime isOptional(field.type);
-        const FieldType = Unwrap(if (is_optional) field.type.childType() else field.type);
+        const InnerType = if (is_optional) field.type.childType() else field.type;
+        const FieldType = Unwrap(InnerType);
         const field_info = @typeInfo(FieldType);
 
         if (comptime !is_optional and field_info == .@"union" and //
@@ -524,10 +525,11 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
         } else {
             if (try ctx.getParamDecoded(field.name)) |param| {
                 try ctx.markConsumed(field.name);
-                switch (_handleQueryParam(FieldType, ctx.alloc, param.items)) {
+                // Parse against `InnerType` so a native `?T` still accepts "null".
+                switch (_handleQueryParam(InnerType, ctx.alloc, param.items)) {
                     .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
                     .not_provided => {
-                        try recordInvalidParamType(ctx, FieldType, field.name);
+                        try recordInvalidParamType(ctx, InnerType, field.name);
                         return null;
                     },
                 }
@@ -1595,5 +1597,24 @@ test "complex" {
         try std.testing.expect(result.filter == .pagination);
         try std.testing.expectEqual(999, result.filter.pagination.cursor);
         try std.testing.expectEqual(null, result.filter.pagination.limit);
+    }
+}
+
+test "edge cases" {
+    {
+        const QP = struct {
+            shift: Optional(?i32) = .not_provided,
+            area: Optional(?i32) = .not_provided,
+            line: Optional(?i32) = .not_provided,
+        };
+
+        {
+            const parsed = try parseQuery(QP, std.testing.allocator, "shift=63&area=61&line=null");
+            defer parsed.deinit();
+            const result = try parsed.assert();
+            try std.testing.expectEqual(63, result.shift.get());
+            try std.testing.expectEqual(61, result.area.get());
+            try std.testing.expectEqual(null, result.line.get());
+        }
     }
 }
