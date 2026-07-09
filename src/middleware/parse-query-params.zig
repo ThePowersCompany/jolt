@@ -77,10 +77,8 @@ fn hasParamParse(comptime T: type) bool {
 }
 
 /// Returns if a leaf/field is not required
-/// (a custom `Optional`, a native `?T`, or a field with a default value).
 fn isNotRequired(comptime field: Type.StructField) bool {
     return comptime isOptional(field.type) or
-        @typeInfo(field.type) == .optional or
         field.defaultValue() != null;
 }
 
@@ -1214,7 +1212,7 @@ test "weak scalar union" {
     }
 }
 
-test "scalar struct type" {
+test "scalar struct" {
     const DateStr = struct {
         year: i32,
         month: i32,
@@ -1246,6 +1244,83 @@ test "scalar struct type" {
         const parsed = try parseQuery(QP, std.testing.allocator, "day=2026");
         defer parsed.deinit();
         try std.testing.expect(parsed.result == .fail);
+    }
+}
+
+test "heavy nested scalar struct" {
+    const QP = struct {
+        one: struct {
+            two: struct {
+                three: struct {
+                    four: struct {
+                        a: i32,
+                        b: i32,
+
+                        pub fn paramParse(_: Allocator, _: []const u8) !@This() {
+                            return .{ .a = 1, .b = 2 };
+                        }
+                    },
+                },
+            },
+        },
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "one=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "two=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "three=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "four=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(result.one.two.three.four.a, 1);
+        try std.testing.expectEqual(result.one.two.three.four.b, 2);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=1&b=2");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+}
+
+test "nullable field is required" {
+    // only Optional and field with defaults values are truly optional
+    const QP = struct {
+        required: ?i32,
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "required=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(123, result.required);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "required=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(null, result.required);
     }
 }
 
@@ -1429,6 +1504,19 @@ test "nested scalar union" {
     }
 }
 
+// test "nested composite union" {
+//     const QP = union(enum) {
+//         a: union(enum) {
+//             c: i32,
+//             d: []const u8,
+//         },
+//         b: struct {
+//             foo: []const u8,
+//             bar: []const u8,
+//         },
+//     };
+// }
+
 test "scalar union: greedy string variant shadows later variants by order" {
     // A scalar union has no keys to disambiguate variants, only the value string.
     // A `[]const u8` variant always parses, so when it is declared first it shadows every later variant.
@@ -1597,6 +1685,62 @@ test "complex" {
         try std.testing.expect(result.filter == .pagination);
         try std.testing.expectEqual(999, result.filter.pagination.cursor);
         try std.testing.expectEqual(null, result.filter.pagination.limit);
+    }
+}
+
+test "complex union variant matching" {
+    const QP = struct {
+        one: union(enum) {
+            // foo will fail to parse `end_date=null`, so it should fall "up" to the `bar` variant
+            bar: struct {
+                start_date: i32, // required
+                end_date: ?i32 = null, // optional
+            },
+            // should attempt to parse into `foo` first because it has more required properties
+            foo: struct {
+                start_date: i32, // required
+                end_date: i32, // required
+            },
+        },
+        two: union(enum) {
+            foo: struct {
+                b: ?i32, // required
+            },
+            bar: struct {
+                b: []const u8 = "abc", // optional
+            },
+        },
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.one == .bar);
+        try std.testing.expectEqual(123, result.one.bar.start_date);
+        try std.testing.expectEqual(null, result.one.bar.end_date);
+        try std.testing.expect(result.two == .bar);
+        try std.testing.expectEqualStrings("abc", result.two.bar.b);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=123&end_date=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.one == .foo);
+        try std.testing.expectEqual(123, result.one.foo.start_date);
+        try std.testing.expectEqual(123, result.one.foo.end_date);
+        try std.testing.expect(result.two == .bar);
+        try std.testing.expectEqualStrings("abc", result.two.bar.b);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=123&end_date=null");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result.one == .bar);
+        try std.testing.expectEqual(123, result.one.bar.start_date);
+        try std.testing.expectEqual(null, result.one.bar.end_date);
+        try std.testing.expect(result.two == .bar);
+        try std.testing.expectEqualStrings("abc", result.two.bar.b);
     }
 }
 
