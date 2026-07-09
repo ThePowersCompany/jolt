@@ -1359,6 +1359,29 @@ test "heavy nested scalar struct" {
     }
 }
 
+test "foo bar baz" {
+    const QP = union(enum) {
+        foo: union(enum) {
+            bar: struct {
+                baz: ?[]const u8 = null,
+            },
+        },
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(null, result.foo.bar.baz);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "baz=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqualStrings("abc", result.foo.bar.baz.?);
+    }
+}
+
 test "nullable field is required" {
     // only Optional and field with defaults values are truly optional
     const QP = struct {
@@ -1564,18 +1587,80 @@ test "nested scalar union" {
     }
 }
 
-// test "nested composite union" {
-//     const QP = union(enum) {
-//         a: union(enum) {
-//             c: i32,
-//             d: []const u8,
-//         },
-//         b: struct {
-//             foo: []const u8,
-//             bar: []const u8,
-//         },
-//     };
-// }
+test "nested composite union" {
+    const QP = union(enum) {
+        a: union(enum) {
+            c: i32,
+            d: []const u8,
+        },
+        b: union(enum) {
+            foo: []const u8,
+            bar: struct {
+                bar: ?[]const u8 = null,
+                baz: ?[]const u8 = null,
+            },
+        },
+    };
+
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "c=123");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "d=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .a);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "a=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .a);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "b=abc");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "foo=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expect(result.b == .foo);
+        try std.testing.expectEqualStrings("abc", result.b.foo);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "bar=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expect(result.b == .bar);
+        try std.testing.expectEqualStrings("abc", result.b.bar.bar.?);
+        try std.testing.expectEqual(null, result.b.bar.baz);
+    }
+    {
+        const parsed = try parseQuery(QP, std.testing.allocator, "baz=abc");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expect(result.b == .bar);
+        try std.testing.expectEqual(null, result.b.bar.bar);
+        try std.testing.expectEqualStrings("abc", result.b.bar.baz.?);
+    }
+}
 
 test "scalar union: greedy string variant shadows later variants by order" {
     // A scalar union has no keys to disambiguate variants, only the value string.
