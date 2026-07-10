@@ -71,40 +71,6 @@ fn chooseVariant(comptime T: type, variants: []const Variant(T)) VariantChoice(T
     return .none;
 }
 
-/// Returns if a leaf/field is not required
-fn isNotRequired(comptime field: Type.StructField) bool {
-    return comptime isOptional(field.type) or
-        field.defaultValue() != null;
-}
-
-/// Number of required leaf keys of the struct,
-/// recursing into nested plain structs (which are flattened into their leaf keys).
-fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
-    return comptime blk: {
-        var count: usize = 0;
-        for (S.fields) |field| {
-            if (isNotRequired(field)) continue;
-
-            const info = @typeInfo(field.type);
-            if (info == .@"struct" and isComposite(field.type)) {
-                count += getStructRequiredKeyCount(info.@"struct");
-            } else {
-                count += 1;
-            }
-        }
-        break :blk count;
-    };
-}
-
-fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
-    const info = @typeInfo(variant.type);
-    if (comptime info != .@"struct" or !isComposite(variant.type)) {
-        // Normal union variants are keyed by name, so we only have to return 1.
-        return 1;
-    }
-    return getStructRequiredKeyCount(info.@"struct");
-}
-
 /// How a container type (a struct or union) is resolved from query params.
 ///
 /// - composite: flattened or key-selected into its own leaf keys.
@@ -117,39 +83,54 @@ fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
 /// - weak_scalar: parsed from a single query value, namely a `paramParse` type,
 ///     a union with no `void` variant, or any leaf type (int, enum, pointer, etc).
 const ContainerKind = enum {
-    composite,
-    strong_scalar,
-    weak_scalar,
+    composite, // can only ever be used as a composite
+    strong_scalar, // can only ever be used as a scalar
+    weak_scalar, // can be used as scalar or composite depending on if there is a parent key name
 };
 
 fn containerKind(comptime T: type) ContainerKind {
-    // A type with a custom `paramParse` is always parsed from a single value.
-    if (comptime hasParamParse(T)) return .weak_scalar;
+    comptime {
+        // A type with a custom `paramParse` is always parsed from a single value.
+        if (hasParamParse(T)) return .strong_scalar;
 
-    return switch (@typeInfo(T)) {
-        // A plain struct is flattened into its leaf keys.
-        .@"struct" => .composite,
-        .@"union" => |u| kind: {
-            // Composite when any variant is itself composite.
-            inline for (u.fields) |variant| {
-                if (containerKind(variant.type) == .composite) break :kind .composite;
-            }
-            // Otherwise a scalar union, strong when it can represent a `void` case.
-            inline for (u.fields) |variant| {
-                if (variant.type == void) break :kind .strong_scalar;
-            }
-            break :kind .weak_scalar;
-        },
-        // Leaf types (int, float, enum, pointer, optional, void, etc) are scalars.
-        else => .weak_scalar,
-    };
+        return switch (@typeInfo(T)) {
+            .void => @compileError("Void is nothing"),
+            .optional => |o| containerKind(o.child),
+            // A plain struct is flattened into its leaf keys.
+            .@"struct" => .composite,
+            .@"union" => |u| {
+                if (isOptional(T)) {
+                    return containerKind(T.childType());
+                }
+
+                // Composite when any variant is itself composite.
+                const is_comp: bool = for (u.fields) |f| {
+                    if (containerKind(f.type) == .composite) break true;
+                } else false;
+                // Otherwise a scalar union, strong when it can represent a `void` case.
+                const is_strong: bool = for (u.fields) |f| {
+                    if (f.type == void) break true;
+                } else false;
+
+                if (is_comp) {
+                    if (is_strong) @compileError("Container is both composite and a strong scalar: " ++ @typeName(T));
+                    return .composite;
+                } else if (is_strong) {
+                    return .strong_scalar;
+                }
+                return .weak_scalar;
+            },
+            // Leaf types (int, float, enum, pointer, void, etc) are scalars.
+            else => .strong_scalar,
+        };
+    }
 }
 
 /// Whether `T` is flattened or key-selected into leaf query keys
 /// (a plain struct or a composite union),
 /// rather than parsed from a single query value.
 fn isComposite(comptime T: type) bool {
-    return containerKind(T) == .composite;
+    return comptime containerKind(T) == .composite;
 }
 
 fn keysContain(keys: []const []const u8, name: []const u8) bool {
@@ -204,7 +185,7 @@ fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []const u8
     if (comptime @typeInfo(T) == .@"struct" and isComposite(T)) {
         if (!requiredKeysPresent(T, keys)) return null;
         if (!anyStructLeafKeyPresent(T, keys)) return null;
-        return comptime getStructRequiredKeyCount(@typeInfo(T).@"struct");
+        return comptime getRequiredKeyCount(T);
     }
 
     if (comptime @typeInfo(T) == .@"union" and isComposite(T)) {
@@ -224,6 +205,58 @@ fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []const u8
     return 1;
 }
 
+/// Returns if a leaf/field is not required
+fn isNotRequired(comptime field: Type.StructField) bool {
+    return comptime isOptional(field.type) or
+        field.defaultValue() != null;
+}
+
+/// Number of required leaf keys of the type,
+/// recursing into nested types (which are flattened into their leaf keys).
+fn getRequiredKeyCount(comptime T: type) usize {
+    comptime {
+        const kind = containerKind(T);
+        if (kind == .strong_scalar) return 1;
+
+        switch (@typeInfo(T)) {
+            .@"struct" => |S| {
+                var count: usize = 0;
+                for (S.fields) |f| {
+                    // Doesn't matter if fields nested further down are required
+                    if (isNotRequired(f)) continue;
+                    count += getRequiredKeyCount(f.type);
+                }
+                return count;
+            },
+            .@"union" => |U| {
+                if (isOptional(T)) @compileError("No optionals in unions!");
+
+                var count: usize = std.math.maxInt(usize);
+                if (U.fields.len == 0) @compileError("Union must have at least one variant");
+                for (U.fields) |f| {
+                    count = @min(count, getRequiredKeyCount(f.type));
+                }
+                return count;
+            },
+            else => return false,
+        }
+    }
+}
+
+test "getRequiredKeyCount: weak scalar" {
+    const Weak = union(enum) {
+        foo: i32,
+    };
+
+    // forced to be composite because it's directly assigned to the QP
+    const QP1 = Weak;
+    try std.testing.expectEqual(1, comptime getRequiredKeyCount(QP1));
+
+    // forced to be scalar because of the parent struct
+    const QP2 = struct { value: Weak };
+    try std.testing.expectEqual(1, comptime getRequiredKeyCount(QP2));
+}
+
 /// Field index of union `T`'s all-optional fallback variant (zero required keys),
 /// or null if it has none.
 /// At most one may exist (enforced here at compile time).
@@ -231,7 +264,7 @@ fn fallbackVariantIndex(comptime T: type) ?std.meta.Tag(T) {
     comptime {
         var found: ?std.meta.Tag(T) = null;
         for (@typeInfo(T).@"union".fields) |f| {
-            if (getVariantRequiredKeyCount(f) == 0) {
+            if (getRequiredKeyCount(f.type) == 0) {
                 if (found != null) {
                     @compileError("Union " ++ @typeName(T) ++
                         " has more than one all-optional variant;" ++
@@ -930,17 +963,17 @@ const CustomParam = struct {
     }
 };
 
-test "getVariantRequiredKeyCount: scores by required key count" {
+test "getRequiredKeyCount: scores by required key count" {
     const fields = @typeInfo(RangeUnion).@"union".fields;
     // basic
-    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[0]));
+    try std.testing.expectEqual(1, comptime getRequiredKeyCount(fields[0].type));
     // detailed
-    try std.testing.expectEqual(2, getVariantRequiredKeyCount(fields[1]));
+    try std.testing.expectEqual(2, comptime getRequiredKeyCount(fields[1].type));
     // fallback (all optional leaves = score of 0)
-    try std.testing.expectEqual(0, getVariantRequiredKeyCount(fields[2]));
+    try std.testing.expectEqual(0, comptime getRequiredKeyCount(fields[2].type));
 }
 
-test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants score 1" {
+test "getRequiredKeyCount: flattened nested keys, single leaf variants score 1" {
     const U = union(enum) {
         nested: struct {
             range: struct {
@@ -950,16 +983,26 @@ test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants sc
             opt: ?u32 = null,
         },
         custom: CustomParam,
-        flag,
     };
 
     const fields = @typeInfo(U).@"union".fields;
     // Nested flattens to { start, end }, and `opt` is optional and excluded
-    try std.testing.expectEqual(2, getVariantRequiredKeyCount(fields[0]));
+    try std.testing.expectEqual(2, comptime getRequiredKeyCount(fields[0].type));
     // Structs using `paramParse` resolve to a single key
-    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[1]));
-    // void variant is keyed by its name
-    try std.testing.expectEqual(1, getVariantRequiredKeyCount(fields[2]));
+    try std.testing.expectEqual(1, comptime getRequiredKeyCount(fields[1].type));
+}
+
+test "getRequiredKeyCount: nested union fallback" {
+    const T = union(enum) {
+        foo: union(enum) {
+            bar: struct {
+                baz: ?i32 = null,
+            },
+        },
+    };
+
+    const fields = @typeInfo(T).@"union".fields;
+    try std.testing.expectEqual(0, comptime getRequiredKeyCount(fields[0].type));
 }
 
 test "selectVariant: single required key selects Basic variant" {
@@ -1640,7 +1683,11 @@ test "nested composite union" {
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "");
         defer parsed.deinit();
-        try std.testing.expect(parsed.result == .fail);
+        const result = try parsed.assert();
+        try std.testing.expect(result == .b);
+        try std.testing.expect(result.b == .bar);
+        try std.testing.expectEqual(null, result.b.bar.bar);
+        try std.testing.expectEqual(null, result.b.bar.baz);
     }
     {
         const parsed = try parseQuery(QP, std.testing.allocator, "c=123");
