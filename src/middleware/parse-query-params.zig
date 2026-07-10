@@ -209,14 +209,6 @@ fn fallbackVariantIndex(comptime T: type) ?std.meta.Tag(T) {
     }
 }
 
-/// Returns if `tag` is in `excluded`.
-fn isExcluded(comptime T: type, excluded: []const std.meta.Tag(T), tag: std.meta.Tag(T)) bool {
-    for (excluded) |e| {
-        if (e == tag) return true;
-    }
-    return false;
-}
-
 /// Variant selection for union `T` from the set of present query keys.
 ///
 /// Each specific variant (>= 1 required key) is scored by its required key count,
@@ -225,14 +217,14 @@ fn isExcluded(comptime T: type, excluded: []const std.meta.Tag(T), tag: std.meta
 /// When no specific variant matches, the all-optional fallback variant is selected if one exists.
 /// Otherwise, the result is `.none`.
 ///
-/// Variants named in `excluded` are skipped,
+/// Variants in the `excluded` set are skipped,
 /// which lets a caller retry selection after a chosen variant failed to build.
 ///
 /// `.single` always names a variant ready to build, and `.none` means there is nothing to build.
 fn selectVariant(
     comptime T: type,
     present_keys: []const []const u8,
-    excluded: []const std.meta.Tag(T),
+    excluded: std.EnumSet(std.meta.Tag(T)),
 ) VariantChoice(T) {
     const variants = variants: {
         const fields = @typeInfo(T).@"union".fields;
@@ -240,7 +232,7 @@ fn selectVariant(
         inline for (fields, 0..) |f, i| {
             const tag = @field(T, f.name);
             // An excluded variant is never chosen, so skip scoring it and leave the entry unmatched.
-            if (isExcluded(T, excluded, tag)) {
+            if (excluded.contains(tag)) {
                 variants[i] = .{ .tag = tag };
             } else {
                 const score = variantMatchScore(f, present_keys);
@@ -257,7 +249,7 @@ fn selectVariant(
     const choice = chooseVariant(T, &variants);
     if (choice == .none) {
         if (comptime fallbackVariantIndex(T)) |tag| {
-            if (!isExcluded(T, excluded, tag)) return .{ .single = tag };
+            if (!excluded.contains(tag)) return .{ .single = tag };
         }
     }
     return choice;
@@ -671,7 +663,7 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
     // Variants that matched on keys, but values failed to parse into the declared types
     // (e.g. `end_date=null` matches `?i32` but not `i32`).
     // These are excluded from selection so the next most specific variant is tried.
-    var excluded: std.ArrayList(std.meta.Tag(T)) = .empty;
+    var excluded = std.EnumSet(std.meta.Tag(T)).initEmpty();
 
     // The first (most specific) parse failure seen,
     // reported if no variant ends up parsing cleanly.
@@ -679,7 +671,7 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
 
     // Iterate once for every variant
     for (0..@typeInfo(T).@"union".fields.len) |_| {
-        switch (selectVariant(T, present_keys.items, excluded.items)) {
+        switch (selectVariant(T, present_keys.items, excluded)) {
             .single => |tag| {
                 inline for (@typeInfo(T).@"union".fields) |f| {
                     if (@field(T, f.name) == tag) {
@@ -692,7 +684,7 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
                 // then retry with this variant excluded.
                 if (first_failure == null) first_failure = ctx.failure;
                 ctx.restore(snapshot);
-                try excluded.append(ctx.alloc, tag);
+                excluded.insert(tag);
             },
             .multiple => {
                 ctx.fail("Query parameters match more than one variant");
@@ -928,25 +920,25 @@ test "getVariantRequiredKeyCount: flattened nested keys, single leaf variants sc
 }
 
 test "selectVariant: single required key selects Basic variant" {
-    const choice = selectVariant(RangeUnion, &.{"start_date"}, &.{});
+    const choice = selectVariant(RangeUnion, &.{"start_date"}, .initEmpty());
     try std.testing.expect(choice == .single);
     try std.testing.expectEqual(RangeUnion.basic, choice.single);
 }
 
 test "selectVariant: most specific match wins (Detailed over Basic)" {
-    const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" }, &.{});
+    const choice = selectVariant(RangeUnion, &.{ "start_date", "end_date" }, .initEmpty());
     try std.testing.expect(choice == .single);
     try std.testing.expectEqual(RangeUnion.detailed, choice.single);
 }
 
 test "selectVariant: empty query selects the all optional fallback" {
-    const choice = selectVariant(RangeUnion, &.{}, &.{});
+    const choice = selectVariant(RangeUnion, &.{}, .initEmpty());
     try std.testing.expect(choice == .single);
     try std.testing.expectEqual(RangeUnion.all, choice.single);
 }
 
 test "selectVariant: fallback only keys select the all optional fallback" {
-    const choice = selectVariant(RangeUnion, &.{"page"}, &.{});
+    const choice = selectVariant(RangeUnion, &.{"page"}, .initEmpty());
     try std.testing.expect(choice == .single);
     try std.testing.expectEqual(RangeUnion.all, choice.single);
 }
@@ -957,7 +949,7 @@ test "selectVariant: no specific match and no fallback -> none" {
         a: struct { x: []const u8 },
         b: struct { y: []const u8 },
     };
-    try std.testing.expect(selectVariant(U, &.{"z"}, &.{}) == .none);
+    try std.testing.expect(selectVariant(U, &.{"z"}, .initEmpty()) == .none);
 }
 
 test "selectVariant: different same-count variants are ambiguous" {
@@ -965,13 +957,13 @@ test "selectVariant: different same-count variants are ambiguous" {
         a: struct { x: []const u8 },
         b: struct { y: []const u8 },
     };
-    try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }, &.{}) == .multiple);
+    try std.testing.expect(selectVariant(Xor, &.{ "x", "y" }, .initEmpty()) == .multiple);
 
-    const a = selectVariant(Xor, &.{"x"}, &.{});
+    const a = selectVariant(Xor, &.{"x"}, .initEmpty());
     try std.testing.expect(a == .single);
     try std.testing.expectEqual(Xor.a, a.single);
 
-    const b = selectVariant(Xor, &.{"y"}, &.{});
+    const b = selectVariant(Xor, &.{"y"}, .initEmpty());
     try std.testing.expect(b == .single);
     try std.testing.expectEqual(Xor.b, b.single);
 }
@@ -990,10 +982,10 @@ test "selectVariant: nested struct needs all its required leaf keys" {
     };
 
     // Only one nested leaf present -> nested does not match
-    try std.testing.expect(selectVariant(U, &.{"start"}, &.{}) == .none);
+    try std.testing.expect(selectVariant(U, &.{"start"}, .initEmpty()) == .none);
 
     // Both nested leaves present -> nested selected
-    const both = selectVariant(U, &.{ "start", "end" }, &.{});
+    const both = selectVariant(U, &.{ "start", "end" }, .initEmpty());
     try std.testing.expect(both == .single);
     try std.testing.expectEqual(U.nested, both.single);
 }
@@ -1008,19 +1000,19 @@ test "selectVariant: name keyed variants match on their variant name" {
     };
 
     {
-        const choice = selectVariant(U, &.{"custom"}, &.{});
+        const choice = selectVariant(U, &.{"custom"}, .initEmpty());
         try std.testing.expect(choice == .single);
         try std.testing.expectEqual(U.custom, choice.single);
     }
 
     {
-        const choice = selectVariant(U, &.{"flag"}, &.{});
+        const choice = selectVariant(U, &.{"flag"}, .initEmpty());
         try std.testing.expect(choice == .single);
         try std.testing.expectEqual(U.flag, choice.single);
     }
 
     {
-        const choice = selectVariant(U, &.{"z"}, &.{});
+        const choice = selectVariant(U, &.{"z"}, .initEmpty());
         try std.testing.expect(choice == .single);
         try std.testing.expectEqual(U.other, choice.single);
     }
