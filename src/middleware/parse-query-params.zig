@@ -86,7 +86,7 @@ fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
             if (isNotRequired(field)) continue;
 
             const info = @typeInfo(field.type);
-            if (info == .@"struct" and !hasParamParse(field.type)) {
+            if (info == .@"struct" and isComposite(field.type)) {
                 count += getStructRequiredKeyCount(info.@"struct");
             } else {
                 count += 1;
@@ -98,39 +98,58 @@ fn getStructRequiredKeyCount(comptime S: Type.Struct) usize {
 
 fn getVariantRequiredKeyCount(comptime variant: Type.UnionField) usize {
     const info = @typeInfo(variant.type);
-    if (comptime info != .@"struct" or hasParamParse(variant.type)) {
+    if (comptime info != .@"struct" or !isComposite(variant.type)) {
         // Normal union variants are keyed by name, so we only have to return 1.
         return 1;
     }
     return getStructRequiredKeyCount(info.@"struct");
 }
 
-/// How a union is resolved from query params.
+/// How a container type (a struct or union) is resolved from query params.
 ///
-/// - composite: at least one variant carries a nested plain struct with its own leaf keys.
-///     Composite unions are key-selected from which variant keys are present (`parseCompositeUnion`),
+/// - composite: flattened or key-selected into its own leaf keys.
+///     A plain struct (no `paramParse`) is flattened into its fields,
+///     and a union with at least one composite variant is key-selected
+///     from which variant keys are present (`parseCompositeUnion`),
 ///     so variant declaration order is irrelevant.
-/// - strong_scalar: a scalar union that has a `void` variant.
-/// - weak_scalar: a scalar union with no `void` variant.
-const UnionKind = enum {
+/// - strong_scalar: parsed from a single query value, with an explicit absent form,
+///     namely a union carrying a `void` variant.
+/// - weak_scalar: parsed from a single query value, namely a `paramParse` type,
+///     a union with no `void` variant, or any leaf type (int, enum, pointer, etc).
+const ContainerKind = enum {
     composite,
     strong_scalar,
     weak_scalar,
 };
 
-fn unionKind(comptime U: type) UnionKind {
-    const fields = @typeInfo(U).@"union".fields;
+fn containerKind(comptime T: type) ContainerKind {
+    // A type with a custom `paramParse` is always parsed from a single value.
+    if (comptime hasParamParse(T)) return .weak_scalar;
 
-    inline for (fields) |variant| {
-        if (comptime @typeInfo(variant.type) == .@"struct" and !hasParamParse(variant.type)) {
-            return .composite;
-        }
-    }
+    return switch (@typeInfo(T)) {
+        // A plain struct is flattened into its leaf keys.
+        .@"struct" => .composite,
+        .@"union" => |u| kind: {
+            // Composite when any variant is itself composite.
+            inline for (u.fields) |variant| {
+                if (containerKind(variant.type) == .composite) break :kind .composite;
+            }
+            // Otherwise a scalar union, strong when it can represent a `void` case.
+            inline for (u.fields) |variant| {
+                if (variant.type == void) break :kind .strong_scalar;
+            }
+            break :kind .weak_scalar;
+        },
+        // Leaf types (int, float, enum, pointer, optional, void, etc) are scalars.
+        else => .weak_scalar,
+    };
+}
 
-    inline for (fields) |variant| {
-        if (comptime variant.type == void) return .strong_scalar;
-    }
-    return .weak_scalar;
+/// Whether `T` is flattened or key-selected into leaf query keys
+/// (a plain struct or a composite union),
+/// rather than parsed from a single query value.
+fn isComposite(comptime T: type) bool {
+    return containerKind(T) == .composite;
 }
 
 fn keysContain(keys: []const []const u8, name: []const u8) bool {
@@ -145,7 +164,7 @@ fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool 
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isNotRequired(field)) continue;
 
-        if (comptime @typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+        if (comptime @typeInfo(field.type) == .@"struct" and isComposite(field.type)) {
             if (!requiredKeysPresent(field.type, present_keys)) return false;
         } else if (!keysContain(present_keys, field.name)) {
             return false;
@@ -157,7 +176,7 @@ fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool 
 /// Returns if any leaf key of struct `T` is in `present_keys`.
 fn anyStructLeafKeyPresent(comptime T: type, present_keys: []const []const u8) bool {
     inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (comptime @typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+        if (comptime @typeInfo(field.type) == .@"struct" and isComposite(field.type)) {
             if (anyStructLeafKeyPresent(field.type, present_keys)) return true;
         } else if (keysContain(present_keys, field.name)) {
             return true;
@@ -182,13 +201,13 @@ fn anyStructLeafKeyPresent(comptime T: type, present_keys: []const []const u8) b
 fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []const u8) ?usize {
     const T = variant.type;
 
-    if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
+    if (comptime @typeInfo(T) == .@"struct" and isComposite(T)) {
         if (!requiredKeysPresent(T, keys)) return null;
         if (!anyStructLeafKeyPresent(T, keys)) return null;
         return comptime getStructRequiredKeyCount(@typeInfo(T).@"struct");
     }
 
-    if (comptime @typeInfo(T) == .@"union" and !hasParamParse(T) and unionKind(T) == .composite) {
+    if (comptime @typeInfo(T) == .@"union" and isComposite(T)) {
         var highest_score: ?usize = null;
         inline for (@typeInfo(T).@"union".fields) |inner| {
             if (variantMatchScore(inner, keys)) |score| {
@@ -529,7 +548,7 @@ fn anyLeafPresent(comptime T: type, ctx: *ParseCtx) !bool {
             inline for (@typeInfo(F).@"union".fields) |variant| {
                 if (try isVariantPresent(variant, ctx)) return true;
             }
-        } else if (comptime @typeInfo(F) == .@"struct" and !hasParamParse(F)) {
+        } else if (comptime @typeInfo(F) == .@"struct" and isComposite(F)) {
             if (try anyLeafPresent(F, ctx)) return true;
         } else if ((try ctx.getParamDecoded(field.name)) != null) {
             return true;
@@ -549,15 +568,13 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
         const FieldType = Unwrap(InnerType);
         const field_info = @typeInfo(FieldType);
 
-        if (comptime !is_optional and field_info == .@"union" and //
-            !hasParamParse(FieldType) and unionKind(FieldType) == .composite)
-        {
+        if (comptime !is_optional and field_info == .@"union" and isComposite(FieldType)) {
             // Composite unions are key-selected from the variant keys present.
             // Scalar unions fall through to be value-selected against `field.name`,
             // exactly like an `Optional(union)` field.
             const u = (try parseCompositeUnion(FieldType, ctx)) orelse return null;
             @field(result, field.name) = u;
-        } else if (comptime field_info == .@"struct" and !hasParamParse(FieldType)) {
+        } else if (comptime field_info == .@"struct" and isComposite(FieldType)) {
             if (try anyLeafPresent(FieldType, ctx)) {
                 const s = (try parseFlatStruct(FieldType, ctx)) orelse return null;
                 @field(result, field.name) = if (is_optional) .to(s) else s;
@@ -609,10 +626,10 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
 /// Any other variant matches on its variant name used as a key.
 fn isVariantPresent(comptime variant: Type.UnionField, ctx: *ParseCtx) !bool {
     const T = variant.type;
-    if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
+    if (comptime @typeInfo(T) == .@"struct" and isComposite(T)) {
         return try anyLeafPresent(T, ctx);
     }
-    if (comptime @typeInfo(T) == .@"union" and !hasParamParse(T) and unionKind(T) == .composite) {
+    if (comptime @typeInfo(T) == .@"union" and isComposite(T)) {
         inline for (@typeInfo(T).@"union".fields) |inner| {
             if (try isVariantPresent(inner, ctx)) return true;
         }
@@ -629,14 +646,14 @@ fn buildVariant(comptime T: type, comptime field: Type.UnionField, ctx: *ParseCt
     if (V == void) {
         try ctx.markConsumed(field.name);
         return @unionInit(T, field.name, {});
-    } else if (comptime @typeInfo(V) == .@"struct" and !hasParamParse(V)) {
+    } else if (comptime @typeInfo(V) == .@"struct" and isComposite(V)) {
         const s = try parseFlatStruct(V, ctx) orelse return null;
         if (types.validateConstraints(V, s)) |err_msg| {
             ctx.fail(err_msg);
             return null;
         }
         return @unionInit(T, field.name, s);
-    } else if (comptime @typeInfo(V) == .@"union" and !hasParamParse(V) and unionKind(V) == .composite) {
+    } else if (comptime @typeInfo(V) == .@"union" and isComposite(V)) {
         const u = try parseCompositeUnion(V, ctx) orelse return null;
         return @unionInit(T, field.name, u);
     } else {
@@ -766,7 +783,7 @@ fn allFieldsOptional(comptime QP: type) bool {
         // A required composite-union field is still satisfiable by an empty query
         // when the union has an all-optional fallback variant.
         const T = field.type;
-        if (comptime @typeInfo(T) == .@"union" and !hasParamParse(T) and unionKind(T) == .composite) {
+        if (comptime @typeInfo(T) == .@"union" and isComposite(T)) {
             if (comptime fallbackVariantIndex(T) != null) continue;
         }
         return false;
