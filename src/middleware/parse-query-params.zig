@@ -154,12 +154,27 @@ fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool 
     return true;
 }
 
+/// Returns if any leaf key of struct `T` is in `present_keys`.
+fn anyStructLeafKeyPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime @typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+            if (anyStructLeafKeyPresent(field.type, present_keys)) return true;
+        } else if (keysContain(present_keys, field.name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Specificity score of `variant` given the present `keys`,
 /// or null if it does not match.
 /// A higher score is a more specific match (see `chooseVariant`).
 ///
 /// - A plain struct variant matches when all its required leaf keys are present,
+///     and at least one of its keys is present,
 ///     scored by its required leaf key count.
+///     An all-optional struct with no key present does not match here,
+///     and is left for the fallback (see `fallbackVariantIndex`).
 /// - A nested composite union variant is scored by its matched inner variant:
 ///     we recurse and take the most specific inner variant that matches,
 ///     so an inner `{first, last}` beats an inner `{first}` when both keys are present.
@@ -169,6 +184,7 @@ fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []const u8
 
     if (comptime @typeInfo(T) == .@"struct" and !hasParamParse(T)) {
         if (!requiredKeysPresent(T, keys)) return null;
+        if (!anyStructLeafKeyPresent(T, keys)) return null;
         return comptime getStructRequiredKeyCount(@typeInfo(T).@"struct");
     }
 
@@ -226,8 +242,16 @@ fn selectVariant(
     present_keys: []const []const u8,
     excluded: std.EnumSet(std.meta.Tag(T)),
 ) VariantChoice(T) {
+    const fields = @typeInfo(T).@"union".fields;
+
+    // A single-variant union has nothing to disambiguate,
+    // so its sole variant is always the choice (unless already ruled out).
+    if (comptime fields.len == 1) {
+        const only = @field(T, fields[0].name);
+        return if (excluded.contains(only)) .none else .{ .single = only };
+    }
+
     const variants = variants: {
-        const fields = @typeInfo(T).@"union".fields;
         var variants = [_]Variant(T){.{ .tag = undefined }} ** fields.len;
         inline for (fields, 0..) |f, i| {
             const tag = @field(T, f.name);
@@ -238,7 +262,9 @@ fn selectVariant(
                 const score = variantMatchScore(f, present_keys);
                 variants[i] = .{
                     .tag = tag,
-                    .matched = if (score) |s| s > 0 else false,
+                    // A variant matches once any key addressing it is present,
+                    // even when it requires no keys (score 0).
+                    .matched = score != null,
                     .required_key_count = score orelse 0,
                 };
             }
