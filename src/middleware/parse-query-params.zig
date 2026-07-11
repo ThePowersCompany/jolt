@@ -860,8 +860,6 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
     }.parseQueryParams;
 }
 
-// selectVariant tests
-
 const Basic = struct {
     start_date: []const u8,
 };
