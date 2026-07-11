@@ -361,13 +361,9 @@ const ParseCtx = struct {
     }
 };
 
-/// Records a 400 for a query parameter whose value could not be parsed to `ExpectedType`.
-fn recordInvalidParamType(ctx: *ParseCtx, comptime ExpectedType: type, field_name: []const u8) !void {
-    ctx.fail(try allocPrint(
-        ctx.alloc,
-        "Incorrect query parameter type for {s} - Expected {any}",
-        .{ field_name, ExpectedType },
-    ));
+/// Records a 400 for a query parameter whose value could not be parsed into its expected type.
+fn recordInvalidParamType(ctx: *ParseCtx, field_name: []const u8) !void {
+    ctx.fail(try allocPrint(ctx.alloc, "Incorrect query parameter type for {s}", .{field_name}));
 }
 
 /// Parses a single query value string into `FieldType`.
@@ -573,7 +569,7 @@ fn parseFlatStruct(comptime T: type, ctx: *ParseCtx) !?T {
                 switch (_handleQueryParam(InnerType, ctx.alloc, param.items)) {
                     .value => |v| @field(result, field.name) = if (is_optional) .to(v) else v,
                     .not_provided => {
-                        try recordInvalidParamType(ctx, InnerType, field.name);
+                        try recordInvalidParamType(ctx, field.name);
                         return null;
                     },
                 }
@@ -637,7 +633,7 @@ fn buildVariant(comptime T: type, comptime field: Type.UnionField, ctx: *ParseCt
                 return @unionInit(T, field.name, v);
             },
             .not_provided => {
-                try recordInvalidParamType(ctx, V, field.name);
+                try recordInvalidParamType(ctx, field.name);
                 return null;
             },
         }
@@ -1320,7 +1316,7 @@ test "matched specific variant parse failure is preferred over fallback" {
         // The reported failure is the parse error for start_date, not "unexpected params".
         try std.testing.expectEqualStrings(
             parsed.result.fail,
-            "Incorrect query parameter type for start_date - Expected i32",
+            "Incorrect query parameter type for start_date",
         );
     }
     {
