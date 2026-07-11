@@ -654,9 +654,15 @@ fn buildVariant(comptime T: type, comptime field: Type.UnionField, ctx: *ParseCt
 /// This mirrors the generated `XOR` types.
 ///
 /// A variant is only attempted when its keys are present; the first one that builds wins.
-/// A single all-optional variant (zero required keys) acts as the fallback (tried last),
-/// so an empty query still resolves.
+/// A single all-optional variant (zero required keys) acts as the fallback,
+/// so an empty (or fallback-only) query still resolves.
 /// Only one fallback may exist, which is enforced at compile time by `findFallbackVariant`.
+///
+/// The fallback is used only when no specific variant's keys were present.
+/// If a specific variant matched on keys but failed to parse its values,
+/// that parse failure is reported rather than silently falling back:
+/// the fallback ignores those keys,
+/// so falling back would both hide the real error and leave the keys to be flagged as unexpected downstream.
 ///
 /// If a request supplies keys from more than one variant at once,
 /// whichever is attempted first consumes its own keys
@@ -675,17 +681,33 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
     // The first (most specific) parse failure seen,
     // reported if no variant ends up parsing cleanly.
     var first_failure: ?[]const u8 = null;
+    // Whether any specific (non-fallback) variant had its keys present.
+    // When true, the fallback is not tried: the request was aimed at a specific variant.
+    var specific_matched = false;
 
+    // Specific variants first, most specific first (the fallback is ordered last and skipped here).
     inline for (comptime orderedVariants(T)) |tag| {
         inline for (@typeInfo(T).@"union".fields) |f| {
-            if (comptime @field(T, f.name) == tag) {
-                // A normal variant is tried only when its keys are present.
-                // The fallback is always tried, but last (it is ordered last).
-                if (tag == fallback or variantMatchScore(f, present_keys.items) != null) {
+            if (comptime @field(T, f.name) == tag and tag != fallback) {
+                if (variantMatchScore(f, present_keys.items) != null) {
+                    specific_matched = true;
                     if (try buildVariant(T, f, ctx)) |v| return v;
 
                     // Keys were present but the values did not parse:
                     // keep the failure and roll back, then try the next variant.
+                    if (first_failure == null) first_failure = ctx.failure;
+                    ctx.restore(snapshot);
+                }
+            }
+        }
+    }
+
+    // Fall back to the all-optional variant only when the request did not target a specific one.
+    if (comptime fallback) |fb| {
+        if (!specific_matched) {
+            inline for (@typeInfo(T).@"union".fields) |f| {
+                if (comptime @field(T, f.name) == fb) {
+                    if (try buildVariant(T, f, ctx)) |v| return v;
                     if (first_failure == null) first_failure = ctx.failure;
                     ctx.restore(snapshot);
                 }
@@ -1284,6 +1306,62 @@ test "heavy nested scalar struct" {
         const parsed = try parseQuery(QP, std.testing.allocator, "a=1&b=2");
         defer parsed.deinit();
         try std.testing.expect(parsed.result == .fail);
+    }
+}
+
+test "matched specific variant parse failure is preferred over fallback" {
+    // A union whose specific variant (`date_range`) shares no required key
+    // with the all-optional fallback (`all`).
+    // When `start_date` is present but its value does not parse,
+    // the failure must be the parse error,
+    // not an "unexpected params" message from silently falling back to `all` (which ignores `start_date`).
+    const QP = union(enum) {
+        id: i32,
+        dsc_row_id: i32,
+        date_range: struct {
+            start_date: i32,
+            end_date: Optional(i32) = .not_provided,
+            line: Optional(i32) = .not_provided,
+            shift: Optional(i32) = .not_provided,
+        },
+        all: struct {
+            line: Optional(i32) = .not_provided,
+            shift: Optional(i32) = .not_provided,
+        },
+    };
+
+    {
+        // `start_date` is present but fails to parse as a string.
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=invalid");
+        defer parsed.deinit();
+        try std.testing.expect(parsed.result == .fail);
+        // The reported failure is the parse error for start_date, not "unexpected params".
+        try std.testing.expectEqualStrings(
+            parsed.result.fail,
+            "Incorrect query parameter type for start_date - Expected i32",
+        );
+    }
+    {
+        // A valid date_range still parses.
+        const parsed = try parseQuery(QP, std.testing.allocator, "start_date=123");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(123, result.date_range.start_date);
+    }
+    {
+        // Fallback-only keys still resolve to `all`.
+        const parsed = try parseQuery(QP, std.testing.allocator, "line=1&shift=2");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expectEqual(1, result.all.line.get());
+        try std.testing.expectEqual(2, result.all.shift.get());
+    }
+    {
+        // Empty query resolves to the all-optional fallback.
+        const parsed = try parseQuery(QP, std.testing.allocator, "");
+        defer parsed.deinit();
+        const result = try parsed.assert();
+        try std.testing.expect(result == .all);
     }
 }
 
