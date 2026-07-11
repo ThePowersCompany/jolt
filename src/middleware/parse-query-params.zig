@@ -653,16 +653,9 @@ fn buildVariant(comptime T: type, comptime field: Type.UnionField, ctx: *ParseCt
 /// so both keys select the former while `start_date` alone selects the latter.
 /// This mirrors the generated `XOR` types.
 ///
-/// A variant is only attempted when its keys are present; the first one that builds wins.
-/// A single all-optional variant (zero required keys) acts as the fallback,
-/// so an empty (or fallback-only) query still resolves.
+/// A single all-optional variant (zero required keys) acts as the fallback and is ordered last,
+/// so it is only reached once every specific variant has been tried.
 /// Only one fallback may exist, which is enforced at compile time by `findFallbackVariant`.
-///
-/// The fallback is used only when no specific variant's keys were present.
-/// If a specific variant matched on keys but failed to parse its values,
-/// that parse failure is reported rather than silently falling back:
-/// the fallback ignores those keys,
-/// so falling back would both hide the real error and leave the keys to be flagged as unexpected downstream.
 ///
 /// If a request supplies keys from more than one variant at once,
 /// whichever is attempted first consumes its own keys
@@ -681,33 +674,22 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
     // The first (most specific) parse failure seen,
     // reported if no variant ends up parsing cleanly.
     var first_failure: ?[]const u8 = null;
-    // Whether any specific (non-fallback) variant had its keys present.
-    // When true, the fallback is not tried: the request was aimed at a specific variant.
-    var specific_matched = false;
 
-    // Specific variants first, most specific first (the fallback is ordered last and skipped here).
+    // Attempt variants most specific first; the all-optional fallback is ordered last.
+    // A specific variant is tried when its keys are present.
     inline for (comptime orderedVariants(T)) |tag| {
         inline for (@typeInfo(T).@"union".fields) |f| {
-            if (comptime @field(T, f.name) == tag and tag != fallback) {
-                if (variantMatchScore(f, present_keys.items) != null) {
-                    specific_matched = true;
+            if (comptime @field(T, f.name) == tag) {
+                const matches = if (fallback == tag)
+                    first_failure == null
+                else
+                    variantMatchScore(f, present_keys.items) != null;
+
+                if (matches) {
                     if (try buildVariant(T, f, ctx)) |v| return v;
 
                     // Keys were present but the values did not parse:
                     // keep the failure and roll back, then try the next variant.
-                    if (first_failure == null) first_failure = ctx.failure;
-                    ctx.restore(snapshot);
-                }
-            }
-        }
-    }
-
-    // Fall back to the all-optional variant only when the request did not target a specific one.
-    if (comptime fallback) |fb| {
-        if (!specific_matched) {
-            inline for (@typeInfo(T).@"union".fields) |f| {
-                if (comptime @field(T, f.name) == fb) {
-                    if (try buildVariant(T, f, ctx)) |v| return v;
                     if (first_failure == null) first_failure = ctx.failure;
                     ctx.restore(snapshot);
                 }
