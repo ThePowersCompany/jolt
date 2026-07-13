@@ -663,7 +663,7 @@ pub const TypeGenerator = struct {
 
         if (s) |_| {
             const type_name = shortTypeName(@typeName(ResponseType));
-            if (!self.top_level_types.contains(type_name) and !isInlinedStruct(type_name)) {
+            if (!self.top_level_types.contains(type_name) and !isInlinedType(type_name)) {
                 std.log.err("{s} must be pub", .{type_name});
                 return error.ResponseTypeIsPrivate;
             }
@@ -705,16 +705,29 @@ pub const TypeGenerator = struct {
     /// Query params are a flat key/value store, so a tagged union maps to a flattened TS union.
     /// The active variant is inferred at runtime from which keys are present.
     /// Anything else falls back to the normal struct handling.
-    fn extractQueryParams(self: *Self, T: type) !ParseResult {
-        const info = @typeInfo(T);
-        if (comptime info == .@"union" and !isOptional(T)) {
-            return try self.parseFlatUnion(info.@"union");
-        }
+    fn extractQueryParams(self: *Self, comptime T: type) !ParseResult {
+        const param_res = blk: {
+            const info = @typeInfo(T);
+            if (comptime info == .@"union" and !isOptional(T)) {
+                break :blk try self.parseFlatUnion(info.@"union");
+            }
+            if (comptime isStructContainingUnionField(T)) {
+                break :blk try self.parseFlatQueryStruct(T, info.@"struct");
+            }
+            // NOTE: Returns the identifier from the function early.
+            return try self.extractIdentifier(T);
+        };
 
-        if (comptime isStructContainingUnionField(T)) {
-            return try self.parseFlatQueryStruct(T, info.@"struct");
-        }
-        return try self.extractIdentifier(T);
+        // Only named flattened unions become exported top level TS types.
+        // I.e. we aren't exporting "bare" union types.
+        const is_liftable = comptime isLiftableUnion(T) or isStructContainingUnionField(T);
+        if (comptime !is_liftable) return param_res;
+
+        const type_name = comptime shortTypeName(@typeName(T));
+        if (comptime isInlinedType(type_name)) return param_res;
+
+        try self.setTopLevelType(type_name, param_res);
+        return .{ .parsed = type_name, .optional = param_res.optional };
     }
 
     /// Parses a union into a flat TS union.
@@ -1000,9 +1013,13 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn isInlinedStruct(struct_name: []const u8) bool {
-        // NOTE: There doesn't seem to be a better way of doing this, currently
-        return std.mem.containsAtLeast(u8, struct_name, 1, "__struct_");
+    /// Whether `type_name` is an anonymous inline container rather than a named (`pub const`) type.
+    /// Zig names such types `<parent>__struct_N` / `__union_N` / `__enum_N`,
+    /// so they have no meaningful name to export and must stay inlined.
+    fn isInlinedType(type_name: []const u8) bool {
+        return std.mem.containsAtLeast(u8, type_name, 1, "__struct_") or
+            std.mem.containsAtLeast(u8, type_name, 1, "__union_") or
+            std.mem.containsAtLeast(u8, type_name, 1, "__enum_");
     }
 };
 
@@ -1116,21 +1133,22 @@ test "JsonArray(T)" {
 
 // Query parameter edge case tests
 
+const Filter = union(enum) {
+    basic: struct { start_date: []const u8 },
+    detailed: struct { start_date: []const u8, end_date: []const u8 },
+};
+
 test "extractQueryParams: union with subset variants" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const Filter = union(enum) {
-        basic: struct { start_date: []const u8 },
-        detailed: struct { start_date: []const u8, end_date: []const u8 },
-    };
-
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Filter);
+    try std.testing.expectEqualStrings("Filter", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\XOR<({
         \\start_date: string
@@ -1139,9 +1157,24 @@ test "extractQueryParams: union with subset variants" {
         \\end_date: string
         \\})>
     ,
-        parse_result.parsed,
+        type_generator.top_level_types.get("Filter").?.parsed,
     );
 }
+
+const LostProductionFilter = union(enum) {
+    id: i32,
+    dsc_row: i32,
+    date_range: struct {
+        start_date: []const u8,
+        end_date: ?[]const u8,
+        line: ?i32 = null,
+        shift: ?i32 = null,
+    },
+    all: struct {
+        line: ?i32 = null,
+        shift: ?i32 = null,
+    },
+};
 
 test "extractQueryParams: LostProductionFilter (scalar + struct variants + shared optionals)" {
     const alloc = std.testing.allocator;
@@ -1149,27 +1182,11 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    // TODO: Talk to Bradley about this, end_date being nullable with no default, etc.
-    // Use Optional?
-    const LostProductionFilter = union(enum) {
-        id: i32,
-        dsc_row: i32,
-        date_range: struct {
-            start_date: []const u8,
-            end_date: ?[]const u8,
-            line: ?i32 = null,
-            shift: ?i32 = null,
-        },
-        all: struct {
-            line: ?i32 = null,
-            shift: ?i32 = null,
-        },
-    };
-
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
+    try std.testing.expectEqualStrings("LostProductionFilter", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
         \\start_date: string
@@ -1181,9 +1198,17 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
         \\shift?: number|null
         \\})>>>
     ,
-        parse_result.parsed,
+        type_generator.top_level_types.get("LostProductionFilter").?.parsed,
     );
 }
+
+const Query = struct {
+    page: i32,
+    filter: union(enum) {
+        by_id: i32,
+        by_date: struct { start_date: []const u8 },
+    },
+};
 
 test "extractQueryParams: base keys + union variant keys" {
     const alloc = std.testing.allocator;
@@ -1191,18 +1216,11 @@ test "extractQueryParams: base keys + union variant keys" {
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const Query = struct {
-        page: i32,
-        filter: union(enum) {
-            by_id: i32,
-            by_date: struct { start_date: []const u8 },
-        },
-    };
-
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Query);
+    try std.testing.expectEqualStrings("Query", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\(XOR<({ by_id: number }), ({
         \\start_date: string
@@ -1210,7 +1228,49 @@ test "extractQueryParams: base keys + union variant keys" {
         \\page: number
         \\}
     ,
-        parse_result.parsed,
+        type_generator.top_level_types.get("Query").?.parsed,
+    );
+}
+
+// A named (pub const) union query-params type, as used by real endpoints.
+const LostProductionQueryParams = union(enum) {
+    id: i32,
+    dsc_row_id: i32,
+    date_range: struct {
+        start_date: []const u8,
+        end_date: types.Optional([]const u8) = .not_provided,
+    },
+};
+
+const LostProdEndpoint = struct {
+    const Ctx = struct { query_params: LostProductionQueryParams };
+    pub const Body = struct { ok: bool };
+    const Res = struct { body: ?Body = null };
+
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: named union query params are exported and referenced by name" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/company/lost-production", LostProdEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try std.testing.expect(
+        std.mem.indexOf(u8, output, "export type LostProductionQueryParams = ") != null,
+    );
+
+    // Referenced by name at the endpoint rather than inlined as the raw type
+    try std.testing.expect(
+        std.mem.indexOf(u8, output, "queryParams: LostProductionQueryParams") != null,
     );
 }
 
