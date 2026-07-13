@@ -75,7 +75,8 @@ pub const TypeGenerator = struct {
     }
 
     fn getTopLevelType(self: *Self, name: []const u8) ?ParseResult {
-        return self.top_level_types.get(name) orelse null;
+        const entry = self.top_level_types.get(name) orelse return null;
+        return entry orelse ParseResult{ .parsed = name, .optional = false };
     }
 
     /// "Registers" a top level type name before the full type has been generated.
@@ -1383,6 +1384,60 @@ test "generateTypes: same tagged union reached from two endpoints is exported on
     try std.testing.expectEqual(
         1,
         std.mem.count(u8, output, "export type AlertPayload ="),
+    );
+}
+
+// A child struct declared as a top-level type in its own endpoint file
+const ReportRowEndpoint = struct {
+    pub const ReportRow = struct {
+        id: i32,
+        label: []const u8,
+    };
+    const Ctx = struct {};
+    const Res = struct { body: ?ReportRow = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+// A parent in a different endpoint that references the same type above
+const ReportEndpoint = struct {
+    pub const Report = struct {
+        id: i32,
+        rows: []ReportRowEndpoint.ReportRow,
+    };
+    const Ctx = struct {};
+    const Res = struct { body: ?Report = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: a type declared in another endpoint is referenced by name, not inlined" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    // Order matters: the referencing endpoint (/report) comes first, so `ReportRow` is still an
+    // unrendered pass-1 placeholder when `Report`'s `rows` field is generated in pass 2. This is
+    // the exact condition that previously caused the child to be inlined instead of referenced.
+    const endpoints = [_]EndpointDef{
+        .{ "/report", ReportEndpoint },
+        .{ "/report/row", ReportRowEndpoint },
+    };
+    const output = try type_generator.generateTypes(&endpoints);
+
+    // The parent references the child by name...
+    try std.testing.expect(
+        std.mem.indexOf(u8, output, "rows: ReportRow[]") != null,
+    );
+    // ...and the child is still exported as its own top-level type.
+    try std.testing.expect(
+        std.mem.indexOf(u8, output, "export type ReportRow =") != null,
     );
 }
 
