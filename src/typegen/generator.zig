@@ -27,7 +27,6 @@ const FlatLeaf = common.FlatLeaf;
 const qp_validation = @import("../middleware/query_params/validation.zig");
 const hasParamParse = qp_validation.hasParamParse;
 const isLiftableUnion = qp_validation.isLiftableUnion;
-const isStructContainingUnionField = qp_validation.isStructContainingUnionField;
 
 pub const TypeGenerator = struct {
     const Self = @This();
@@ -741,7 +740,7 @@ pub const TypeGenerator = struct {
         if (comptime info == .@"union" and !isOptional(T)) {
             return self.parseFlatUnion(info.@"union");
         }
-        if (comptime isStructContainingUnionField(T)) {
+        if (comptime info == .@"struct") {
             return self.parseFlatQueryStruct(T, info.@"struct");
         }
         return self.extractIdentifier(T);
@@ -1239,6 +1238,40 @@ test "extractQueryParams: base keys + union variant keys" {
         \\start_date: string
         \\})>) & {
         \\page: number
+        \\}
+    ,
+        parse_result.parsed,
+    );
+}
+
+// Mimics `Str(Date)`: a query-param wrapper whose runtime value is always a string,
+// so typegen must coerce it to `string` instead of expanding its internal `{ str, data }` representation.
+const StrDate = struct {
+    str: []const u8,
+    data: struct { year: i32, month: i32, day: i32 },
+    pub fn paramParse() void {}
+};
+
+// A plain query-param struct with no union field, containing a paramParse leaf.
+const PlainDateQuery = struct {
+    start_date: StrDate,
+    line: i32,
+};
+
+test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(PlainDateQuery);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\start_date: string
+        \\line: number
         \\}
     ,
         parse_result.parsed,

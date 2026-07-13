@@ -16,17 +16,6 @@ pub fn isLiftableUnion(comptime T: type) bool {
     return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T);
 }
 
-/// Whether `T` is a struct with at least one field
-/// that is a non-Optional tagged union (without `paramParse`),
-/// i.e. a union to be lifted into the flat query key space.
-pub fn isStructContainingUnionField(comptime T: type) bool {
-    if (@typeInfo(T) != .@"struct") return false;
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (comptime isLiftableUnion(field.type)) return true;
-    }
-    return false;
-}
-
 /// Returns the flattened leaf key names of a plain struct,
 /// hoisting nested plain structs and skipping lifted union fields (handled by the caller).
 pub fn getFlatLeafNames(comptime T: type) []const []const u8 {
