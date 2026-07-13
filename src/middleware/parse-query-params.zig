@@ -25,44 +25,42 @@ const hasParamParse = validation.hasParamParse;
 
 const query_params = "query_params";
 
-/// The tags of union `T`, ordered most specific first:
-/// a variant requiring more keys comes before one requiring fewer,
+/// The fields of union `T`, ordered most specific first:
+/// a field requiring more keys comes before one requiring fewer,
 /// so the all-optional fallback (zero required keys) is always tried last.
 /// The order is fixed at compile time and independent of the request,
 /// so callers just walk it and build the first variant whose keys are present.
 ///
-/// The sort is stable, so two variants requiring the same number of keys keep their declaration order.
+/// The sort is stable, so two fields requiring the same number of keys keep their declaration order.
 /// Such a pair can only both match when the request mixes keys from both,
 /// which is rejected later as unexpected query params,
 /// so their relative order does not change the outcome of a valid request.
-fn orderedVariants(comptime T: type) [@typeInfo(T).@"union".fields.len]std.meta.Tag(T) {
-    const Tag = std.meta.Tag(T);
-    const fields = @typeInfo(T).@"union".fields;
+fn orderedFields(comptime T: type) [@typeInfo(T).@"union".fields.len]Type.UnionField {
+    comptime {
+        const Entry = struct {
+            field: *const Type.UnionField,
+            required_keys: usize,
 
-    const Entry = struct {
-        tag: Tag,
-        required_keys: usize,
-    };
-
-    var entries: [fields.len]Entry = undefined;
-    inline for (fields, 0..) |f, i| {
-        entries[i] = .{
-            .tag = @field(T, f.name),
-            .required_keys = comptime getRequiredKeyCount(f.type),
+            fn moreSpecific(_: void, a: @This(), b: @This()) bool {
+                return a.required_keys > b.required_keys;
+            }
         };
-    }
 
-    const Ctx = struct {
-        fn moreSpecific(_: void, a: Entry, b: Entry) bool {
-            return a.required_keys > b.required_keys;
+        const fields = @typeInfo(T).@"union".fields;
+        var entries: [fields.len]Entry = undefined;
+        for (fields, 0..) |f, i| {
+            entries[i] = .{
+                .field = &f,
+                .required_keys = getRequiredKeyCount(f.type),
+            };
         }
-    };
 
-    std.sort.insertion(Entry, &entries, {}, Ctx.moreSpecific);
+        std.sort.insertion(Entry, &entries, {}, Entry.moreSpecific);
 
-    var tags: [fields.len]Tag = undefined;
-    for (entries, 0..) |e, i| tags[i] = e.tag;
-    return tags;
+        var sorted: [fields.len]Type.UnionField = undefined;
+        for (entries, 0..) |e, i| sorted[i] = e.field.*;
+        return sorted;
+    }
 }
 
 /// How a container type (a struct or union) is resolved from query params.
@@ -673,23 +671,20 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
 
     // Attempt variants most specific first; the all-optional fallback is ordered last.
     // A specific variant is tried when its keys are present.
-    inline for (comptime orderedVariants(T)) |tag| {
-        inline for (@typeInfo(T).@"union".fields) |f| {
-            if (comptime @field(T, f.name) == tag) {
-                const matches = if (fallback == tag)
-                    first_failure == null
-                else
-                    variantMatchScore(f, present_keys.items) != null;
+    inline for (comptime orderedFields(T)) |f| {
+        const tag = @field(T, f.name);
+        const matches = if (fallback == tag)
+            first_failure == null
+        else
+            variantMatchScore(f, present_keys.items) != null;
 
-                if (matches) {
-                    if (try buildVariant(T, f, ctx)) |v| return v;
+        if (matches) {
+            if (try buildVariant(T, f, ctx)) |v| return v;
 
-                    // Keys were present but the values did not parse:
-                    // keep the failure and roll back, then try the next variant.
-                    if (first_failure == null) first_failure = ctx.failure;
-                    ctx.restore(snapshot);
-                }
-            }
+            // Keys were present but the values did not parse:
+            // keep the failure and roll back, then try the next variant.
+            if (first_failure == null) first_failure = ctx.failure;
+            ctx.restore(snapshot);
         }
     }
 
@@ -928,11 +923,10 @@ test "getRequiredKeyCount: nested union fallback" {
 
 test "orderedVariants: most specific first, all-optional fallback last" {
     // detailed (2 keys) > basic (1 key) > all (0 keys, the fallback).
-    try std.testing.expectEqualSlices(
-        std.meta.Tag(RangeUnion),
-        &.{ .detailed, .basic, .all },
-        &orderedVariants(RangeUnion),
-    );
+    const fields = orderedFields(RangeUnion);
+    try std.testing.expectEqualStrings("detailed", fields[0].name);
+    try std.testing.expectEqualStrings("basic", fields[1].name);
+    try std.testing.expectEqualStrings("all", fields[2].name);
 }
 
 test "orderedVariants: orders by required key count, not declaration order" {
@@ -947,11 +941,9 @@ test "orderedVariants: orders by required key count, not declaration order" {
         },
     };
 
-    try std.testing.expectEqualSlices(
-        std.meta.Tag(U),
-        &.{ .nested, .other },
-        &orderedVariants(U),
-    );
+    const fields = orderedFields(U);
+    try std.testing.expectEqualStrings("nested", fields[0].name);
+    try std.testing.expectEqualStrings("other", fields[1].name);
 }
 
 test "scalar union type" {
