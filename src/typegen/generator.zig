@@ -35,7 +35,7 @@ pub const TypeGenerator = struct {
     arena_alloc: Allocator,
 
     /// short type name => ParseResult
-    top_level_types: StringHashMap(ParseResult),
+    top_level_types: StringHashMap(?ParseResult),
 
     get_endpoints: StringArrayHashMap(EndpointData),
     post_endpoints: StringArrayHashMap(EndpointData),
@@ -46,7 +46,7 @@ pub const TypeGenerator = struct {
     pub fn init(arena_alloc: Allocator) !Self {
         return .{
             .arena_alloc = arena_alloc,
-            .top_level_types = StringHashMap(ParseResult).init(arena_alloc),
+            .top_level_types = StringHashMap(?ParseResult).init(arena_alloc),
             .get_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
             .post_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
             .put_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
@@ -75,13 +75,22 @@ pub const TypeGenerator = struct {
     }
 
     fn getTopLevelType(self: *Self, name: []const u8) ?ParseResult {
-        return self.top_level_types.get(name);
+        return self.top_level_types.get(name) orelse null;
+    }
+
+    /// "Registers" a top level type name before the full type has been generated.
+    fn declareTopLevelType(self: *Self, comptime name: []const u8) !void {
+        if (self.top_level_types.contains(name)) {
+            std.log.err("Tried to redeclare top level type: {s}", .{name});
+            return error.DuplicateDeclaration;
+        }
+        try self.top_level_types.put(name, null);
     }
 
     fn setTopLevelType(self: *Self, name: []const u8, result: ParseResult) !void {
-        if (self.top_level_types.get(name)) |r| if (r.parsed.len > 0) {
-            std.log.err("Duplicate struct name {s}", .{name});
-            return error.Foo;
+        if (self.top_level_types.get(name)) |entry| if (entry != null) {
+            std.log.err("Duplicate type name {s}", .{name});
+            return error.DuplicateTypeName;
         };
         try self.top_level_types.put(name, result);
     }
@@ -105,14 +114,24 @@ pub const TypeGenerator = struct {
                 const T = @TypeOf(@field(EndpointType, decl.name));
                 switch (@typeInfo(T)) {
                     .type => {
-                        const t_info = @typeInfo(@field(EndpointType, decl.name));
-                        if (t_info == .@"struct") {
-                            try self.setTopLevelType(decl.name, .{ .parsed = "", .optional = false });
-                        } else if (t_info == .@"enum") {
-                            if (!self.top_level_types.contains(decl.name)) {
-                                const parsed = try self.parseEnum(t_info.@"enum");
-                                try self.setTopLevelType(decl.name, .{ .parsed = parsed, .optional = false });
-                            }
+                        switch (@typeInfo(@field(EndpointType, decl.name))) {
+                            .@"struct" => {
+                                try self.declareTopLevelType(decl.name);
+                            },
+                            .@"enum" => |e| {
+                                try self.setTopLevelType(
+                                    decl.name,
+                                    .{ .parsed = try self.parseEnum(e), .optional = false },
+                                );
+                            },
+                            .@"union" => |u| {
+                                const parsed = if (isLiftableUnion(@field(EndpointType, decl.name)))
+                                    try self.parseFlatUnion(u)
+                                else
+                                    try self._parseUnionAsStruct(u);
+                                try self.setTopLevelType(decl.name, parsed);
+                            },
+                            else => {},
                         }
                     },
                     else => {},
@@ -171,12 +190,13 @@ pub const TypeGenerator = struct {
 
             var iter = self.top_level_types.iterator();
             while (iter.next()) |top| {
+                const result = top.value_ptr.* orelse continue;
                 try entries.append(self.arena_alloc, .{
                     .type_name = top.key_ptr.*,
                     .ts = try allocPrint(
                         self.arena_alloc,
-                        "export type {s} = \n{s}\n\n",
-                        .{ top.key_ptr.*, top.value_ptr.*.parsed },
+                        "export type {s} =\n{s}\n\n",
+                        .{ top.key_ptr.*, result.parsed },
                     ),
                 });
             }
@@ -469,7 +489,12 @@ pub const TypeGenerator = struct {
                     return error.InvalidAdjacentUnionType;
                 }
 
-                try self.setTopLevelType(union_short_name, try self._parseUnionAsStruct(field_info.@"union"));
+                if (self.getTopLevelType(union_short_name) == null) {
+                    try self.setTopLevelType(
+                        union_short_name,
+                        try self._parseUnionAsStruct(field_info.@"union"),
+                    );
+                }
                 try res.appendSlice(
                     self.arena_alloc,
                     try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_short_name }),
@@ -663,7 +688,7 @@ pub const TypeGenerator = struct {
 
         if (s) |_| {
             const type_name = shortTypeName(@typeName(ResponseType));
-            if (!self.top_level_types.contains(type_name) and !isInlinedType(type_name)) {
+            if (!self.top_level_types.contains(type_name) and !isInlinedStruct(type_name)) {
                 std.log.err("{s} must be pub", .{type_name});
                 return error.ResponseTypeIsPrivate;
             }
@@ -706,28 +731,19 @@ pub const TypeGenerator = struct {
     /// The active variant is inferred at runtime from which keys are present.
     /// Anything else falls back to the normal struct handling.
     fn extractQueryParams(self: *Self, comptime T: type) !ParseResult {
-        const param_res = blk: {
-            const info = @typeInfo(T);
-            if (comptime info == .@"union" and !isOptional(T)) {
-                break :blk try self.parseFlatUnion(info.@"union");
-            }
-            if (comptime isStructContainingUnionField(T)) {
-                break :blk try self.parseFlatQueryStruct(T, info.@"struct");
-            }
-            // NOTE: Returns the identifier from the function early.
-            return try self.extractIdentifier(T);
-        };
-
-        // Only named flattened unions become exported top level TS types.
-        // I.e. we aren't exporting "bare" union types.
-        const is_liftable = comptime isLiftableUnion(T) or isStructContainingUnionField(T);
-        if (comptime !is_liftable) return param_res;
-
         const type_name = comptime shortTypeName(@typeName(T));
-        if (comptime isInlinedType(type_name)) return param_res;
+        if (self.getTopLevelType(type_name)) |gen| {
+            return .{ .parsed = type_name, .optional = gen.optional };
+        }
 
-        try self.setTopLevelType(type_name, param_res);
-        return .{ .parsed = type_name, .optional = param_res.optional };
+        const info = @typeInfo(T);
+        if (comptime info == .@"union" and !isOptional(T)) {
+            return self.parseFlatUnion(info.@"union");
+        }
+        if (comptime isStructContainingUnionField(T)) {
+            return self.parseFlatQueryStruct(T, info.@"struct");
+        }
+        return self.extractIdentifier(T);
     }
 
     /// Parses a union into a flat TS union.
@@ -971,7 +987,7 @@ pub const TypeGenerator = struct {
             .@"struct" => {
                 const type_name = comptime shortTypeName(@typeName(T));
 
-                const res: ParseResult = if (self.top_level_types.get(type_name)) |gen|
+                const res: ParseResult = if (self.getTopLevelType(type_name)) |gen|
                     .{ .parsed = type_name, .optional = gen.optional }
                 else
                     try self.parseStruct(type_name, type_info.@"struct");
@@ -985,7 +1001,7 @@ pub const TypeGenerator = struct {
             },
             .@"enum" => {
                 const type_name = shortTypeName(@typeName(T));
-                if (self.top_level_types.get(type_name)) |gen| {
+                if (self.getTopLevelType(type_name)) |gen| {
                     return .{ .parsed = type_name, .optional = gen.optional };
                 }
                 return .{ .parsed = try self.parseEnum(type_info.@"enum") };
@@ -1013,13 +1029,9 @@ pub const TypeGenerator = struct {
         }
     }
 
-    /// Whether `type_name` is an anonymous inline container rather than a named (`pub const`) type.
-    /// Zig names such types `<parent>__struct_N` / `__union_N` / `__enum_N`,
-    /// so they have no meaningful name to export and must stay inlined.
-    fn isInlinedType(type_name: []const u8) bool {
-        return std.mem.containsAtLeast(u8, type_name, 1, "__struct_") or
-            std.mem.containsAtLeast(u8, type_name, 1, "__union_") or
-            std.mem.containsAtLeast(u8, type_name, 1, "__enum_");
+    fn isInlinedStruct(struct_name: []const u8) bool {
+        // NOTE: There doesn't seem to be a better way of doing this, currently
+        return std.mem.containsAtLeast(u8, struct_name, 1, "__struct_");
     }
 };
 
@@ -1133,6 +1145,9 @@ test "JsonArray(T)" {
 
 // Query parameter edge case tests
 
+// Test containers are declared at container scope so their `@typeName` stays clean (e.g. `generator.Filter`).
+// A type declared inside a test body embeds the full test description in its name,
+// which breaks `shortTypeName` when the description contains `(`.
 const Filter = union(enum) {
     basic: struct { start_date: []const u8 },
     detailed: struct { start_date: []const u8, end_date: []const u8 },
@@ -1148,7 +1163,6 @@ test "extractQueryParams: union with subset variants" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Filter);
-    try std.testing.expectEqualStrings("Filter", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\XOR<({
         \\start_date: string
@@ -1157,7 +1171,7 @@ test "extractQueryParams: union with subset variants" {
         \\end_date: string
         \\})>
     ,
-        type_generator.top_level_types.get("Filter").?.parsed,
+        parse_result.parsed,
     );
 }
 
@@ -1186,7 +1200,6 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
-    try std.testing.expectEqualStrings("LostProductionFilter", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
         \\start_date: string
@@ -1198,7 +1211,7 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
         \\shift?: number|null
         \\})>>>
     ,
-        type_generator.top_level_types.get("LostProductionFilter").?.parsed,
+        parse_result.parsed,
     );
 }
 
@@ -1220,7 +1233,6 @@ test "extractQueryParams: base keys + union variant keys" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Query);
-    try std.testing.expectEqualStrings("Query", parse_result.parsed);
     try std.testing.expectEqualStrings(
         \\(XOR<({ by_id: number }), ({
         \\start_date: string
@@ -1228,21 +1240,20 @@ test "extractQueryParams: base keys + union variant keys" {
         \\page: number
         \\}
     ,
-        type_generator.top_level_types.get("Query").?.parsed,
+        parse_result.parsed,
     );
 }
 
-// A named (pub const) union query-params type, as used by real endpoints.
-const LostProductionQueryParams = union(enum) {
-    id: i32,
-    dsc_row_id: i32,
-    date_range: struct {
-        start_date: []const u8,
-        end_date: types.Optional([]const u8) = .not_provided,
-    },
-};
-
 const LostProdEndpoint = struct {
+    pub const LostProductionQueryParams = union(enum) {
+        id: i32,
+        dsc_row_id: i32,
+        date_range: struct {
+            start_date: []const u8,
+            end_date: types.Optional([]const u8) = .not_provided,
+        },
+    };
+
     const Ctx = struct { query_params: LostProductionQueryParams };
     pub const Body = struct { ok: bool };
     const Res = struct { body: ?Body = null };
@@ -1252,7 +1263,7 @@ const LostProdEndpoint = struct {
     }
 };
 
-test "generateTypes: named union query params are exported and referenced by name" {
+test "generateTypes: public union query params are exported and referenced by name" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1265,12 +1276,113 @@ test "generateTypes: named union query params are exported and referenced by nam
     const output = try type_generator.generateTypes(&endpoints);
 
     try std.testing.expect(
-        std.mem.indexOf(u8, output, "export type LostProductionQueryParams = ") != null,
+        std.mem.indexOf(u8, output, "export type LostProductionQueryParams =") != null,
     );
 
     // Referenced by name at the endpoint rather than inlined as the raw type
     try std.testing.expect(
         std.mem.indexOf(u8, output, "queryParams: LostProductionQueryParams") != null,
+    );
+}
+
+const AlertTopic = enum { downtime, lost_production };
+
+// A public adjacently-tagged union used in an endpoint response.
+const AlertPayload = union(AlertTopic) {
+    downtime: struct { line: []const u8, minutes: f32 },
+    lost_production: struct { line: []const u8, units: f64 },
+
+    pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+};
+
+const Alert = struct {
+    id: i64,
+    topic: AlertTopic,
+    payload: AlertPayload,
+};
+
+const AlertsEndpoint = struct {
+    const Ctx = struct {};
+    const Res = struct { body: ?[]Alert = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: tagged union used in a response is exported by name" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/alerts", AlertsEndpoint }};
+
+    // The tagged union is exported as a named top-level type
+    try std.testing.expectEqualStrings(
+        \\export type Alert =
+        \\{
+        \\[K in keyof AlertPayload]: {
+        \\id: number
+        \\topic: K
+        \\payload: AlertPayload[K]};
+        \\}[keyof AlertPayload];
+        \\
+        \\
+        \\export type AlertPayload =
+        \\{
+        \\downtime: {
+        \\line: string
+        \\minutes: number
+        \\}
+        \\lost_production: {
+        \\line: string
+        \\units: number
+        \\}
+        \\}
+        \\
+        \\export type Spec = {GET: {"/alerts": {
+        \\response: Alert[],
+        \\}
+        \\},
+        \\POST: {},
+        \\PUT: {},
+        \\PATCH: {},
+        \\DELETE: {},
+        \\};
+    , try type_generator.generateTypes(&endpoints));
+}
+
+// A second endpoint whose response uses the same `Alert` type.
+const AlertsImportEndpoint = struct {
+    const Ctx = struct {};
+    const Res = struct { body: ?[]Alert = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: same tagged union reached from two endpoints is exported once" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{
+        .{ "/alerts", AlertsEndpoint },
+        .{ "/company/alerts", AlertsImportEndpoint },
+    };
+    const output = try type_generator.generateTypes(&endpoints);
+
+    // Exported exactly once despite being referenced from both endpoints
+    try std.testing.expectEqual(
+        1,
+        std.mem.count(u8, output, "export type AlertPayload ="),
     );
 }
 
