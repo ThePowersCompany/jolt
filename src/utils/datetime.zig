@@ -64,7 +64,7 @@ pub const Date = struct {
     }
 
     /// Query parameter parsing support in strict YYYY-MM-DD format
-    pub fn paramParse(input: []const u8) !Date {
+    pub fn paramParse(_: Allocator, input: []const u8) !Date {
         return try parse(input, .rfc3339);
     }
 
@@ -186,7 +186,7 @@ pub const Time = struct {
     }
 
     /// Query parameter parsing support in strict HH:MM:SS format
-    pub fn paramParse(input: []const u8) !Time {
+    pub fn paramParse(_: Allocator, input: []const u8) !Time {
         return try parse(input, .rfc3339);
     }
 
@@ -313,7 +313,7 @@ pub const DateTime = struct {
     }
 
     /// Query parameter parsing support in strict YYYY-MM-DDTHH:MM:SSZ format
-    pub fn paramParse(input: []const u8) !DateTime {
+    pub fn paramParse(_: Allocator, input: []const u8) !DateTime {
         return try parse(input, .rfc3339);
     }
 
@@ -526,7 +526,7 @@ pub const PlainDateTime = struct {
     }
 
     /// Query parameter parsing support in strict YYYY-MM-DDTHH:MM:SS format
-    pub fn paramParse(input: []const u8) !Self {
+    pub fn paramParse(_: Allocator, input: []const u8) !Self {
         return try parse(input);
     }
 
