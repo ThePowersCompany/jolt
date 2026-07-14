@@ -199,7 +199,7 @@ const ParseCtx = struct {
 
 /// Records a 400 for a query parameter whose value could not be parsed into its expected type.
 fn recordInvalidParamType(ctx: *ParseCtx, field_name: []const u8) !void {
-    ctx.fail(try allocPrint(ctx.alloc, "Incorrect query parameter type for {s}", .{field_name}));
+    ctx.fail(try allocPrint(ctx.alloc, "Incorrect query parameter for: {s}", .{field_name}));
 }
 
 /// Parses a single query value string into `FieldType`.
@@ -1104,7 +1104,7 @@ test "matched specific variant parse failure is preferred over fallback" {
         // The reported failure is the parse error for start_date, not "unexpected params".
         try std.testing.expectEqualStrings(
             parsed.result.fail,
-            "Incorrect query parameter type for start_date",
+            "Incorrect query parameter for: start_date",
         );
     }
     {
