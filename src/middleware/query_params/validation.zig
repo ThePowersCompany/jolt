@@ -1,6 +1,14 @@
 const std = @import("std");
 const Type = std.builtin.Type;
-const isOptional = @import("../../utils/types.zig").isOptional;
+const types_module = @import("../../utils/types.zig");
+const Optional = types_module.Optional;
+const isOptional = types_module.isOptional;
+const Unwrap = types_module.Unwrap;
+
+const UnionRepr = @import("../parse-body.zig").UnionRepr;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 /// Whether a struct type carries a custom `paramParse`
 /// and therefore stays a single query key (its value parsed from a string),
@@ -9,11 +17,33 @@ pub fn hasParamParse(comptime T: type) bool {
     return comptime std.meta.hasFn(T, "paramParse");
 }
 
+/// Whether a union carries a `_repr` declaration,
+/// marking it as a body/response union (tagged via a `UnionRepr`, e.g. adjacently tagged).
+/// Such unions are serialized in the request/response body (never lifted into the flat query key space),
+/// so they must not receive query-only utility-type rendering (XOR/AnyOf/AllOf).
+pub fn hasUnionRepr(comptime T: type) bool {
+    return comptime @typeInfo(T) == .@"union" and @hasDecl(T, "_repr");
+}
+
 /// Returns if `T` is a tagged union that should be lifted into the flat query key space.
 /// This ignores the `Optional` wrapper,
 /// and unions with a `paramParse` function (which is parsed as a single leaf key).
 pub fn isLiftableUnion(comptime T: type) bool {
-    return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T);
+    return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T) and !hasUnionRepr(T);
+}
+
+/// Whether `T` is a plain struct that flattens into leaf keys,
+/// as opposed to a `paramParse` struct (an opaque single-key leaf).
+fn isFlattenedStruct(comptime T: type) bool {
+    return comptime @typeInfo(T) == .@"struct" and !hasParamParse(T);
+}
+
+/// Returns if `str` appears in `list`.
+fn contains(comptime list: []const []const u8, comptime str: []const u8) bool {
+    comptime {
+        for (list) |x| if (std.mem.eql(u8, x, str)) return true;
+        return false;
+    }
 }
 
 /// Returns the flattened leaf key names of a plain struct,
@@ -24,7 +54,7 @@ pub fn getFlatLeafNames(comptime T: type) []const []const u8 {
         for (@typeInfo(T).@"struct".fields) |field| {
             if (isLiftableUnion(field.type)) continue;
             const Child = if (isOptional(field.type)) field.type.childType() else field.type;
-            if (@typeInfo(Child) == .@"struct" and !hasParamParse(Child)) {
+            if (isFlattenedStruct(Child)) {
                 names = names ++ getFlatLeafNames(Child);
             } else {
                 names = names ++ &[_][]const u8{field.name};
@@ -37,8 +67,7 @@ pub fn getFlatLeafNames(comptime T: type) []const []const u8 {
 /// Returns the flat key names contributed by a single union variant.
 pub fn getVariantKeyNames(comptime variant: Type.UnionField) []const []const u8 {
     comptime {
-        const V = variant.type;
-        if (@typeInfo(V) == .@"struct" and !hasParamParse(V)) return getFlatLeafNames(V);
+        if (isFlattenedStruct(variant.type)) return getFlatLeafNames(variant.type);
         return &[_][]const u8{variant.name};
     }
 }
@@ -56,7 +85,7 @@ pub fn getRequiredLeafNames(comptime T: type) []const []const u8 {
                 field.defaultValue() != null;
             if (not_required) continue;
 
-            if (@typeInfo(field.type) == .@"struct" and !hasParamParse(field.type)) {
+            if (isFlattenedStruct(field.type)) {
                 names = names ++ getRequiredLeafNames(field.type);
             } else {
                 names = names ++ &[_][]const u8{field.name};
@@ -69,8 +98,7 @@ pub fn getRequiredLeafNames(comptime T: type) []const []const u8 {
 /// Returns the required key names a variant needs in order to be selected.
 pub fn getVariantRequiredKeyNames(comptime variant: Type.UnionField) []const []const u8 {
     comptime {
-        const V = variant.type;
-        if (@typeInfo(V) == .@"struct" and !hasParamParse(V)) return getRequiredLeafNames(V);
+        if (isFlattenedStruct(variant.type)) return getRequiredLeafNames(variant.type);
         return &[_][]const u8{variant.name};
     }
 }
@@ -81,9 +109,7 @@ pub fn findFirstCommonString(
     comptime listB: []const []const u8,
 ) ?[]const u8 {
     comptime {
-        for (listA) |x| for (listB) |y| {
-            if (std.mem.eql(u8, x, y)) return x;
-        };
+        for (listA) |x| if (contains(listB, x)) return x;
         return null;
     }
 }
@@ -92,9 +118,7 @@ pub fn findFirstCommonString(
 pub fn findFirstDuplicate(comptime list: []const []const u8) ?[]const u8 {
     comptime {
         for (list, 0..) |x, i| {
-            for (list[i + 1 ..]) |y| {
-                if (std.mem.eql(u8, x, y)) return x;
-            }
+            if (contains(list[i + 1 ..], x)) return x;
         }
         return null;
     }
@@ -106,10 +130,7 @@ pub fn isSubset(
     comptime listB: []const []const u8,
 ) bool {
     comptime {
-        for (listA) |str| {
-            // TODO: Can this be simplified?
-            if (findFirstCommonString(&[_][]const u8{str}, listB) == null) return false;
-        }
+        for (listA) |str| if (!contains(listB, str)) return false;
         return true;
     }
 }
@@ -138,6 +159,8 @@ pub fn assertUnambiguousUnion(comptime U: Type.Union, comptime label: []const u8
 /// These collisions are ambiguous, so we reject here at compile time.
 pub fn assertNoQueryKeyCollisions(comptime T: type) void {
     comptime {
+        assertNoReprUnionInQuery(T);
+
         const info = @typeInfo(T);
 
         // Check that a variant's own keys do not conflict with themselves
@@ -196,12 +219,128 @@ pub fn assertNoQueryKeyCollisions(comptime T: type) void {
 
                 // Variants of the same union may share names, so dedupe before merging into `seen`.
                 for (variant_names) |n| {
-                    if (findFirstCommonString(&[_][]const u8{n}, union_names) == null) {
-                        union_names = union_names ++ &[_][]const u8{n};
-                    }
+                    if (!contains(union_names, n)) union_names = union_names ++ &[_][]const u8{n};
                 }
             }
             seen = seen ++ union_names;
         }
     }
+}
+
+/// Searches `T` for a `_repr` union at any depth,
+/// returning a describing message (including the field/variant path) if found, else `null`.
+///
+/// A `_repr` union is serialized in the request/response body,
+/// so it must never appear inside a `query_params` type.
+pub fn findReprUnionInQuery(comptime T: type, comptime label: []const u8) ?[]const u8 {
+    comptime {
+        const U = Unwrap(T);
+        switch (@typeInfo(U)) {
+            .@"union" => |info| {
+                if (hasUnionRepr(U)) {
+                    return "`_repr` union '" ++ @typeName(U) ++ //
+                        "' cannot be a query param (" ++ label ++ ")";
+                }
+                // A liftable union flattens its fields into the key space,
+                // so its variant payloads must be checked too.
+                if (!hasParamParse(U)) for (info.fields) |variant| {
+                    const variant_label = "variant '" ++ variant.name ++ "' of " ++ label;
+                    if (findReprUnionInQuery(variant.type, variant_label)) |msg| {
+                        return msg;
+                    }
+                };
+            },
+            .@"struct" => |info| {
+                // A `paramParse` struct is a single opaque leaf, so we don't recurse.
+                if (hasParamParse(U)) return null;
+
+                for (info.fields) |field| {
+                    const field_label = "field '" ++ field.name ++ "' of " ++ label;
+                    if (findReprUnionInQuery(field.type, field_label)) |msg| {
+                        return msg;
+                    }
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+}
+
+/// Rejects at compile time if any union with `_repr` is used inside a `query_params` type.
+pub fn assertNoReprUnionInQuery(comptime T: type) void {
+    if (comptime findReprUnionInQuery(T, @typeName(T))) |msg| {
+        @compileError(msg);
+    }
+}
+
+const ReprUnion = union(enum) {
+    a: struct { x: i32 },
+    b: struct { y: i32 },
+    pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "kind" } };
+};
+
+const LiftableUnion = union(enum) {
+    by_id: struct { id: i32 },
+    by_name: struct { name: []const u8 },
+};
+
+// A `paramParse` struct is parsed from a single string, so it is opaque.
+// Its internal `_repr` union is never serialized as a tagged union and must be ignored by findReprUnionInQuery.
+const ParamParseHidingRepr = struct {
+    inner: ReprUnion,
+    pub fn paramParse() void {}
+};
+
+test "findReprUnionInQuery: valid query types return null" {
+    try expectEqual(null, comptime findReprUnionInQuery(i32, "t"));
+    try expectEqual(null, comptime findReprUnionInQuery(?i32, "t"));
+    try expectEqual(null, comptime findReprUnionInQuery(enum { a, b }, "t"));
+    try expectEqual(null, comptime findReprUnionInQuery(struct { a: i32, b: []const u8 }, "t"));
+    try expectEqual(null, comptime findReprUnionInQuery(struct { a: i32, nested: struct { b: i32 } }, "t"));
+    try expectEqual(null, comptime findReprUnionInQuery(LiftableUnion, "t"));
+}
+
+test "findReprUnionInQuery: a paramParse leaf is opaque, so its inner _repr union is ignored" {
+    try expectEqual(null, comptime findReprUnionInQuery(ParamParseHidingRepr, "t"));
+}
+
+test "findReprUnionInQuery: detects a direct _repr union" {
+    const msg = comptime findReprUnionInQuery(ReprUnion, "root");
+    try expect(msg != null);
+}
+
+test "findReprUnionInQuery: detects a _repr union as a struct field, reporting the path" {
+    const S = struct {
+        page: i32,
+        payload: ReprUnion,
+    };
+    try expect(comptime findReprUnionInQuery(S, "root") != null);
+}
+
+test "findReprUnionInQuery: detects a _repr union through native and wrapper optionals" {
+    {
+        const msg = comptime findReprUnionInQuery(struct { p: ?ReprUnion }, "t");
+        try expect(msg != null);
+    }
+
+    {
+        const msg = comptime findReprUnionInQuery(struct { p: Optional(?ReprUnion) }, "t");
+        try expect(msg != null);
+    }
+}
+
+test "findReprUnionInQuery: detects a nested _repr union" {
+    const Nested = struct { a: struct { b: struct { c: ReprUnion } } };
+    const msg = comptime findReprUnionInQuery(Nested, "root");
+    try expect(msg != null);
+}
+
+test "findReprUnionInQuery: detects a _repr union inside a liftable union variant" {
+    const Q = union(enum) {
+        simple: struct { id: i32 },
+        complex: struct { payload: ReprUnion },
+    };
+    const msg = comptime findReprUnionInQuery(Q, "root");
+    try expect(msg != null);
 }
