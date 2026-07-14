@@ -18,18 +18,24 @@ pub fn hasParamParse(comptime T: type) bool {
 }
 
 /// Whether a union carries a `_repr` declaration,
-/// marking it as a body/response union (tagged via a `UnionRepr`, e.g. adjacently tagged).
-/// Such unions are serialized in the request/response body (never lifted into the flat query key space),
-/// so they must not receive query-only utility-type rendering (XOR/AnyOf/AllOf).
-pub fn hasUnionRepr(comptime T: type) bool {
-    return comptime @typeInfo(T) == .@"union" and @hasDecl(T, "_repr");
+/// i.e. it requires tagged serialization (external, internal, or adjacently tagged).
+/// Such unions cannot be used in query params, which have no structure for a discriminator.
+/// Untagged unions (`.untagged` mode) are allowed since they infer the variant from the value.
+pub fn hasTaggedRepr(comptime T: type) bool {
+    comptime {
+        if (@typeInfo(T) != .@"union" or !@hasDecl(T, "_repr")) return false;
+        const repr = T._repr;
+        return repr != .untagged;
+    }
 }
 
 /// Returns if `T` is a tagged union that should be lifted into the flat query key space.
 /// This ignores the `Optional` wrapper,
-/// and unions with a `paramParse` function (which is parsed as a single leaf key).
+/// excludes unions with a `paramParse` function (which are parsed as single leaf keys),
+/// and excludes unions with a discriminator-requiring `_repr` (external/internal/adjacently tagged).
+/// Untagged unions are allowed since they don't require a discriminator field.
 pub fn isLiftableUnion(comptime T: type) bool {
-    return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T) and !hasUnionRepr(T);
+    return comptime @typeInfo(T) == .@"union" and !isOptional(T) and !hasParamParse(T) and !hasTaggedRepr(T);
 }
 
 /// Whether `T` is a plain struct that flattens into leaf keys,
@@ -230,16 +236,17 @@ pub fn assertNoQueryKeyCollisions(comptime T: type) void {
 /// Searches `T` for a `_repr` union at any depth,
 /// returning a describing message (including the field/variant path) if found, else `null`.
 ///
-/// A `_repr` union is serialized in the request/response body,
-/// so it must never appear inside a `query_params` type.
+/// A tagged union requires a field to disambiguate the variant,
+/// which cannot be represented in the flat query param key space.
+/// Untagged unions are allowed since they infer the variant from the value itself.
 pub fn findReprUnionInQuery(comptime T: type, comptime label: []const u8) ?[]const u8 {
     comptime {
         const U = Unwrap(T);
         switch (@typeInfo(U)) {
             .@"union" => |info| {
-                if (hasUnionRepr(U)) {
-                    return "`_repr` union '" ++ @typeName(U) ++ //
-                        "' cannot be a query param (" ++ label ++ ")";
+                if (hasTaggedRepr(U)) {
+                    return "Union '" ++ @typeName(U) ++ //
+                        "' with discriminator `_repr` cannot be a query param (" ++ label ++ ")";
                 }
                 // A liftable union flattens its fields into the key space,
                 // so its variant payloads must be checked too.
@@ -292,6 +299,13 @@ const ParamParseHidingRepr = struct {
     pub fn paramParse() void {}
 };
 
+// An untagged union with `_repr`, which should be allowed in query params since it needs no discriminator.
+const UntaggedReprUnion = union(enum) {
+    id: i32,
+    auto: void,
+    pub const _repr: UnionRepr = .untagged;
+};
+
 test "findReprUnionInQuery: valid query types return null" {
     try expectEqual(null, comptime findReprUnionInQuery(i32, "t"));
     try expectEqual(null, comptime findReprUnionInQuery(?i32, "t"));
@@ -308,6 +322,11 @@ test "findReprUnionInQuery: a paramParse leaf is opaque, so its inner _repr unio
 test "findReprUnionInQuery: detects a direct _repr union" {
     const msg = comptime findReprUnionInQuery(ReprUnion, "root");
     try expect(msg != null);
+}
+
+test "findReprUnionInQuery: allows untagged unions" {
+    try expectEqual(null, comptime findReprUnionInQuery(UntaggedReprUnion, "root"));
+    try expectEqual(null, comptime findReprUnionInQuery(struct { u: UntaggedReprUnion }, "root"));
 }
 
 test "findReprUnionInQuery: detects a _repr union as a struct field, reporting the path" {
