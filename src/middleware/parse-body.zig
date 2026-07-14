@@ -10,19 +10,7 @@ const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
 
 const types = @import("../utils/types.zig");
-
-/// Various ways to represent tagged unions in JSON.
-/// Reference (Rust): https://serde.rs/enum-representations.html
-pub const UnionRepr = union(enum) {
-    external,
-    internal: struct {
-        discriminator: []const u8,
-    },
-    adjacently: struct {
-        discriminator: []const u8,
-    },
-    untagged,
-};
+const UnionRepr = types.UnionRepr;
 
 /// Parses the body of the request and attaches it to the given Context.
 /// Context must have a member named "body" which resolves to the type meant to be parsed into an object.

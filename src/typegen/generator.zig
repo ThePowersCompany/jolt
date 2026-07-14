@@ -9,7 +9,7 @@ const allocPrint = std.fmt.allocPrint;
 const stringToEnum = std.meta.stringToEnum;
 
 const EndpointDef = @import("../main.zig").EndpointDef;
-const UnionRepr = @import("../middleware/parse-body.zig").UnionRepr;
+const UnionRepr = types.UnionRepr;
 
 const types = @import("../utils/types.zig");
 const isOptional = types.isOptional;
@@ -27,6 +27,8 @@ const FlatLeaf = common.FlatLeaf;
 const qp_validation = @import("../middleware/query_params/validation.zig");
 const hasParamParse = qp_validation.hasParamParse;
 const isLiftableUnion = qp_validation.isLiftableUnion;
+
+const expectContent = @import("../utils/testing.zig").expectContent;
 
 pub const TypeGenerator = struct {
     const Self = @This();
@@ -746,6 +748,20 @@ pub const TypeGenerator = struct {
         return self.extractIdentifier(T);
     }
 
+    /// Determines if a query param is required.
+    /// Query params with only optional fields are optional unless `any_of` is set.
+    fn isRequiredQueryParams(comptime T: type, has_any_of: bool) bool {
+        if (has_any_of) return true;
+        // If no any_of constraint, check if there are any required fields.
+        const info = @typeInfo(T);
+        if (info != .@"struct") return false;
+        inline for (info.@"struct".fields) |field| {
+            const is_optional = comptime isOptional(field.type);
+            if (!is_optional and field.defaultValue() == null) return true;
+        }
+        return false;
+    }
+
     /// Parses a union into a flat TS union.
     /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
     /// and a plain struct variant is flattened into its leaf keys.
@@ -875,9 +891,11 @@ pub const TypeGenerator = struct {
     /// with the base object built from the remaining fields.
     fn parseFlatQueryStruct(self: *Self, comptime T: type, S: Type.Struct) !ParseResult {
         var components: ArrayList([]const u8) = .empty;
+        var has_liftable_union = false;
 
         inline for (S.fields) |field| {
             if (comptime isLiftableUnion(field.type)) {
+                has_liftable_union = true;
                 const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
                 try components.append(
                     self.arena_alloc,
@@ -896,8 +914,14 @@ pub const TypeGenerator = struct {
             if (i != 0) try res.appendSlice(self.arena_alloc, " & ");
             try res.appendSlice(self.arena_alloc, component);
         }
-        // A union always needs at least one matching key, so it is required.
-        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+
+        // If there are liftable unions (with their required XOR logic), the whole thing is required.
+        // Otherwise, check if there are any required non-union fields.
+        const required = has_liftable_union or isRequiredQueryParams(T, comptime blk: {
+            if (@hasDecl(T, "constraints")) break :blk T.constraints.any_of;
+            break :blk false;
+        });
+        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = !required };
     }
 
     /// Recursively flattens a struct into leaf keys, hoisting nested plain structs.
@@ -1053,12 +1077,12 @@ test "required nullable fields" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
-    try std.testing.expectEqualStrings(
-        \\{
-        \\foo?: number|null
-        \\bar: number|null
-        \\baz?: number
-        \\}
+    try expectContent(
+        \\ {
+        \\   foo?: number|null
+        \\   bar: number|null
+        \\   baz?: number
+        \\ }
     ,
         parse_result.parsed,
     );
@@ -1084,14 +1108,14 @@ test "Nested Optionals" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
-    try std.testing.expectEqualStrings(parse_result.parsed,
-        \\{
-        \\enabled?: boolean
-        \\email?: {
-        \\enabled?: boolean
-        \\threshold?: number
-        \\}
-        \\}
+    try expectContent(parse_result.parsed,
+        \\ {
+        \\   enabled?: boolean
+        \\   email?: {
+        \\     enabled?: boolean
+        \\     threshold?: number
+        \\   }
+        \\ }
     );
 }
 
@@ -1134,12 +1158,12 @@ test "JsonArray(T)" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
-    try std.testing.expectEqualStrings(parse_result.parsed,
-        \\{
-        \\list: {
-        \\abc: number
-        \\}[]
-        \\}
+    try expectContent(parse_result.parsed,
+        \\ {
+        \\   list: {
+        \\     abc: number
+        \\   }[]
+        \\ }
     );
 }
 
@@ -1163,13 +1187,13 @@ test "extractQueryParams: union with subset variants" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Filter);
-    try std.testing.expectEqualStrings(
-        \\XOR<({
-        \\start_date: string
-        \\}), ({
-        \\start_date: string
-        \\end_date: string
-        \\})>
+    try expectContent(
+        \\ XOR<({
+        \\   start_date: string
+        \\ }), ({
+        \\   start_date: string
+        \\   end_date: string
+        \\ })>
     ,
         parse_result.parsed,
     );
@@ -1200,16 +1224,16 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
-    try std.testing.expectEqualStrings(
-        \\XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
-        \\start_date: string
-        \\end_date: string|null
-        \\line?: number|null
-        \\shift?: number|null
-        \\}), ({
-        \\line?: number|null
-        \\shift?: number|null
-        \\})>>>
+    try expectContent(
+        \\ XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
+        \\   start_date: string
+        \\   end_date: string|null
+        \\   line?: number|null
+        \\   shift?: number|null
+        \\ }), ({
+        \\   line?: number|null
+        \\   shift?: number|null
+        \\ })>>>
     ,
         parse_result.parsed,
     );
@@ -1233,12 +1257,12 @@ test "extractQueryParams: base keys + union variant keys" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(Query);
-    try std.testing.expectEqualStrings(
-        \\(XOR<({ by_id: number }), ({
-        \\start_date: string
-        \\})>) & {
-        \\page: number
-        \\}
+    try expectContent(
+        \\ (XOR<({ by_id: number }), ({
+        \\   start_date: string
+        \\ })>) & {
+        \\  page: number
+        \\ }
     ,
         parse_result.parsed,
     );
@@ -1268,14 +1292,12 @@ test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractQueryParams(PlainDateQuery);
-    try std.testing.expectEqualStrings(
+    try expectContent(
         \\{
-        \\start_date: string
-        \\line: number
+        \\  start_date: string
+        \\  line: number
         \\}
-    ,
-        parse_result.parsed,
-    );
+    , parse_result.parsed);
 }
 
 const LostProdEndpoint = struct {
@@ -1319,6 +1341,73 @@ test "generateTypes: public union query params are exported and referenced by na
     );
 }
 
+// A public union whose non-scalar variant holds a `paramParse` date leaf (like `Str(PlainDate)`),
+const DscQueryEndpoint = struct {
+    pub const DscQuery = union(enum) {
+        id: i32,
+        filter: struct {
+            date: StrDate,
+            shift: i32,
+            line: i32,
+        },
+    };
+    const Ctx = struct { query_params: DscQuery };
+    const Res = struct { body: ?bool = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+const DscQueryReportEndpoint = struct {
+    const Ctx = struct { query_params: DscQueryEndpoint.DscQuery };
+    const Res = struct { body: ?bool = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: union query param with a paramParse leaf, shared by two endpoints" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{
+        .{ "/company/dsc", DscQueryEndpoint },
+        .{ "/company/dsc/report", DscQueryReportEndpoint },
+    };
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\ export type DscQuery =
+        \\   XOR<({ id: number }), ({
+        \\     date: string
+        \\     shift: number
+        \\     line: number
+        \\   })>
+        \\
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/company/dsc": {
+        \\       queryParams: DscQuery
+        \\       response: boolean,
+        \\     }
+        \\     "/company/dsc/report": {
+        \\       queryParams: DscQuery
+        \\       response: boolean,
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
+}
+
 const AlertTopic = enum { downtime, lost_production };
 
 // A public adjacently-tagged union used in an endpoint response.
@@ -1355,38 +1444,42 @@ test "generateTypes: tagged union used in a response is exported by name" {
     const endpoints = [_]EndpointDef{.{ "/alerts", AlertsEndpoint }};
 
     // The tagged union is exported as a named top-level type
-    try std.testing.expectEqualStrings(
-        \\export type Alert =
-        \\{
-        \\[K in keyof AlertPayload]: {
-        \\id: number
-        \\topic: K
-        \\payload: AlertPayload[K]};
-        \\}[keyof AlertPayload];
+    const output = try type_generator.generateTypes(&endpoints);
+    try expectContent(
+        \\ export type Alert =
+        \\   {
+        \\     [K in keyof AlertPayload]: {
+        \\       id: number
+        \\       topic: K
+        \\       payload: AlertPayload[K]
+        \\     };
+        \\   }[keyof AlertPayload];
         \\
         \\
-        \\export type AlertPayload =
-        \\{
-        \\downtime: {
-        \\line: string
-        \\minutes: number
-        \\}
-        \\lost_production: {
-        \\line: string
-        \\units: number
-        \\}
-        \\}
+        \\ export type AlertPayload =
+        \\   {
+        \\     downtime: {
+        \\       line: string
+        \\       minutes: number
+        \\     }
+        \\     lost_production: {
+        \\       line: string
+        \\       units: number
+        \\     }
+        \\   }
         \\
-        \\export type Spec = {GET: {"/alerts": {
-        \\response: Alert[],
-        \\}
-        \\},
-        \\POST: {},
-        \\PUT: {},
-        \\PATCH: {},
-        \\DELETE: {},
-        \\};
-    , try type_generator.generateTypes(&endpoints));
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/alerts": {
+        \\       response: Alert[],
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
 }
 
 // A second endpoint whose response uses the same `Alert` type.
@@ -1418,6 +1511,77 @@ test "generateTypes: same tagged union reached from two endpoints is exported on
         1,
         std.mem.count(u8, output, "export type AlertPayload ="),
     );
+}
+
+const NotifTopic = enum { post_created, comment_created };
+
+// An adjacently-tagged union that is a public decl of its endpoint
+// must export as an object of variants form instead of the flat XOR form.
+const NotifEndpoint = struct {
+    pub const NotifPayload = union(NotifTopic) {
+        post_created: struct { id: i32, title: []const u8 },
+        comment_created: struct { id: i32, body: []const u8 },
+
+        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+    };
+    const Notif = struct {
+        id: i32,
+        topic: NotifTopic,
+        payload: NotifPayload,
+    };
+    const Ctx = struct {};
+    const Res = struct { body: ?[]Notif = null };
+    pub fn get(_: *Ctx) Res {
+        return .{};
+    }
+};
+
+test "generateTypes: a public tagged-union decl exports as object-of-variants, not XOR" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/notif", NotifEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+    try expectContent(
+        \\ export type Notif =
+        \\   {
+        \\     [K in keyof NotifPayload]: {
+        \\       id: number
+        \\       topic: K
+        \\       payload: NotifPayload[K]
+        \\     };
+        \\   }[keyof NotifPayload];
+        \\
+        \\
+        \\ export type NotifPayload =
+        \\   {
+        \\     post_created: {
+        \\       id: number
+        \\       title: string
+        \\     }
+        \\     comment_created: {
+        \\       id: number
+        \\       body: string
+        \\     }
+        \\   }
+        \\
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/notif": {
+        \\       response: Notif[],
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
 }
 
 // A child struct declared as a top-level type in its own endpoint file
