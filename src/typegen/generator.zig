@@ -947,18 +947,16 @@ pub const TypeGenerator = struct {
             const wrapper_optional = parent_optional or introduces_optional;
 
             if (info == .@"struct" and !hasParamParse(T)) {
-                if (introduces_optional and current_group == null) {
-                    // An optional nested struct opens a new group
+                // Only an optional nested struct with >= 2 required keys forms an AllOf group.
+                // With fewer required keys there is no AllOf constraint,
+                // so we flatten it inline to preserve declaration order.
+                if (introduces_optional and current_group == null and comptime getRequiredKeyCount(T) >= 2) {
                     var group: ArrayList(FlatLeaf) = .empty;
                     try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, &group);
-                    // AllOf needs >= 2 keys, a single key is just independent.
-                    if (group.items.len >= 2) {
-                        try flat_struct.groups.append(self.arena_alloc, group);
-                    } else {
-                        try flat_struct.independent.appendSlice(self.arena_alloc, group.items);
-                    }
+                    try flat_struct.groups.append(self.arena_alloc, group);
                 } else {
-                    // Required nested struct, or one already inside a group
+                    // Required nested struct, an optional one with < 2 required keys,
+                    // or one already inside a group: flatten in declaration order.
                     try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group);
                 }
             } else {
@@ -1328,6 +1326,38 @@ test "extractQueryParams: optionality follows the minimum required key count" {
 
     // Base key `page` is required
     try expectEqual(false, (try type_generator.extractQueryParams(Query)).optional);
+}
+
+// An optional nested struct with a single required leaf and an optional sibling.
+// Since it has < 2 required leaves it forms no AllOf group,
+// so its leaves must flatten inline in declaration order.
+const CursorQuery = struct {
+    room: i32,
+    cursor: types.Optional(struct {
+        cursor: i64,
+        before: bool = false,
+    }) = .not_provided,
+    limit: u32 = 10,
+};
+
+test "extractQueryParams: flattened optional struct keeps declaration order" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(CursorQuery);
+    try expectContent(
+        \\{
+        \\  room: number
+        \\  cursor?: number
+        \\  before?: boolean
+        \\  limit?: number
+        \\}
+    , parse_result.parsed);
 }
 
 const LostProdEndpoint = struct {
