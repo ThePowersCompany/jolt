@@ -12,6 +12,7 @@ const EndpointDef = @import("../main.zig").EndpointDef;
 const UnionRepr = types.UnionRepr;
 
 const types = @import("../utils/types.zig");
+const Optional = types.Optional;
 const isOptional = types.isOptional;
 const JsonArray = types.JsonArray;
 
@@ -857,15 +858,15 @@ pub const TypeGenerator = struct {
             return full;
         }
 
-        // One AllOf per group, the independent keys as a plain object,
+        // One `XOR<present, {}>` per group, the independent keys as a plain object,
         // and AnyOf over everything if the constraint is set.
         var components: ArrayList([]const u8) = .empty;
 
-        // Each group object contains only its own keys.
+        // A group always has >= 1 required key (all-optional groups flatten inline)
         for (flat_struct.groups.items) |group| {
             try components.append(self.arena_alloc, try allocPrint(
                 self.arena_alloc,
-                "AllOf<{s}>",
+                "XOR<{s}, {{}}>",
                 .{try self.renderLeafObject(group.items)},
             ));
         }
@@ -926,9 +927,9 @@ pub const TypeGenerator = struct {
 
     /// Recursively flattens a struct into leaf keys, hoisting nested plain structs.
     /// `parent_optional` - Propagates optionality through Optional (or defaulted) wrappers.
-    /// `current_group` - The open group that required leaves will join.
-    ///   It is opened by an Optional nested struct.
-    ///   Optional leaves never join a group, since they never have to exist with other leaves.
+    /// `current_group` - The open group that leaves will join.
+    ///   It is opened by an Optional nested struct that has at least one required key.
+    ///   While a group is open, every key (required or optional) joins it so the whole struct is present-or-absent.
     fn collectFlatLeaves(
         self: *Self,
         flat_struct: *FlatStruct,
@@ -947,15 +948,21 @@ pub const TypeGenerator = struct {
             const wrapper_optional = parent_optional or introduces_optional;
 
             if (info == .@"struct" and !hasParamParse(T)) {
-                // Only an optional nested struct with >= 2 required keys forms an AllOf group.
-                // With fewer required keys there is no AllOf constraint,
-                // so we flatten it inline to preserve declaration order.
-                if (introduces_optional and current_group == null and comptime getRequiredKeyCount(T) >= 2) {
+                // An optional nested struct that has at least one required key is a "gated group":
+                // at runtime, if any of its keys are present, the required ones are enforced.
+                // Otherwise, the whole struct may be absent.
+                // That is exactly `XOR<present, {}>`, so we collect all of its keys into a single group.
+                //
+                // We reset `parent_optional` to false inside the group
+                // so required keys stay required in the "present" shape.
+                // The group's own optionality is carried by the XOR-with-empty wrapper,
+                // not by marking every key optional.
+                if (introduces_optional and current_group == null and comptime getRequiredKeyCount(T) > 0) {
                     var group: ArrayList(FlatLeaf) = .empty;
-                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, &group);
+                    try self.collectFlatLeaves(flat_struct, info.@"struct", false, &group);
                     try flat_struct.groups.append(self.arena_alloc, group);
                 } else {
-                    // Required nested struct, an optional one with < 2 required keys,
+                    // Required nested struct, an all-optional nested struct,
                     // or one already inside a group: flatten in declaration order.
                     try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group);
                 }
@@ -966,12 +973,8 @@ pub const TypeGenerator = struct {
                     .ts_type = ident.parsed,
                     .optional = wrapper_optional or ident.optional,
                 };
-                // A required leaf inside an open group is required together.
-                // Everything else (optional, or no open group) is independent.
-                const list = if (current_group != null and !introduces_optional)
-                    current_group.?
-                else
-                    &flat_struct.independent;
+
+                const list = if (current_group) |g| g else &flat_struct.independent;
                 try list.append(self.arena_alloc, leaf);
             }
         }
@@ -1092,8 +1095,6 @@ test "Nested Optionals" {
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const Optional = @import("../utils/types.zig").Optional;
-
     const Foo = struct {
         enabled: Optional(bool) = .not_provided,
         email: Optional(struct {
@@ -1122,8 +1123,6 @@ test "Optionals require default values" {
 
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
-
-    const Optional = @import("../utils/types.zig").Optional;
 
     const Foo = struct {
         opt: Optional(bool),
@@ -1329,8 +1328,8 @@ test "extractQueryParams: optionality follows the minimum required key count" {
 }
 
 // An optional nested struct with a single required leaf and an optional sibling.
-// Since it has < 2 required leaves it forms no AllOf group,
-// so its leaves must flatten inline in declaration order.
+// Because a key is present at runtime only when `cursor` is supplied,
+// it renders as a gated group `XOR<{ cursor; before? }, {}>` rather than flattening every key optional.
 const CursorQuery = struct {
     room: i32,
     cursor: types.Optional(struct {
@@ -1340,7 +1339,7 @@ const CursorQuery = struct {
     limit: u32 = 10,
 };
 
-test "extractQueryParams: flattened optional struct keeps declaration order" {
+test "extractQueryParams: optional nested struct with a required key renders as a gated XOR group" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1351,11 +1350,72 @@ test "extractQueryParams: flattened optional struct keeps declaration order" {
 
     const parse_result = try type_generator.extractQueryParams(CursorQuery);
     try expectContent(
-        \\{
-        \\  room: number
-        \\  cursor?: number
+        \\XOR<{
+        \\  cursor: number
         \\  before?: boolean
+        \\}, {}> & {
+        \\  room: number
         \\  limit?: number
+        \\}
+    , parse_result.parsed);
+}
+
+const RangeQuery = struct {
+    page: u32 = 1,
+    range: Optional(struct {
+        start: []const u8,
+        end: []const u8,
+        note: bool = false,
+    }) = .not_provided,
+};
+
+test "extractQueryParams: handles gated group optionality" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(RangeQuery);
+    try expectContent(
+        \\XOR<{
+        \\  start: string
+        \\  end: string
+        \\  note?: boolean
+        \\}, {}> & {
+        \\  page?: number
+        \\}
+    , parse_result.parsed);
+}
+
+const RangeQueryOneRequired = struct {
+    page: u32 = 1,
+    range: Optional(struct {
+        start: []const u8,
+        end: []const u8 = "",
+        note: bool = false,
+    }) = .not_provided,
+};
+
+test "extractQueryParams: gated group with a single required key" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(RangeQueryOneRequired);
+    try expectContent(
+        \\XOR<{
+        \\  start: string
+        \\  end?: string
+        \\  note?: boolean
+        \\}, {}> & {
+        \\  page?: number
         \\}
     , parse_result.parsed);
 }
