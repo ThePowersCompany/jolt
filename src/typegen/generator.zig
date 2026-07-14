@@ -27,7 +27,9 @@ const FlatLeaf = common.FlatLeaf;
 const qp_validation = @import("../middleware/query_params/validation.zig");
 const hasParamParse = qp_validation.hasParamParse;
 const isLiftableUnion = qp_validation.isLiftableUnion;
+const getRequiredKeyCount = qp_validation.getRequiredKeyCount;
 
+const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
 
 pub const TypeGenerator = struct {
@@ -734,13 +736,15 @@ pub const TypeGenerator = struct {
     /// Anything else falls back to the normal struct handling.
     fn extractQueryParams(self: *Self, comptime T: type) !ParseResult {
         const type_name = comptime shortTypeName(@typeName(T));
-        if (self.getTopLevelType(type_name)) |gen| {
-            return .{ .parsed = type_name, .optional = gen.optional };
+        // The type was already registered at the top level
+        if (self.getTopLevelType(type_name) != null) {
+            return .{ .parsed = type_name, .optional = comptime queryParamsOptional(T) };
         }
 
         const info = @typeInfo(T);
         if (comptime info == .@"union" and !isOptional(T)) {
-            return self.parseFlatUnion(info.@"union");
+            const res = try self.parseFlatUnion(info.@"union");
+            return .{ .parsed = res.parsed, .optional = comptime queryParamsOptional(T) };
         }
         if (comptime info == .@"struct") {
             return self.parseFlatQueryStruct(T, info.@"struct");
@@ -748,18 +752,19 @@ pub const TypeGenerator = struct {
         return self.extractIdentifier(T);
     }
 
-    /// Determines if a query param is required.
-    /// Query params with only optional fields are optional unless `any_of` is set.
-    fn isRequiredQueryParams(comptime T: type, has_any_of: bool) bool {
-        if (has_any_of) return true;
-        // If no any_of constraint, check if there are any required fields.
-        const info = @typeInfo(T);
-        if (info != .@"struct") return false;
-        inline for (info.@"struct".fields) |field| {
-            const is_optional = comptime isOptional(field.type);
-            if (!is_optional and field.defaultValue() == null) return true;
+    /// Whether a `query_params` type may be omitted entirely.
+    /// It is optional when it has zero required leaf keys (`getRequiredKeyCount`)
+    /// and carries no `any_of` constraint (which forces at least one key to be present).
+    /// A union counts as zero when it has an all-optional fallback variant,
+    /// since that variant can be satisfied with no keys.
+    fn queryParamsOptional(comptime T: type) bool {
+        comptime {
+            const has_any_of = switch (@typeInfo(T)) {
+                .@"struct", .@"union", .@"enum" => @hasDecl(T, "constraints") and T.constraints.any_of,
+                else => false,
+            };
+            return !has_any_of and getRequiredKeyCount(T) == 0;
         }
-        return false;
     }
 
     /// Parses a union into a flat TS union.
@@ -891,11 +896,9 @@ pub const TypeGenerator = struct {
     /// with the base object built from the remaining fields.
     fn parseFlatQueryStruct(self: *Self, comptime T: type, S: Type.Struct) !ParseResult {
         var components: ArrayList([]const u8) = .empty;
-        var has_liftable_union = false;
 
         inline for (S.fields) |field| {
             if (comptime isLiftableUnion(field.type)) {
-                has_liftable_union = true;
                 const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
                 try components.append(
                     self.arena_alloc,
@@ -915,13 +918,10 @@ pub const TypeGenerator = struct {
             try res.appendSlice(self.arena_alloc, component);
         }
 
-        // If there are liftable unions (with their required XOR logic), the whole thing is required.
-        // Otherwise, check if there are any required non-union fields.
-        const required = has_liftable_union or isRequiredQueryParams(T, comptime blk: {
-            if (@hasDecl(T, "constraints")) break :blk T.constraints.any_of;
-            break :blk false;
-        });
-        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = !required };
+        return .{
+            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .optional = comptime queryParamsOptional(T),
+        };
     }
 
     /// Recursively flattens a struct into leaf keys, hoisting nested plain structs.
@@ -1298,6 +1298,36 @@ test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
         \\  line: number
         \\}
     , parse_result.parsed);
+}
+
+const AllOptionalQuery = struct {
+    line: ?i32 = null,
+    shift: ?i32 = null,
+};
+
+test "extractQueryParams: optionality follows the minimum required key count" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    // A struct with a required field is required
+    try expectEqual(false, (try type_generator.extractQueryParams(PlainDateQuery)).optional);
+
+    // A struct with only optional fields is optional
+    try expectEqual(true, (try type_generator.extractQueryParams(AllOptionalQuery)).optional);
+
+    // Every variant has required keys, so at least one key is always needed
+    try expectEqual(false, (try type_generator.extractQueryParams(Filter)).optional);
+
+    // The `all` variant needs zero keys (all-optional fallback), so it can be omitted
+    try expectEqual(true, (try type_generator.extractQueryParams(LostProductionFilter)).optional);
+
+    // Base key `page` is required
+    try expectEqual(false, (try type_generator.extractQueryParams(Query)).optional);
 }
 
 const LostProdEndpoint = struct {
