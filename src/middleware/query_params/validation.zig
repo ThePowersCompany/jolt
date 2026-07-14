@@ -451,7 +451,7 @@ pub fn assertNoQueryKeyCollisions(comptime T: type) void {
                 // Variants of the same union may share names, so dedupe before merging into `seen`.
                 for (variant_names) |n| {
                     if (!contains(union_names, n)) {
-                        union_names = union_names ++ n;
+                        union_names = union_names ++ &[_][]const u8{n};
                     }
                 }
             }
