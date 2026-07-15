@@ -1420,6 +1420,32 @@ test "extractQueryParams: gated group with a single required key" {
     , parse_result.parsed);
 }
 
+const AnyOfQuery = struct {
+    a: Optional(i32) = .not_provided,
+    b: Optional([]const u8) = .not_provided,
+
+    pub const constraints: types.Constraints = .{ .any_of = true };
+};
+
+test "extractQueryParams: any_of constraint wraps the object in AnyOf" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(AnyOfQuery);
+    try expectContent(
+        \\AnyOf<{
+        \\  a?: number
+        \\  b?: string
+        \\}>
+    , parse_result.parsed);
+    try expectEqual(false, parse_result.optional);
+}
+
 const LostProdEndpoint = struct {
     pub const LostProductionQueryParams = union(enum) {
         id: i32,

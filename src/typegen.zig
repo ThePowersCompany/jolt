@@ -13,18 +13,6 @@ const PrivateUtilityTypes =
     \\  [P in K]: SetRequired<T, P>;
     \\}[K];
     \\
-    \\type AllOf<T, K extends keyof T = keyof T> =
-    \\  | (T & Required<Pick<T, K>>)
-    \\  | (Omit<T, K> & { [P in K]?: never });
-    \\
-    \\type OneOf<T, K extends keyof T> =
-    \\  | (Omit<T, K> & { [P in K]?: never })
-    \\  | {
-    \\    [E in K]: Omit<T, K> & { [P in E]?: T[P] } & {
-    \\      [P in Exclude<K, E>]?: never;
-    \\    };
-    \\  }[K];
-    \\
     \\type Without<T, U> = { [P in Exclude<keyof T, keyof U>]?: never };
     \\
     \\type XOR<T, U> = (T | U) extends object ? (Without<T, U> & U) | (Without<U, T> & T) : T | U;
