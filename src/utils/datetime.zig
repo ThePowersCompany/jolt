@@ -63,6 +63,11 @@ pub const Date = struct {
         return date;
     }
 
+    /// Query parameter parsing support in strict YYYY-MM-DD format
+    pub fn paramParse(_: Allocator, input: []const u8) !Date {
+        return try parse(input, .rfc3339);
+    }
+
     pub fn isValidDate(input: []const u8, fmt: Format) bool {
         _ = parse(input, fmt) catch return false;
         return true;
@@ -178,6 +183,11 @@ pub const Time = struct {
             return error.InvalidTime;
         }
         return time;
+    }
+
+    /// Query parameter parsing support in strict HH:MM:SS format
+    pub fn paramParse(_: Allocator, input: []const u8) !Time {
+        return try parse(input, .rfc3339);
     }
 
     pub fn order(a: Time, b: Time) std.math.Order {
@@ -300,6 +310,11 @@ pub const DateTime = struct {
         switch (fmt) {
             .rfc3339 => return parseRFC3339(input),
         }
+    }
+
+    /// Query parameter parsing support in strict YYYY-MM-DDTHH:MM:SSZ format
+    pub fn paramParse(_: Allocator, input: []const u8) !DateTime {
+        return try parse(input, .rfc3339);
     }
 
     pub fn parseRFC3339(input: []const u8) !DateTime {
@@ -508,6 +523,11 @@ pub const PlainDateTime = struct {
             .date = dt,
             .time = tm,
         };
+    }
+
+    /// Query parameter parsing support in strict YYYY-MM-DDTHH:MM:SS format
+    pub fn paramParse(_: Allocator, input: []const u8) !Self {
+        return try parse(input);
     }
 
     pub fn order(a: Self, b: Self) std.math.Order {

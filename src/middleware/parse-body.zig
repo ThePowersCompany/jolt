@@ -9,18 +9,8 @@ const Request = zap.Request;
 const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
 
-/// Various ways to represent tagged unions in JSON.
-/// Reference (Rust): https://serde.rs/enum-representations.html
-pub const UnionRepr = union(enum) {
-    external,
-    internal: struct {
-        discriminator: []const u8,
-    },
-    adjacently: struct {
-        discriminator: []const u8,
-    },
-    untagged,
-};
+const types = @import("../utils/types.zig");
+const UnionRepr = types.UnionRepr;
 
 /// Parses the body of the request and attaches it to the given Context.
 /// Context must have a member named "body" which resolves to the type meant to be parsed into an object.
@@ -49,6 +39,11 @@ pub fn parseBody(comptime Context: type) MiddlewareFn(Context) {
                                 "Unexpected body structure",
                             );
                         };
+                        // Enforce constraints now that the body is populated.
+                        if (types.validateConstraints(@TypeOf(ctx.ctx.body), parsed_body)) |err_msg| {
+                            return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
+                        }
+
                         ctx.ctx.body = parsed_body;
                     } else {
                         try ctx.req.respondWithError(

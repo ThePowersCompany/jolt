@@ -16,6 +16,15 @@ const CreateUserRequest = struct {
 
 const PostContext = struct {
     body: CreateUserRequest,
+    query_params: union(enum) {
+        foo: struct {
+            a: []const u8,
+        },
+        bar: struct {
+            b: []const u8,
+            c: ?[]const u8 = null,
+        },
+    },
 };
 
 pub fn post(ctx: *PostContext, alloc: Allocator) !Response(void) {

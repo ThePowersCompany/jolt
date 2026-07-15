@@ -4,9 +4,27 @@ const json = std.json;
 
 const pg = @import("pg");
 
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
+
+/// Various ways to represent tagged unions in JSON.
+/// Reference (Rust): https://serde.rs/enum-representations.html
+pub const UnionRepr = union(enum) {
+    external,
+    internal: struct {
+        discriminator: []const u8,
+    },
+    adjacently: struct {
+        discriminator: []const u8,
+    },
+    untagged,
+};
+
 pub fn Unwrap(T: type) type {
-    const info = @typeInfo(T);
-    if (info == .optional) return Unwrap(info.optional.child);
+    if (isOptional(T)) return Unwrap(T.childType());
+    if (@typeInfo(T) == .optional) return Unwrap(@typeInfo(T).optional.child);
     return T;
 }
 
@@ -141,15 +159,56 @@ pub fn Optional(comptime T: type) type {
     };
 }
 
+test "Unwrap: concrete type returns unchanged" {
+    try expectEqual(i32, Unwrap(i32));
+    try expectEqual([]const u8, Unwrap([]const u8));
+
+    const E = enum { a, b };
+    try expectEqual(E, Unwrap(E));
+}
+
+test "Unwrap: unwraps native ?T" {
+    try expectEqual(i32, Unwrap(?i32));
+    try expectEqual([]const u8, Unwrap(?[]const u8));
+}
+
+test "Unwrap: unwraps nested native optionals" {
+    try expectEqual(i32, Unwrap(??i32));
+    try expectEqual([]const u8, Unwrap(???[]const u8));
+}
+
+test "Unwrap: unwraps Optional wrapper" {
+    try expectEqual(i32, Unwrap(Optional(i32)));
+    try expectEqual([]const u8, Unwrap(Optional([]const u8)));
+}
+
+test "Unwrap: unwraps Optional wrapping native optional" {
+    try expectEqual(i32, Unwrap(Optional(?i32)));
+    try expectEqual([]const u8, Unwrap(Optional(??[]const u8)));
+}
+
+test "Unwrap: unwraps nested Optional wrappers with native optionals" {
+    try expectEqual(i32, Unwrap(Optional(Optional(?i32))));
+}
+
+test "Unwrap: preserves struct and union types" {
+    const S = struct { x: i32 };
+    const U = union(enum) { a: i32, b: []const u8 };
+    try expectEqual(S, Unwrap(S));
+    try expectEqual(U, Unwrap(U));
+    try expectEqual(S, Unwrap(?S));
+    try expectEqual(U, Unwrap(Optional(?U)));
+}
+
 test "Optional.getPtr" {
     {
         var opt: Optional(i32) = .to(123);
         opt.getPtr().?.* = 456;
-        try std.testing.expectEqual(456, opt.value);
+        try expectEqual(456, opt.value);
     }
     {
         var opt: Optional(?i32) = .to(null);
-        try std.testing.expectEqual(null, opt.getPtr());
+        try expectEqual(null, opt.getPtr());
     }
 }
 
@@ -164,8 +223,8 @@ test "Optional.to" {
 
         const got = opt.get();
 
-        try std.testing.expect(@TypeOf(got) == ?Foo);
-        try std.testing.expect(got.?.foo == 123);
+        try expect(@TypeOf(got) == ?Foo);
+        try expect(got.?.foo == 123);
     }
 
     {
@@ -174,21 +233,21 @@ test "Optional.to" {
 
         const got = opt.get();
 
-        try std.testing.expect(@TypeOf(got) == ?Foo);
-        try std.testing.expect(got.?.foo == 123);
+        try expect(@TypeOf(got) == ?Foo);
+        try expect(got.?.foo == 123);
     }
 
     {
         // Support anonymous structs
         const opt: Optional(Foo) = Optional(Foo).to(.{ .foo = 123 });
-        try std.testing.expectEqual(123, opt.value.foo);
+        try expectEqual(123, opt.value.foo);
     }
 }
 
 test "Optional.fromPgzRow" {
     _ = Optional(i32).fromPgzRow(.{ .is_null = false, .data = "123" }, 0) catch {};
     const o = try Optional(?i32).fromPgzRow(.{ .is_null = true, .data = "" }, 0);
-    try std.testing.expect(o.value == null);
+    try expect(o.value == null);
 }
 
 test "parse json Optional" {
@@ -215,30 +274,30 @@ test "parse json Optional" {
     {
         const inner = foo.foo.get();
         if (inner) |v| {
-            try std.testing.expect(v == 123);
-        } else try std.testing.expect(false);
+            try expect(v == 123);
+        } else try expect(false);
     }
 
     {
         const inner = foo.bar.get();
         if (inner) |_| {
-            try std.testing.expect(false);
-        } else try std.testing.expect(inner == null);
+            try expect(false);
+        } else try expect(inner == null);
     }
 
     if (foo.foo.get()) |v| {
-        try std.testing.expect(v == 123);
+        try expect(v == 123);
     }
 
-    try std.testing.expect(foo.foo.value == 123);
-    try std.testing.expect(foo.bar.value == null);
-    try std.testing.expect(foo.baz == .not_provided);
+    try expect(foo.foo.value == 123);
+    try expect(foo.bar.value == null);
+    try expect(foo.baz == .not_provided);
 
     if (foo.foo.value) |val| {
-        try std.testing.expect(val == 123);
-    } else try std.testing.expect(false);
+        try expect(val == 123);
+    } else try expect(false);
 
-    if (foo.bar.value) |_| try std.testing.expect(false);
+    if (foo.bar.value) |_| try expect(false);
 }
 
 test "stringify json Optional" {
@@ -249,13 +308,13 @@ test "stringify json Optional" {
         const opt: Optional(i32) = .{ .value = 1 };
         const str = try stringify(alloc, opt, .{});
         defer alloc.free(str);
-        try std.testing.expectEqualStrings(str, "1");
+        try expectEqualStrings(str, "1");
     }
 
     {
         const opt: Optional(i32) = .not_provided;
         const strOrError = stringify(alloc, opt, .{});
-        try std.testing.expectError(json.Stringify.Error.WriteFailed, strOrError);
+        try expectError(json.Stringify.Error.WriteFailed, strOrError);
     }
 
     const Foo = struct {
@@ -267,7 +326,7 @@ test "stringify json Optional" {
             .data = .not_provided,
         };
         const strOrError = stringify(alloc, foo, .{});
-        try std.testing.expectError(json.Stringify.Error.WriteFailed, strOrError);
+        try expectError(json.Stringify.Error.WriteFailed, strOrError);
     }
     {
         const foo: Foo = .{
@@ -275,7 +334,7 @@ test "stringify json Optional" {
         };
         const str = try stringify(alloc, foo, .{});
         defer alloc.free(str);
-        try std.testing.expectEqualStrings(str, "{\"data\":123}");
+        try expectEqualStrings(str, "{\"data\":123}");
     }
 }
 
@@ -331,7 +390,7 @@ test "stringify JsonObject" {
         };
         const str = try stringify(alloc, foo, .{});
         defer alloc.free(str);
-        try std.testing.expectEqualStrings(str, "{}");
+        try expectEqualStrings(str, "{}");
     }
     {
         const foo: Foo = .{
@@ -339,7 +398,7 @@ test "stringify JsonObject" {
         };
         const str = try stringify(alloc, foo, .{});
         defer alloc.free(str);
-        try std.testing.expectEqualStrings(str, "{\"data\":123}");
+        try expectEqualStrings(str, "{\"data\":123}");
     }
 }
 
@@ -418,7 +477,7 @@ test "stringify json array" {
     const str = try stringify(alloc, foo, .{});
     defer alloc.free(str);
 
-    try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
+    try expectEqualStrings(str, "{\"data\":[1,2,3]}");
 }
 
 pub fn JsonSlice(comptime T: type) type {
@@ -540,5 +599,70 @@ test "Json(JsonArray(T))" {
 
     const str = try stringify(alloc, foo, .{});
     defer alloc.free(str);
-    try std.testing.expectEqualStrings(str, "{\"data\":[1,2,3]}");
+    try expectEqualStrings(str, "{\"data\":[1,2,3]}");
+}
+
+/// Declarative presence constraints for a request `body` or `query_params` struct.
+/// Attach as a decl inside the struct:
+///
+///   pub const constraints: Constraints = .{
+///       .any_of = true,
+///   };
+///
+/// Use tagged unions for distinct shapes, e.g. "a & b" OR "c & d".
+pub const Constraints = struct {
+    any_of: bool = false,
+};
+
+/// Returns whether a (possibly `Optional` wrapped) field carries a provided value.
+/// Non-Optional fields are always considered present once parsing succeeds, since they are mandatory.
+pub fn fieldPresent(value: anytype, comptime name: []const u8) bool {
+    const F = @FieldType(@TypeOf(value), name);
+    if (comptime isOptional(F)) {
+        return @field(value, name) != .not_provided;
+    }
+    return true;
+}
+
+/// Validates the `constraints` of struct type `T` against a parsed value.
+/// Returns a human readable error message for the first violated rule,
+/// or `null` when all constraints are satisfied.
+pub fn validateConstraints(comptime T: type, value: T) ?[]const u8 {
+    // If it's not a struct, or if it is but doesn't have constraints, skip the checks.
+    if (comptime @typeInfo(T) != .@"struct" or !@hasDecl(T, "constraints")) return null;
+
+    const c: Constraints = T.constraints;
+    if (comptime c.any_of) {
+        var any_present = false;
+        inline for (@typeInfo(T).@"struct".fields) |f| {
+            if (fieldPresent(value, f.name)) {
+                any_present = true;
+                break;
+            }
+        }
+        if (!any_present) return "At least one field must be provided";
+    }
+
+    return null;
+}
+
+test "validateConstraints any_of" {
+    const Body = struct {
+        a: Optional(i32) = .not_provided,
+        b: Optional(?i32) = .not_provided,
+
+        pub const constraints: Constraints = .{ .any_of = true };
+    };
+
+    var error_msg: ?[]const u8 = null;
+
+    error_msg = validateConstraints(Body, .{ .a = .{ .value = 1 } });
+    try expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{ .b = .{ .value = null } });
+    try expectEqual(null, error_msg);
+
+    error_msg = validateConstraints(Body, .{});
+    try std.testing.expect(error_msg != null);
+    try expectEqualStrings("At least one field must be provided", error_msg.?);
 }
