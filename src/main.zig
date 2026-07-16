@@ -51,6 +51,7 @@ pub const patch = @import("./utils/patch.zig");
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const middleware = struct {
+    pub const auto = @import("./middleware/auto.zig").auto;
     pub const cors = @import("./middleware/cors.zig").cors;
     pub const parseBody = @import("./middleware/parse-body.zig").parseBody;
     pub const parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams;
@@ -219,10 +220,6 @@ pub const JoltServer = struct {
 };
 
 pub fn main() !void {
-
-    // Example auto middleware
-    const auto = @import("./middleware/auto.zig").auto;
-
     const alloc = std.heap.raw_c_allocator;
     var server: JoltServer = try JoltServer.init(alloc, .{
         .port = 3333,
@@ -238,7 +235,7 @@ pub fn main() !void {
 
     try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
-    try server.run(&endpoints, &tasks, auto);
+    try server.run(&endpoints, &tasks, middleware.auto);
 }
 
 test {

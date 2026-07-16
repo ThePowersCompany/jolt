@@ -1,0 +1,19 @@
+{
+  "name": "e2e-tests",
+  "type": "module",
+  "scripts": {
+    "all-tests": "node --enable-source-maps --import tsx suite.ts",
+    "bench": "node --enable-source-maps --import tsx bench.ts",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "dotenv": "^16",
+    "temporal-polyfill": "^0.3.0",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "tsx": "^4"
+  }
+}
