@@ -19,32 +19,64 @@ const endpoint = "/nested-optional";
 describe(endpoint, () => {
   it("accepts an empty request (all defaults)", async () => {
     const res = await GET(endpoint, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
   });
 
   it("accepts just the base page key", async () => {
     const res = await GET(`${endpoint}?page=2`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.page, 2);
+    assert.strictEqual(body.category, null);
+    assert.strictEqual(body.status, null);
   });
 
   it("accepts only category from the nested struct", async () => {
     const res = await GET(`${endpoint}?category=books`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    // `category` present while `status` stays null proves there is no all-or-nothing gating.
+    assert.strictEqual(body.category, "books");
+    assert.strictEqual(body.status, null);
+    // `page` falls back to its default of 1.
+    assert.strictEqual(body.page, 1);
   });
 
   it("accepts only status from the nested struct", async () => {
     const res = await GET(`${endpoint}?status=active`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.status, "active");
+    assert.strictEqual(body.category, null);
   });
 
   it("accepts both nested keys together", async () => {
     const res = await GET(`${endpoint}?category=books&status=active`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.category, "books");
+    assert.strictEqual(body.status, "active");
   });
 
   it("accepts page combined with a partial filter", async () => {
     const res = await GET(`${endpoint}?page=3&status=active`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.page, 3);
+    assert.strictEqual(body.status, "active");
+    assert.strictEqual(body.category, null);
   });
 
   it("rejects a page of the wrong type", async () => {

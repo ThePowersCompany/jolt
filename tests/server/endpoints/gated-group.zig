@@ -17,6 +17,30 @@ const GetContext = struct {
     },
 };
 
-pub fn get(_: *GetContext, _: Allocator) !Response(void) {
-    return .{};
+pub const GatedGroupQpDetails = struct {
+    room: i32,
+    limit: u32,
+    cursor_present: bool,
+    cursor: ?i64,
+    before: ?bool,
+};
+
+pub fn get(ctx: *GetContext, _: Allocator) !Response(GatedGroupQpDetails) {
+    const qp = ctx.query_params;
+    if (qp.cursor.get()) |group| {
+        return .{ .body = .{
+            .room = qp.room,
+            .limit = qp.limit,
+            .cursor_present = true,
+            .cursor = group.cursor,
+            .before = group.before,
+        } };
+    }
+    return .{ .body = .{
+        .room = qp.room,
+        .limit = qp.limit,
+        .cursor_present = false,
+        .cursor = null,
+        .before = null,
+    } };
 }

@@ -16,7 +16,28 @@ type XOR<T, U> = T | U extends object
   ? (Without<T, U> & U) | (Without<U, T> & T)
   : T | U;
 
-export type QpDetails = {
+export type AnyOfQpDetails = {
+  query: string | null;
+  email: string | null;
+  username: string | null;
+  role: string | null;
+};
+
+export type GatedGroupQpDetails = {
+  room: number;
+  limit: number;
+  cursor_present: boolean;
+  cursor: number | null;
+  before: boolean | null;
+};
+
+export type NestedOptionalQpDetails = {
+  page: number;
+  category: string | null;
+  status: string | null;
+};
+
+export type UnionVariantQpDetails = {
   variant: string;
   id?: number | null;
   start_date?: number | null;
@@ -33,7 +54,7 @@ export type Spec = {
         username?: string;
         role?: string;
       }>;
-      response: void;
+      response: AnyOfQpDetails;
     };
     "/gated-group": {
       queryParams: XOR<
@@ -46,7 +67,7 @@ export type Spec = {
         room: number;
         limit?: number;
       };
-      response: void;
+      response: GatedGroupQpDetails;
     };
     "/nested-optional": {
       queryParams?: {
@@ -54,7 +75,7 @@ export type Spec = {
         category?: string;
         status?: string;
       };
-      response: void;
+      response: NestedOptionalQpDetails;
     };
     "/union-variant": {
       queryParams?: XOR<
@@ -72,7 +93,7 @@ export type Spec = {
           }
         >
       >;
-      response: QpDetails;
+      response: UnionVariantQpDetails;
     };
   };
   POST: {};

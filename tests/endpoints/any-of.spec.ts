@@ -11,7 +11,7 @@ const endpoint = "/any-of";
 //     username: Optional([]const u8) = .not_provided,
 //     role: Optional([]const u8) = .not_provided,
 //
-//     pub const constraints: types.Constraints = .{ .any_of = true };
+//     pub const constraints: Constraints = .{ .any_of = true };
 // }
 //
 // The query_params are all optional (query, email, username, role)
@@ -26,27 +26,55 @@ describe(endpoint, () => {
 
   it("accepts a request with just query", async () => {
     const res = await GET(`${endpoint}?query=hello`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.query, "hello");
+    // The other optional fields remain null
+    assert.strictEqual(body.email, null);
+    assert.strictEqual(body.username, null);
+    assert.strictEqual(body.role, null);
   });
 
   it("accepts a request with just email", async () => {
     const res = await GET(`${endpoint}?email=a@b.com`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.email, "a@b.com");
+    assert.strictEqual(body.query, null);
   });
 
   it("accepts a request with just username", async () => {
     const res = await GET(`${endpoint}?username=alice`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.username, "alice");
   });
 
   it("accepts a request with just role", async () => {
     const res = await GET(`${endpoint}?role=admin`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.role, "admin");
   });
 
   it("accepts a request with several fields", async () => {
     const res = await GET(`${endpoint}?query=hello&role=admin`, null);
-    assert.strictEqual(res.status, 204, await res.text());
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.query, "hello");
+    assert.strictEqual(body.role, "admin");
+    assert.strictEqual(body.email, null);
+    assert.strictEqual(body.username, null);
   });
 
   it("rejects when only an unknown field is provided", async () => {
@@ -54,5 +82,3 @@ describe(endpoint, () => {
     assert.strictEqual(res.status, 400);
   });
 });
-
-

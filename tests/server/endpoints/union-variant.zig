@@ -31,7 +31,7 @@ const GetContext = struct {
 
 // Details about which variant was selected plus its key fields,
 // so tests can assert variant selection by specificity (not declaration order).
-pub const QpDetails = struct {
+pub const UnionVariantQpDetails = struct {
     variant: []const u8,
     id: ?i32 = null,
     start_date: ?i32 = null,
@@ -39,8 +39,8 @@ pub const QpDetails = struct {
     shift: ?i32 = null,
 };
 
-pub fn get(ctx: *GetContext, _: Allocator) !Response(QpDetails) {
-    const body: QpDetails = switch (ctx.query_params) {
+pub fn get(ctx: *GetContext, _: Allocator) !Response(UnionVariantQpDetails) {
+    const body: UnionVariantQpDetails = switch (ctx.query_params) {
         .id => |v| .{
             .variant = "id",
             .id = v,

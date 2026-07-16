@@ -16,6 +16,24 @@ const GetContext = struct {
     },
 };
 
-pub fn get(_: *GetContext, _: Allocator) !Response(void) {
-    return .{};
+pub const NestedOptionalQpDetails = struct {
+    page: u32,
+    category: ?[]const u8,
+    status: ?[]const u8,
+};
+
+pub fn get(ctx: *GetContext, _: Allocator) !Response(NestedOptionalQpDetails) {
+    const qp = ctx.query_params;
+    if (qp.filter.get()) |filter| {
+        return .{ .body = .{
+            .page = qp.page,
+            .category = filter.category.get(),
+            .status = filter.status.get(),
+        } };
+    }
+    return .{ .body = .{
+        .page = qp.page,
+        .category = null,
+        .status = null,
+    } };
 }
