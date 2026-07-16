@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const zap = @import("./zap/zap.zig");
-const auth = @import("middleware/auth.zig");
 const RequestHandler = Endpoint.RequestHandler;
 
 const db_migrations = @import("db-migrations.zig");

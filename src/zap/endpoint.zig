@@ -21,7 +21,7 @@ pub fn MiddlewareContext(comptime Context: type) type {
     return struct {
         ctx: *Context,
         alloc: Allocator,
-        server: *JoltServer,
+        server: *const JoltServer,
         req: Request,
     };
 }
@@ -100,14 +100,12 @@ pub const RequestHandler = struct {
         const Wrapper = struct {
             pub fn handle(alloc: Allocator, server: *JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
                 var context: Context = undefined;
-                var middleware_context: MiddlewareContext(Context) = .{
+                auto(Context, &.{
                     .ctx = &context,
                     .alloc = alloc,
                     .server = server,
                     .req = req,
-                };
-
-                auto(Context, &middleware_context) catch |err| {
+                }) catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
