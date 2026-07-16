@@ -26,7 +26,6 @@ pub const DbListener = pg.Listener;
 pub const Request = zap.Request;
 pub const Endpoint = zap.Endpoint;
 pub const Response = Endpoint.Response;
-pub const MiddlewareFn = Endpoint.MiddlewareFn;
 pub const StatusCode = zap.StatusCode;
 pub const mustache = @import("zap/mustache.zig");
 pub const WebSockets = @import("zap/websockets.zig");
@@ -49,12 +48,6 @@ pub const uuid = @import("./utils/uuid.zig");
 pub const patch = @import("./utils/patch.zig");
 
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
-
-pub const middleware = struct {
-    pub const cors = @import("./middleware/cors.zig").cors;
-    pub const parseBody = @import("./middleware/parse-body.zig").parseBody;
-    pub const parseQueryParams = @import("./middleware/parse-query-params.zig").parseQueryParams;
-};
 
 pub const ServerOpts = struct {
     port: u16,
@@ -108,7 +101,6 @@ pub const JoltServer = struct {
         self: *Self,
         endpoints: []const EndpointDef,
         tasks: []const type,
-        auto: anytype,
     ) !void {
         @setEvalBranchQuota((endpoints.len + tasks.len) * 1000);
         var global_arena = ArenaAllocator.init(self.alloc);
@@ -158,25 +150,25 @@ pub const JoltServer = struct {
                 // Automatic endpoint discovery
                 var handlers: Endpoint.RequestHandlers = .{};
                 if (std.meta.hasFn(typ, "get")) {
-                    handlers.getHandler = try RequestHandler.init(auto, @field(typ, "get"));
+                    handlers.getHandler = try RequestHandler.init(@field(typ, "get"));
                 }
                 if (std.meta.hasFn(typ, "post")) {
-                    handlers.postHandler = try RequestHandler.init(auto, @field(typ, "post"));
+                    handlers.postHandler = try RequestHandler.init(@field(typ, "post"));
                 }
                 if (std.meta.hasFn(typ, "put")) {
-                    handlers.putHandler = try RequestHandler.init(auto, @field(typ, "put"));
+                    handlers.putHandler = try RequestHandler.init(@field(typ, "put"));
                 }
                 if (std.meta.hasFn(typ, "patch")) {
-                    handlers.patchHandler = try RequestHandler.init(auto, @field(typ, "patch"));
+                    handlers.patchHandler = try RequestHandler.init(@field(typ, "patch"));
                 }
                 if (std.meta.hasFn(typ, "delete")) {
-                    handlers.deleteHandler = try RequestHandler.init(auto, @field(typ, "delete"));
+                    handlers.deleteHandler = try RequestHandler.init(@field(typ, "delete"));
                 }
                 if (std.meta.hasFn(typ, "options")) {
-                    handlers.optionsHandler = try RequestHandler.init(auto, @field(typ, "options"));
+                    handlers.optionsHandler = try RequestHandler.init(@field(typ, "options"));
                 } else if (!@hasField(typ, "options") or @field(typ, "options")) {
                     // Default `options` handler with CORS
-                    handlers.optionsHandler = try RequestHandler.init(auto, Endpoint.defaultOptionsHandler);
+                    handlers.optionsHandler = try RequestHandler.init(Endpoint.defaultOptionsHandler);
                 }
 
                 const error_handler: Endpoint.ErrorHandlerFn = if (std.meta.hasFn(typ, "sendErrorResponse")) @field(typ, "sendErrorResponse") else Endpoint.defaultErrorHandler;
@@ -219,10 +211,6 @@ pub const JoltServer = struct {
 };
 
 pub fn main() !void {
-
-    // Example auto middleware
-    const auto = @import("./middleware/auto.zig").auto;
-
     const alloc = std.heap.raw_c_allocator;
     var server: JoltServer = try JoltServer.init(alloc, .{
         .port = 3333,
@@ -238,7 +226,7 @@ pub fn main() !void {
 
     try generateTypesFile(alloc, "types.d.ts", &endpoints);
 
-    try server.run(&endpoints, &tasks, auto);
+    try server.run(&endpoints, &tasks);
 }
 
 test {
