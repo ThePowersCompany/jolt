@@ -17,9 +17,12 @@ const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringL
 const stringify = @import("../utils/json.zig").stringify;
 const Json = @import("../utils/types.zig").Json;
 
-pub fn MiddlewareContext(comptime Context: type) type {
+pub fn MiddlewareContext(comptime D: type) type {
+    // TODO verify dependencies contains no pointers
     return struct {
-        ctx: *Context,
+        pub const Dependencies = D;
+
+        deps: Dependencies,
         alloc: Allocator,
         server: *const JoltServer,
         req: Request,
@@ -64,7 +67,7 @@ pub fn Response(comptime ReturnType: type) type {
 }
 
 pub const RequestHandler = struct {
-    handle_fn: *const fn (Allocator, *JoltServer, Request, ErrorHandlerFn) anyerror!void,
+    handle_fn: *const fn (Allocator, *const JoltServer, Request, ErrorHandlerFn) anyerror!void,
 
     pub fn init(comptime last_fn: anytype) !RequestHandler {
         const info: std.builtin.Type = @typeInfo(@TypeOf(last_fn));
@@ -98,14 +101,14 @@ pub const RequestHandler = struct {
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(alloc: Allocator, server: *JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
-                var context: Context = undefined;
-                auto(Context, &.{
-                    .ctx = &context,
+            pub fn handle(alloc: Allocator, server: *const JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+                var ctx: MiddlewareContext(Context) = .{
+                    .deps = undefined,
                     .alloc = alloc,
                     .server = server,
                     .req = req,
-                }) catch |err| {
+                };
+                auto(Context, &ctx) catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -116,7 +119,7 @@ pub const RequestHandler = struct {
                     return;
                 }
 
-                const response: Response(ReturnType) = last_fn(&context, alloc) catch |err| {
+                const response: Response(ReturnType) = last_fn(&ctx.deps, alloc) catch |err| {
                     std.log.err("Endpoint fn error - {}\n", .{err});
                     return sendErrorResponse(req, err) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -182,7 +185,7 @@ pub const RequestHandler = struct {
     pub fn handle(
         self: RequestHandler,
         allocator: Allocator,
-        server: *JoltServer,
+        server: *const JoltServer,
         req: Request,
         sendErrorResponse: ErrorHandlerFn,
     ) void {
@@ -206,13 +209,13 @@ pub const RequestHandlers = struct {
 };
 
 pub const Endpoint = struct {
-    server: *JoltServer,
+    server: *const JoltServer,
     path: []const u8,
     handlers: RequestHandlers,
     sendErrorResponse: ErrorHandlerFn,
 
     pub fn init(
-        server: *JoltServer,
+        server: *const JoltServer,
         path: []const u8,
         sendErrorResponse: ErrorHandlerFn,
         handlers: RequestHandlers,

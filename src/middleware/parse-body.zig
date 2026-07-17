@@ -25,7 +25,7 @@ pub fn parseBody(comptime Context: type, ctx: *const MiddlewareContext(Context))
         .@"struct", .@"union" => {
             if (ctx.req.body) |body| {
                 const parsed_body = json.parseFromSliceLeaky(
-                    @TypeOf(ctx.ctx.body),
+                    @TypeOf(ctx.deps.body),
                     ctx.alloc,
                     body,
                     .{},
@@ -37,11 +37,11 @@ pub fn parseBody(comptime Context: type, ctx: *const MiddlewareContext(Context))
                     );
                 };
                 // Enforce constraints now that the body is populated.
-                if (types.validateConstraints(@TypeOf(ctx.ctx.body), parsed_body)) |err_msg| {
+                if (types.validateConstraints(@TypeOf(ctx.deps.body), parsed_body)) |err_msg| {
                     return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
                 }
 
-                ctx.ctx.body = parsed_body;
+                ctx.deps.body = parsed_body;
             } else {
                 try ctx.req.respondWithError(
                     StatusCode.bad_request,
@@ -54,7 +54,7 @@ pub fn parseBody(comptime Context: type, ctx: *const MiddlewareContext(Context))
                 @compileError("Body was a pointer but not a string");
             }
             if (ctx.req.body) |body| {
-                ctx.ctx.body = body;
+                ctx.deps.body = body;
             } else {
                 try ctx.req.respondWithError(
                     StatusCode.bad_request,
