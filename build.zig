@@ -130,14 +130,9 @@ pub fn build(b: *std.Build) !void {
 
     import_deps(unit_tests.root_module);
 
-    unit_tests.addIncludePath(.{
-        .src_path = .{
-            .owner = b,
-            .sub_path = "facil.io/lib/facil",
-        },
-    });
+    unit_tests.root_module.addIncludePath(b.path("facil.io/lib/facil"));
 
-    unit_tests.linkLibrary(facilio);
+    unit_tests.root_module.linkLibrary(facilio);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 

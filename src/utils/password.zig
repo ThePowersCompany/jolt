@@ -1,10 +1,11 @@
 const std = @import("std");
+const jolt_io = @import("../io.zig");
 const pbkdf2 = std.crypto.pwhash.pbkdf2;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub fn generateToken(comptime salt_length: usize) [salt_length]u8 {
     var buffer: [salt_length]u8 = undefined;
-    std.crypto.random.bytes(&buffer);
+    jolt_io.randomBytes(&buffer);
     return buffer;
 }
 

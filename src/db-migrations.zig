@@ -3,8 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
-const Dir = std.fs.Dir;
-const Entry = Dir.Entry;
+const Dir = std.Io.Dir;
 
 const pg = @import("pg");
 const db = @import("db/database.zig");
@@ -29,57 +28,54 @@ const MigrationEntry = struct {
     migration_name: []const u8,
 };
 
-const MigrationDir = struct { dir: Dir, entries: []Entry };
+const MigrationDir = struct { dir: Dir, entries: []const []const u8 };
 
 fn strEql(s1: []const u8, s2: []const u8) bool {
     return std.mem.eql(u8, s1, s2);
 }
 
-fn findMigrationDir(path: []const u8) !Dir {
+fn findMigrationDir(io: std.Io, path: []const u8) !Dir {
     if (std.fs.path.isAbsolute(path)) {
-        return std.fs.openDirAbsolute(path, .{ .iterate = true }) catch |err| {
+        return Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) {
-                try std.fs.makeDirAbsolute(path);
-                return try std.fs.openDirAbsolute(path, .{ .iterate = true });
+                try Dir.createDirAbsolute(io, path, .default_dir);
+                return try Dir.openDirAbsolute(io, path, .{ .iterate = true });
             }
             return err;
         };
     }
 
-    const cwd = std.fs.cwd();
-    return cwd.openDir(path, .{ .iterate = true }) catch |err| {
+    const cwd = Dir.cwd();
+    return cwd.openDir(io, path, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
-            try cwd.makeDir(path);
-            return try cwd.openDir(path, .{ .iterate = true });
+            try cwd.createDir(io, path, .default_dir);
+            return try cwd.openDir(io, path, .{ .iterate = true });
         }
         return err;
     };
 }
 
-fn loadMigrationDir(alloc: Allocator, path: []const u8) !MigrationDir {
-    const dir = try findMigrationDir(path);
+fn loadMigrationDir(alloc: Allocator, io: std.Io, path: []const u8) !MigrationDir {
+    const dir = try findMigrationDir(io, path);
 
-    var entries: ArrayList(Entry) = .empty;
+    var entries: ArrayList([]const u8) = .empty;
     defer entries.deinit(alloc);
 
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .directory) continue;
 
-        try entries.append(alloc, .{
-            .kind = .directory,
-            .name = try alloc.dupe(u8, entry.name),
-        });
+        try entries.append(alloc, try alloc.dupe(u8, entry.name));
     }
-    std.sort.pdq(Entry, entries.items, {}, compareEntries);
+    std.sort.pdq([]const u8, entries.items, {}, compareEntries);
     return .{
         .dir = dir,
         .entries = try entries.toOwnedSlice(alloc),
     };
 }
 
-fn compareEntries(_: void, a: std.fs.Dir.Entry, b: std.fs.Dir.Entry) bool {
-    return std.mem.order(u8, a.name, b.name) == .lt;
+fn compareEntries(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 fn ensureMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) !void {
@@ -112,25 +108,25 @@ fn ensureMigrationsTable(alloc: Allocator, conn: *pg.Conn, info: DbInfo) !void {
     try executeSql(alloc, conn, sql);
 }
 
-pub fn migrateDatabase(alloc: Allocator, info: DbInfo) !void {
-    const dir = try loadMigrationDir(alloc, info.migrations_dir);
+pub fn migrateDatabase(alloc: Allocator, io: std.Io, info: DbInfo) !void {
+    const dir = try loadMigrationDir(alloc, io, info.migrations_dir);
     defer {
-        for (dir.entries) |e| alloc.free(e.name);
+        for (dir.entries) |name| alloc.free(name);
         defer alloc.free(dir.entries);
     }
 
-    try initDbConnectionPool(alloc, info);
+    try initDbConnectionPool(alloc, io, info);
     defer db.deinit();
 
     const conn = try db.acquireConnection();
     defer conn.release();
-    try _migrate(alloc, conn, dir, info);
+    try _migrate(alloc, io, conn, dir, info);
 }
 
-pub fn newDatabaseMigration(alloc: Allocator, file_name: []const u8, info: DbInfo) !void {
-    const dir = try loadMigrationDir(alloc, info.migrations_dir);
+pub fn newDatabaseMigration(alloc: Allocator, io: std.Io, file_name: []const u8, info: DbInfo) !void {
+    const dir = try loadMigrationDir(alloc, io, info.migrations_dir);
     defer {
-        for (dir.entries) |e| alloc.free(e.name);
+        for (dir.entries) |name| alloc.free(name);
         defer alloc.free(dir.entries);
     }
 
@@ -141,7 +137,7 @@ pub fn newDatabaseMigration(alloc: Allocator, file_name: []const u8, info: DbInf
     const migration_dir_name = try std.fmt.allocPrint(alloc, "{s}_{s}", .{ now_str, file_name });
     defer alloc.free(migration_dir_name);
 
-    try dir.dir.makeDir(migration_dir_name);
+    try dir.dir.createDir(io, migration_dir_name, .default_dir);
 
     const file_path = try std.fmt.allocPrint(
         alloc,
@@ -150,30 +146,31 @@ pub fn newDatabaseMigration(alloc: Allocator, file_name: []const u8, info: DbInf
     );
     defer alloc.free(file_path);
 
-    _ = try dir.dir.createFile(file_path, .{});
+    const file = try dir.dir.createFile(io, file_path, .{});
+    file.close(io);
 
     std.log.info("Created file: {s}{s}{s}", .{ info.migrations_dir, std.fs.path.sep_str, file_path });
 }
 
-pub fn resetDatabase(alloc: Allocator, info: DbInfo) !void {
-    const dir = try loadMigrationDir(alloc, info.migrations_dir);
+pub fn resetDatabase(alloc: Allocator, io: std.Io, info: DbInfo) !void {
+    const dir = try loadMigrationDir(alloc, io, info.migrations_dir);
     defer {
-        for (dir.entries) |e| alloc.free(e.name);
+        for (dir.entries) |name| alloc.free(name);
         defer alloc.free(dir.entries);
     }
 
-    try initDbConnectionPool(alloc, info);
+    try initDbConnectionPool(alloc, io, info);
     defer db.deinit();
 
     const conn: *pg.Conn = try db.acquireConnection();
     defer conn.release();
 
     try executeSql(alloc, conn, "DROP SCHEMA IF EXISTS public CASCADE;");
-    try _migrate(alloc, conn, dir, info);
+    try _migrate(alloc, io, conn, dir, info);
 }
 
-fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
-    try db.init(alloc, .{
+fn initDbConnectionPool(alloc: Allocator, io: std.Io, info: DbInfo) !void {
+    try db.init(io, alloc, .{
         .host = info.host,
         .port = info.port,
         .database = info.database,
@@ -183,7 +180,7 @@ fn initDbConnectionPool(alloc: Allocator, info: DbInfo) !void {
     });
 }
 
-fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !void {
+fn _migrate(alloc: Allocator, io: std.Io, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !void {
     try ensureMigrationsTable(alloc, conn, info);
 
     const migration_entries = try queryMigrationsTable(alloc, conn, info);
@@ -198,27 +195,23 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
 
     std.debug.print("Found {} migrations already applied\n", .{migration_entries.len});
 
-    for (dir.entries) |dir_entry| {
-        std.debug.print("Checking {s}...\n", .{dir_entry.name});
+    for (dir.entries) |dir_name| {
+        std.debug.print("Checking {s}...\n", .{dir_name});
 
         // Construct path e.g. 20250618211026_foo_bar/migration.sql
         const file_path = try std.fmt.allocPrint(
             alloc,
             "{s}{s}migration.sql",
-            .{ dir_entry.name, std.fs.path.sep_str },
+            .{ dir_name, std.fs.path.sep_str },
         );
         defer alloc.free(file_path);
 
-        const file = try dir.dir.openFile(file_path, .{});
-        defer file.close();
-
-        const sql = try alloc.alloc(u8, (try file.stat()).size);
+        const sql = try dir.dir.readFileAlloc(io, file_path, alloc, .unlimited);
         defer alloc.free(sql);
-        _ = try file.read(sql);
 
         // Insert new row in migrations table
         const checksum = hash(sql);
-        if (findMigrationEntry(migration_entries, dir_entry.name)) |migration| {
+        if (findMigrationEntry(migration_entries, dir_name)) |migration| {
             std.debug.print("Verifying checksum...", .{});
             if (!strEql(migration.checksum, &checksum)) {
                 std.debug.print("\nChecksum mismatch for {s}!\n", .{migration.checksum});
@@ -228,7 +221,7 @@ fn _migrate(alloc: Allocator, conn: *pg.Conn, dir: MigrationDir, info: DbInfo) !
             // New migration to apply
             std.debug.print("New migration found, applying...", .{});
             try executeSql(alloc, conn, sql);
-            try insertMigrationRow(alloc, conn, info.migrations_table, dir_entry.name, checksum);
+            try insertMigrationRow(alloc, conn, info.migrations_table, dir_name, checksum);
         }
         std.debug.print("Done.\n\n", .{});
     }

@@ -2,6 +2,7 @@
 const std = @import("std");
 const string = []const u8;
 const time = @This();
+const jolt_io = @import("../io.zig");
 
 pub const DateTime = struct {
     ms: u16,
@@ -35,7 +36,7 @@ pub const DateTime = struct {
     }
 
     pub fn now() Self {
-        return initUnixMs(@intCast(std.time.milliTimestamp()));
+        return initUnixMs(@intCast(jolt_io.nowMs()));
     }
 
     pub const epoch_unix = Self{
@@ -215,14 +216,11 @@ pub const DateTime = struct {
     }
 
     /// fmt is based on https://momentjs.com/docs/#/displaying/format/
-    pub fn format(
+    pub fn formatTo(
         self: Self,
         comptime fmt: string,
-        options: std.fmt.FormatOptions,
         writer: *std.Io.Writer,
     ) !void {
-        _ = options;
-
         if (fmt.len == 0) @compileError("DateTime: format string can't be empty");
 
         @setEvalBranchQuota(100000);
@@ -330,7 +328,7 @@ pub const DateTime = struct {
 
     pub fn formatAlloc(self: Self, alloc: std.mem.Allocator, comptime fmt: string) !string {
         var writer = std.Io.Writer.Allocating.init(alloc);
-        try self.format(fmt, .{}, &writer.writer);
+        try self.formatTo(fmt, &writer.writer);
         return try writer.toOwnedSlice();
     }
 

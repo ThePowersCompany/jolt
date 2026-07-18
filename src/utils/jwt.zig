@@ -12,12 +12,8 @@ const Algorithm = enum {
     HS384,
     HS512,
 
-    pub fn jsonStringify(
-        value: Self,
-        options: std.json.Stringify.Options,
-        writer: anytype,
-    ) @TypeOf(writer).Error!void {
-        try std.json.stringify(@tagName(value), options, writer);
+    pub fn jsonStringify(value: Self, jws: anytype) !void {
+        try jws.write(@tagName(value));
     }
 
     pub fn CryptoFn(comptime self: Self) type {
@@ -56,14 +52,14 @@ pub fn encodeMessage(
     message: []const u8,
     signature_options: SignatureOptions,
 ) ![]const u8 {
-    var protected_header = std.json.ObjectMap.init(allocator);
-    defer protected_header.deinit();
-    try protected_header.put("alg", .{ .string = @tagName(alg) });
-    try protected_header.put("typ", .{ .string = "JWT" });
+    var protected_header: std.json.ObjectMap = .empty;
+    defer protected_header.deinit(allocator);
+    try protected_header.put(allocator, "alg", .{ .string = @tagName(alg) });
+    try protected_header.put(allocator, "typ", .{ .string = "JWT" });
     if (signature_options
         .kid) |kid|
     {
-        try protected_header.put("kid", .{ .string = kid });
+        try protected_header.put(allocator, "kid", .{ .string = kid });
     }
 
     var protected_header_json = std.Io.Writer.Allocating.init(allocator);

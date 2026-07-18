@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const jolt_io = @import("io.zig");
 const zap = @import("./zap/zap.zig");
 const auth = @import("middleware/auth.zig");
 const RequestHandler = Endpoint.RequestHandler;
@@ -66,24 +67,32 @@ pub const EndpointDef = struct { []const u8, type };
 pub const JoltServer = struct {
     const Self = @This();
 
+    /// Must be thread-safe: per-request arenas and tasks allocate from this
+    /// on facil.io worker threads.
     alloc: Allocator,
+    io: std.Io,
     opts: ServerOpts,
-    env_map: std.process.EnvMap,
+    env_map: *std.process.Environ.Map,
 
     /// Enable Cross-Origin Requests
     /// By default, only requests from the same host/port are allowed.
     cors: bool = false,
 
-    pub fn init(alloc: Allocator, opts: ServerOpts) !Self {
+    pub fn init(alloc: Allocator, io: std.Io, env_map: *std.process.Environ.Map, opts: ServerOpts) !Self {
+        // Make the Io available to leaf utilities (uuid, datetime, ...) before
+        // facil.io worker threads spawn.
+        jolt_io.set(io);
         return .{
             .alloc = alloc,
+            .io = io,
             .opts = opts,
-            .env_map = try std.process.getEnvMap(alloc),
+            .env_map = env_map,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.env_map.deinit();
+        // env_map is owned by the caller (typically process startup).
+        _ = self;
     }
 
     pub fn getEnv(self: *Self, comptime key: []const u8, comptime default: []const u8) []const u8 {
@@ -91,7 +100,7 @@ pub const JoltServer = struct {
     }
 
     pub fn getEnvOrPanic(self: *Self, comptime key: []const u8) []const u8 {
-        return Endpoint.EnabledContext.getEnvOrPanic(&self.env_map, key);
+        return Endpoint.EnabledContext.getEnvOrPanic(self.env_map, key);
     }
 
     pub fn getEnvBool(self: *Self, comptime key: []const u8, comptime default: bool) bool {
@@ -106,16 +115,15 @@ pub const JoltServer = struct {
 
     pub fn run(
         self: *Self,
-        endpoints: []const EndpointDef,
-        tasks: []const type,
+        comptime endpoints: []const EndpointDef,
+        comptime tasks: []const type,
         auto: anytype,
     ) !void {
-        @setEvalBranchQuota((endpoints.len + tasks.len) * 1000);
+        @setEvalBranchQuota(@intCast((endpoints.len + tasks.len) * 1000));
         var global_arena = ArenaAllocator.init(self.alloc);
         defer global_arena.deinit();
-        var thread_safe_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = self.alloc };
 
-        var listener = Endpoint.Listener.init(thread_safe_alloc.allocator(), .{
+        var listener = Endpoint.Listener.init(self.alloc, .{
             .port = self.opts.port,
             .on_request = null,
             .log = true,
@@ -137,7 +145,7 @@ pub const JoltServer = struct {
             if (std.meta.hasFn(typ, "enabled")) {
                 // Runtime enabled check
                 const enabled_func: Endpoint.EnabledFn = typ.enabled;
-                if (!try enabled_func(.{ .env = &self.env_map, .alloc = global_arena.allocator() })) {
+                if (!try enabled_func(.{ .env = self.env_map, .alloc = global_arena.allocator() })) {
                     // Not enabled, skip
                     break :blk;
                 }
@@ -151,7 +159,7 @@ pub const JoltServer = struct {
 
             if (std.meta.hasFn(typ, "init") and std.meta.hasFn(typ, "deinit")) {
                 // Legacy init/deinit
-                try typ.init(thread_safe_alloc.allocator(), self, &listener, path);
+                try typ.init(self.alloc, self, &listener, path);
                 try deinitFns.append(alloc, typ.deinit);
             } else {
 
@@ -191,14 +199,14 @@ pub const JoltServer = struct {
 
         // Schedule any tasks before starting zap server
 
-        // Created from a thread-safe allocator.
-        const task_alloc = thread_safe_alloc.allocator();
+        // Must be thread-safe: tasks run on facil.io worker threads.
+        const task_alloc = self.alloc;
 
         inline for (tasks) |t| blk: {
             if (std.meta.hasFn(t, "enabled")) {
                 // Runtime enabled check
                 const enabled_func: Endpoint.EnabledFn = t.enabled;
-                if (!try enabled_func(.{ .env = &self.env_map, .alloc = global_arena.allocator() })) {
+                if (!try enabled_func(.{ .env = self.env_map, .alloc = global_arena.allocator() })) {
                     // Not enabled, skip
                     break :blk;
                 }
@@ -218,13 +226,13 @@ pub const JoltServer = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
 
     // Example auto middleware
     const auto = @import("./middleware/auto.zig").auto;
 
-    const alloc = std.heap.raw_c_allocator;
-    var server: JoltServer = try JoltServer.init(alloc, .{
+    const alloc = init.gpa;
+    var server: JoltServer = try JoltServer.init(alloc, init.io, init.environ_map, .{
         .port = 3333,
         .threads = 2,
     });
@@ -236,7 +244,7 @@ pub fn main() !void {
         @import("tasks/example_task.zig"),
     };
 
-    try generateTypesFile(alloc, "types.d.ts", &endpoints);
+    try generateTypesFile(alloc, init.io, "types.d.ts", &endpoints);
 
     try server.run(&endpoints, &tasks, auto);
 }

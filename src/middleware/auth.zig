@@ -7,6 +7,7 @@ const StatusCode = zap.StatusCode;
 const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 
 const jwtlib = @import("../utils/jwt.zig");
+const jolt_io = @import("../io.zig");
 
 pub const JwtPayload = struct {
     iat: i64,
@@ -56,7 +57,7 @@ pub fn createJWT(
     username: []u8,
 ) ![]const u8 {
     const payload = JwtPayload{
-        .iat = std.time.timestamp(),
+        .iat = jolt_io.nowSec(),
         .id = user_id,
         .username = username,
     };

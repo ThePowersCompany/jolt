@@ -3,7 +3,7 @@
 const std = @import("std");
 
 const fmt = std.fmt;
-const crypto = std.crypto;
+const jolt_io = @import("../io.zig");
 const Allocator = std.mem.Allocator;
 
 var clock_sequence: u16 = 0;
@@ -14,20 +14,20 @@ pub const UUID = struct {
 
     pub fn seed() void {
         var b: [2]u8 = undefined;
-        crypto.random.bytes(&b);
-        @atomicStore(u16, *clock_sequence, std.mem.readInt(u16, &b, .big), .monotonic);
+        jolt_io.randomBytes(&b);
+        @atomicStore(u16, &clock_sequence, std.mem.readInt(u16, &b, .big), .monotonic);
     }
 
     pub fn v4() UUID {
         var bin: [16]u8 = undefined;
-        crypto.random.bytes(&bin);
+        jolt_io.randomBytes(&bin);
         bin[6] = (bin[6] & 0x0f) | 0x40;
         bin[8] = (bin[8] & 0x3f) | 0x80;
         return .{ .bin = bin };
     }
 
     pub fn v7() UUID {
-        const ts: u64 = @intCast(std.time.milliTimestamp());
+        const ts: u64 = @intCast(jolt_io.nowMs());
         const last = @atomicRmw(u64, &last_timestamp, .Xchg, ts, .monotonic);
         const sequence = if (ts <= last)
             @atomicRmw(u16, &clock_sequence, .Add, 1, .monotonic) + 1
@@ -48,7 +48,7 @@ pub const UUID = struct {
         bin[6] = (seq_buf[1] & 0x0f) | 0x70;
         bin[7] = seq_buf[0];
 
-        crypto.random.bytes(bin[8..]);
+        jolt_io.randomBytes(bin[8..]);
 
         //variant
         bin[8] = (bin[8] & 0x3f) | 0x80;
@@ -58,7 +58,7 @@ pub const UUID = struct {
 
     pub fn random() UUID {
         var bin: [16]u8 = undefined;
-        crypto.random.bytes(&bin);
+        jolt_io.randomBytes(&bin);
         return .{ .bin = bin };
     }
 
@@ -127,20 +127,9 @@ pub const UUID = struct {
         return UUID.parse(hex) catch error.UnexpectedToken;
     }
 
-    pub fn format(self: UUID, comptime layout: []const u8, options: fmt.FormatOptions, out: anytype) !void {
-        _ = options;
-
-        const casing: std.fmt.Case = blk: {
-            if (layout.len == 0) break :blk .lower;
-            break :blk switch (layout[0]) {
-                's', 'x' => .lower,
-                'X' => .upper,
-                else => @compileError("Unsupported format specifier for UUID: " ++ layout),
-            };
-        };
-
-        const hex = self.toHex(casing);
-        return std.fmt.format(out, "{s}", .{hex});
+    pub fn format(self: UUID, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        const hex = self.toHex(.lower);
+        return out.writeAll(&hex);
     }
 };
 
@@ -169,3 +158,10 @@ const hex_to_nibble = [_]u8{0xff} ** 48 ++ [_]u8{
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0xff,
 } ++ [_]u8{0xff} ** 152;
+
+test "format via {f}" {
+    const uuid = try UUID.parse("01234567-89ab-7def-8123-456789abcdef");
+    var buf: [64]u8 = undefined;
+    const printed = try std.fmt.bufPrint(&buf, "{f}", .{uuid});
+    try std.testing.expectEqualStrings("01234567-89ab-7def-8123-456789abcdef", printed);
+}

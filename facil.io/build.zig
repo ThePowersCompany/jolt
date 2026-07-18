@@ -89,8 +89,8 @@ pub fn build_facilio(
                 mod.linkSystemLibrary("crypto", .{});
             },
             .macos => {
-                lib.linkSystemLibrary2("libssl", .{ .use_pkg_config = .force });
-                lib.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .force });
+                mod.linkSystemLibrary("libssl", .{ .use_pkg_config = .force });
+                mod.linkSystemLibrary("libcrypto", .{ .use_pkg_config = .force });
             },
             else => return error.LIGMA,
         }

@@ -8,11 +8,11 @@
     },
     .version = "0.0.0",
     .fingerprint = 0xa874d5e8f2c78cdd,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig?ref=zig-0.15#12e48fc57b78486e338e8707448d9a87597dd3ad",
-            .hash = "pg-0.0.0-Wp_7gdBzBgBVVMi1iVK12HQ582gXCGSHEI-DkqSKLDY8",
+            .url = "git+https://github.com/karlseguin/pg.zig#c9213c2a0f9942e76ad856efbd2e5847f153b55e",
+            .hash = "pg-0.0.0-Wp_7gdaoBgCY54xf40F0CA3J3C28EbeYadws6t0ej6EE",
         },
     },
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
-const StringArrayHashMap = std.StringArrayHashMap;
+const StringArrayHashMap = std.StringArrayHashMapUnmanaged;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const Type = std.builtin.Type;
@@ -51,21 +51,21 @@ pub const TypeGenerator = struct {
         return .{
             .arena_alloc = arena_alloc,
             .top_level_types = StringHashMap(?ParseResult).init(arena_alloc),
-            .get_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .post_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .put_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .patch_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .delete_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
+            .get_endpoints = .empty,
+            .post_endpoints = .empty,
+            .put_endpoints = .empty,
+            .patch_endpoints = .empty,
+            .delete_endpoints = .empty,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.top_level_types.deinit();
-        self.get_endpoints.deinit();
-        self.post_endpoints.deinit();
-        self.put_endpoints.deinit();
-        self.patch_endpoints.deinit();
-        self.delete_endpoints.deinit();
+        self.get_endpoints.deinit(self.arena_alloc);
+        self.post_endpoints.deinit(self.arena_alloc);
+        self.put_endpoints.deinit(self.arena_alloc);
+        self.patch_endpoints.deinit(self.arena_alloc);
+        self.delete_endpoints.deinit(self.arena_alloc);
     }
 
     fn endpointsData(self: *Self, method: Method) *StringArrayHashMap(EndpointData) {
@@ -290,7 +290,7 @@ pub const TypeGenerator = struct {
     ) !void {
         var endpoints_data = self.endpointsData(method);
 
-        var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
+        var res = try endpoints_data.getOrPutValue(self.arena_alloc, endpoint_path, .{});
         inline for (S.fields) |field| {
             if (comptime strEqls(field.name, "body")) {
                 const body_info = @typeInfo(field.type);
@@ -675,7 +675,7 @@ pub const TypeGenerator = struct {
             }
         };
 
-        var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
+        var res = try endpoints_data.getOrPutValue(self.arena_alloc, endpoint_path, .{});
         const ts = (try self.extractIdentifier(ResponseType)).parsed;
         res.value_ptr.response = ts;
 

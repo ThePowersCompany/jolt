@@ -20,8 +20,9 @@ const PrivateUtilityTypes =
 
 pub fn generateTypesFile(
     alloc: Allocator,
+    io: std.Io,
     ts_file_name: []const u8,
-    endpoints: []const EndpointDef,
+    comptime endpoints: []const EndpointDef,
 ) !void {
     var arena = ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -49,17 +50,16 @@ pub fn generateTypesFile(
 
     try ts.appendSlice(alloc, try type_generator.generateTypes(endpoints));
 
-    const file = try std.fs.cwd().createFile(ts_file_name, .{ .read = true });
-    defer file.close();
-    try file.writeAll(ts.items);
+    const file = try std.Io.Dir.cwd().createFile(io, ts_file_name, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, ts.items);
 
-    try formatWithPrettier(arena_alloc, ts_file_name);
+    try formatWithPrettier(arena_alloc, io, ts_file_name);
 }
 
 /// Uses prettier to format the given TS file.
-fn formatWithPrettier(alloc: Allocator, file_name: []const u8) !void {
-    const result = try std.process.Child.run(.{
-        .allocator = alloc,
+fn formatWithPrettier(alloc: Allocator, io: std.Io, file_name: []const u8) !void {
+    const result = try std.process.run(alloc, io, .{
         .argv = &[_][]const u8{
             "npx",
             "prettier",
@@ -68,10 +68,9 @@ fn formatWithPrettier(alloc: Allocator, file_name: []const u8) !void {
         },
     });
     const status_code: u32 = switch (result.term) {
-        .Exited => |e| e,
-        .Stopped => |s| s,
-        .Unknown => |u| u,
-        else => 0,
+        .exited => |e| e,
+        .stopped, .signal => 1,
+        .unknown => |u| u,
     };
     if (status_code != 0) {
         std.log.err("{s}", .{result.stderr});

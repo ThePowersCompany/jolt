@@ -25,8 +25,8 @@ pub const DbOptions = struct {
     result_state_size: u16 = 32,
 };
 
-pub fn init(alloc: std.mem.Allocator, opts: DbOptions) !void {
-    pool = try Pool.init(alloc, .{
+pub fn init(io: std.Io, alloc: std.mem.Allocator, opts: DbOptions) !void {
+    pool = try Pool.init(io, alloc, .{
         .size = opts.pool_size,
         .connect = .{
             .host = opts.host,

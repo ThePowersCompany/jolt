@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const jolt_io = @import("../io.zig");
 
 // Simple (no leap seconds, UTC-only), DateTime, Date and Time types.
 
@@ -89,7 +90,7 @@ pub const Date = struct {
         return sdt.unix(.seconds) - odt.unix(.seconds);
     }
 
-    pub fn format(self: Date, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+    pub fn format(self: Date, out: *std.Io.Writer) std.Io.Writer.Error!void {
         var buf: [BUF_SIZE]u8 = undefined;
         const n = writeDate(&buf, self);
         try out.writeAll(buf[0..n]);
@@ -209,7 +210,7 @@ pub const Time = struct {
             (@as(i64, @intCast(self.sec)) - @as(i64, @intCast(other.sec)));
     }
 
-    pub fn format(self: Time, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+    pub fn format(self: Time, out: *std.Io.Writer) std.Io.Writer.Error!void {
         var buf: [BUF_SIZE]u8 = undefined;
         const n = writeTime(&buf, self);
         try out.writeAll(buf[0..n]);
@@ -302,7 +303,7 @@ pub const DateTime = struct {
 
     pub fn now() DateTime {
         return .{
-            .micros = std.time.microTimestamp(),
+            .micros = jolt_io.nowUs(),
         };
     }
 
@@ -454,7 +455,7 @@ pub const DateTime = struct {
         return std.math.order(a.micros, b.micros);
     }
 
-    pub fn format(self: DateTime, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+    pub fn format(self: DateTime, out: *std.Io.Writer) std.Io.Writer.Error!void {
         var buf: [28]u8 = undefined;
         const n = self.bufWrite(&buf);
         try out.writeAll(buf[0..n]);
@@ -542,7 +543,7 @@ pub const PlainDateTime = struct {
         return self.date.since(other.date) + self.time.since(other.time);
     }
 
-    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+    pub fn format(self: Self, out: *std.Io.Writer) std.Io.Writer.Error!void {
         var buf: [32]u8 = undefined;
         const n = self.bufWrite(&buf);
         try out.writeAll(buf[0..n]);
@@ -820,4 +821,11 @@ pub fn diffInDays(start_date: []const u8, end_date: []const u8) !i32 {
 test {
     const days: i32 = try diffInDays("2025-03-01", "2025-03-04");
     try std.testing.expect(days == 3);
+}
+
+test "DateTime format via {f}" {
+    const dt = DateTime{ .micros = 0 };
+    var buf: [64]u8 = undefined;
+    const printed = try std.fmt.bufPrint(&buf, "{f}", .{dt});
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", printed);
 }

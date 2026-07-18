@@ -1,6 +1,5 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
-const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
 const Allocator = std.mem.Allocator;
 
 // zap types
@@ -30,11 +29,11 @@ pub fn MiddlewareFn(comptime Context: type) type {
 }
 
 pub const EnabledContext = struct {
-    env: *std.process.EnvMap,
+    env: *std.process.Environ.Map,
     alloc: Allocator,
 
     /// Gets a key from the env map, or panics if it does not exist.
-    pub fn getEnvOrPanic(env: *std.process.EnvMap, comptime key: []const u8) []const u8 {
+    pub fn getEnvOrPanic(env: *std.process.Environ.Map, comptime key: []const u8) []const u8 {
         const optValue = env.get(key);
         if (optValue) |v| return v;
         @panic(key ++ " is required");
