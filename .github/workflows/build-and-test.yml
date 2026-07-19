@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -65,7 +65,7 @@ jobs:
         run: npm ci
 
       - name: Download Docker image
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: docker-jolt-test-server
 
@@ -95,7 +95,7 @@ jobs:
           docker logs jolt_test_server &> jolt_test_server.log
           docker rm --force jolt_test_server
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: jolt_test_server.log
