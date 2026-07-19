@@ -10,7 +10,7 @@
             .hash = "dotenv-0.2.2-ikMfwFR3AADpfrO6CJ9asM3fp_0ullYHMYd6cxNo_hnV",
         },
         .jolt = .{
-            .path = "../../../jolt",
+            .path = "../../",
         },
     },
 }
