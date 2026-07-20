@@ -23,6 +23,11 @@ export type AnyOfQpDetails = {
   role: string | null;
 };
 
+export type ArraysQpDetails = {
+  ids: number[];
+  tags: ("red" | "green" | "blue")[];
+};
+
 export type GatedGroupQpDetails = {
   room: number;
   limit: number;
@@ -37,6 +42,11 @@ export type NestedOptionalQpDetails = {
   status: string | null;
 };
 
+export type NullableQpDetails = {
+  is_null: boolean;
+  value: number | null;
+};
+
 export type UnionVariantQpDetails = {
   variant: string;
   id?: number | null;
@@ -47,6 +57,9 @@ export type UnionVariantQpDetails = {
 
 export type Spec = {
   GET: {
+    "/ping": {
+      response: void;
+    };
     "/any-of": {
       queryParams: AnyOf<{
         query?: string;
@@ -94,6 +107,19 @@ export type Spec = {
         >
       >;
       response: UnionVariantQpDetails;
+    };
+    "/nullable": {
+      queryParams: {
+        required: number | null;
+      };
+      response: NullableQpDetails;
+    };
+    "/arrays": {
+      queryParams?: {
+        ids?: number[];
+        tags?: ("red" | "green" | "blue")[];
+      };
+      response: ArraysQpDetails;
     };
   };
   POST: {};

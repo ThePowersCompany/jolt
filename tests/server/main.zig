@@ -18,6 +18,7 @@ pub const endpoints = [_]EndpointDef{
     .{ "/nested-optional", @import("endpoints/nested-optional.zig") },
     .{ "/union-variant", @import("endpoints/union-variant.zig") },
     .{ "/nullable", @import("endpoints/nullable.zig") },
+    .{ "/arrays", @import("endpoints/arrays.zig") },
 };
 
 const tasks = [_]type{};
