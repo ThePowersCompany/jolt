@@ -17,7 +17,7 @@ pub const endpoints = [_]EndpointDef{
     .{ "/gated-group", @import("endpoints/gated-group.zig") },
     .{ "/nested-optional", @import("endpoints/nested-optional.zig") },
     .{ "/union-variant", @import("endpoints/union-variant.zig") },
-    .{ "/nullable", @import("endpoints/nullable.zig.zig") },
+    .{ "/nullable", @import("endpoints/nullable.zig") },
 };
 
 const tasks = [_]type{};
