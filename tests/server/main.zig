@@ -19,6 +19,7 @@ pub const endpoints = [_]EndpointDef{
     .{ "/union-variant", @import("endpoints/union-variant.zig") },
     .{ "/nullable", @import("endpoints/nullable.zig") },
     .{ "/arrays", @import("endpoints/arrays.zig") },
+    .{ "/param-parse", @import("endpoints/param-parse.zig") },
 };
 
 const tasks = [_]type{};

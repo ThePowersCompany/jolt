@@ -47,6 +47,11 @@ export type NullableQpDetails = {
   value: number | null;
 };
 
+export type ParamParseQpDetails = {
+  when_present: boolean;
+  millis: number | null;
+};
+
 export type UnionVariantQpDetails = {
   variant: string;
   id?: number | null;
@@ -120,6 +125,12 @@ export type Spec = {
         tags?: ("red" | "green" | "blue")[];
       };
       response: ArraysQpDetails;
+    };
+    "/param-parse": {
+      queryParams?: {
+        when?: string;
+      };
+      response: ParamParseQpDetails;
     };
   };
   POST: {};
