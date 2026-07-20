@@ -62,7 +62,7 @@ jobs:
           cache-dependency-path: ./tests/package-lock.json
 
       - name: Install dependencies and build
-        run: npm ci
+        run: cd tests && npm ci
 
       - name: Download Docker image
         uses: actions/download-artifact@v8
