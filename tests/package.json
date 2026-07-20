@@ -7,6 +7,9 @@
     "type-check": "tsc --noEmit",
     "lint": "eslint ."
   },
+  "lint-staged": {
+    "*.{js,jsx,json,ts,tsx,md,html,css,yml,yaml}": "prettier --write"
+  },
   "dependencies": {
     "dotenv": "^16",
     "temporal-polyfill": "^0.3.0",
@@ -14,6 +17,11 @@
   },
   "devDependencies": {
     "@types/node": "^24",
-    "tsx": "^4"
+    "tsx": "^4",
+    "@typescript-eslint/parser": "^8",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "eslint": "^9",
+    "eslint-config-prettier": "^9",
+    "typescript-eslint": "^8"
   }
 }
