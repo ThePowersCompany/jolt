@@ -10,11 +10,14 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 pub const endpoints = [_]EndpointDef{
+    .{ "/ping", @import("endpoints/ping.zig") },
+
+    // Test endpoints
     .{ "/any-of", @import("endpoints/any-of.zig") },
     .{ "/gated-group", @import("endpoints/gated-group.zig") },
     .{ "/nested-optional", @import("endpoints/nested-optional.zig") },
     .{ "/union-variant", @import("endpoints/union-variant.zig") },
-    .{ "/ping", @import("endpoints/ping.zig") },
+    .{ "/nullable", @import("endpoints/nullable.zig.zig") },
 };
 
 const tasks = [_]type{};
