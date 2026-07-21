@@ -660,7 +660,7 @@ fn parseQueryLeaky(comptime QP: type, alloc: Allocator, query: []const u8) !Pars
 /// This uses the leaky variant because the per-request arena in `ctx.alloc`
 /// already owns the parsed value for the whole request.
 /// Parsing must not free the data when the middleware returns.
-pub fn parseQueryParams(comptime Context: type, ctx: *const MiddlewareContext(Context)) !void {
+pub fn parseQueryParams(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     if (!@hasField(Context, query_params)) {
         @compileError(
             comptimePrint(

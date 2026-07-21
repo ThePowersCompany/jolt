@@ -1,15 +1,18 @@
 const std = @import("std");
+const Type = std.builtin.Type;
 
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const Request = zap.Request;
+
+const types = @import("../utils/types.zig");
 
 // Built-in middleware
 const cors = @import("cors.zig");
 const parseQueryParams = @import("parse-query-params.zig").parseQueryParams;
 const parseBody = @import("parse-body.zig").parseBody;
 
-pub fn auto(comptime Context: type, ctx: *const MiddlewareContext(Context)) !void {
+pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     if (@typeInfo(Context) != .@"struct") {
         @compileError("Endpoint context must be a struct");
     }
@@ -22,8 +25,7 @@ pub fn auto(comptime Context: type, ctx: *const MiddlewareContext(Context)) !voi
         @field(ctx.deps, "req") = ctx.req;
     }
 
-    const graph: MiddlewareGraph(Context) = .init(&ctx.deps);
-    graph.execute();
+    try execute(Context, ctx);
 
     if (@hasField(Context, "query_params")) {
         try parseQueryParams(Context, ctx);
@@ -36,90 +38,225 @@ pub fn auto(comptime Context: type, ctx: *const MiddlewareContext(Context)) !voi
     }
 }
 
-/// Caches middleware results and allows them to be passed to other middleware that requires their results
-const MiddlewareCache = struct {
-    // TODO
-};
-
-const MiddlewareNode = struct {
-    typ: type,
-    ptr: *anyopaque,
-};
-
-fn analyze(comptime Context: type) []const type {
-    // TODO
-    unreachable;
+fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
+    inline for (analyze(Context, &.{})) |M| {
+        // Prepare middleware dependencies
+        const D = dependencies(M);
+        const deps: D = deps: {
+            // Loop through each dependency
+            var d: D = undefined;
+            inline for (dependencyFields(D)) |f| {
+                const F: type = extractDependency(f.type, false);
+                const p: ?*F = ptr(Context, F, &ctx.deps);
+                // Copy the middleware result from context memory (p) into dependency field
+                @field(d, f.name) = switch (@typeInfo(f.type)) {
+                    .pointer => (
+                        // Middleware dependencies can be pointers
+                        p orelse {
+                            // Middleware result is null in the context
+                            return error.MiddlewareError;
+                        }),
+                    .optional => |O| (
+                        // Middleware dependencies can be optional (if dependency fails, middleware can proceed with null dependency result)
+                        switch (@typeInfo(O.child)) {
+                            .pointer => p,
+                            else => if (p) |pp| pp.* else null,
+                        }),
+                    else => (p orelse {
+                        // Middleware result is null in the context
+                        return error.MiddlewareError;
+                    }).*,
+                };
+            }
+            break :deps d;
+        };
+        // Execute middleware with dependencies
+        const result: anyerror!M = M.middleware(&.{
+            .deps = deps,
+            .alloc = ctx.alloc,
+            .server = ctx.server,
+            .req = ctx.req,
+        });
+        // Store middleware result in top-level context
+        const ctx_field = field(Context, M);
+        @field(ctx.deps, ctx_field.name) = switch (@typeInfo(ctx_field.type)) {
+            .optional => result catch null,
+            else => try result,
+        };
+    }
 }
 
-/// A directed acyclic graph of middleware types
-fn MiddlewareGraph(comptime Context: type) type {
-    const V = analyze(Context);
-    return struct {
-        // TODO
+fn extractDependency(comptime T: type, comptime top_level: bool) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |P| {
+            if (@typeInfo(P.child) == .optional) @compileError("Middleware dependency cannot be a pointer to optional");
+            if (top_level) @compileError("Pointers are not supported in endpoint context");
+            return P.child;
+        },
+        .optional => |O| {
+            if (@typeInfo(O.child) == .optional) @compileError("Middleware dependency cannot be double optional");
+            return extractDependency(O.child, top_level);
+        },
+        else => T,
+    };
+}
 
-        const Self = @This();
+fn extractMiddleware(comptime T: type, comptime top_level: bool) ?type {
+    const B: type = extractDependency(T, top_level);
+    return if (std.meta.hasFn(B, "middleware")) B else null;
+}
 
-        pub fn init(ptr: *Context) Self {
-            // TODO
-            unreachable;
-        }
-
-        /// Add middleware to the graph and any recursive dependencies, if applicable.
-        pub fn add(self: *Self, comptime Dependent: type, comptime Middleware: type) void {
-            // TODO middleware to the graph with the Dependent node
-            self.addAll(Middleware, dependencies(Middleware));
-        }
-
-        /// Add all middleware dependencies to the graph.
-        pub fn addAll(self: *Self, comptime Dependent: type, comptime Dependencies: type, ptr: *Dependencies) void {
-            if (Dependencies == void) return;
-            inline for (@typeInfo(Dependencies).@"struct".fields) |f| {
-                if (std.meta.hasFn(f.type, "middleware")) {
-                    self.add(Dependent, f.type);
+/// Recursively processes an endpoint context struct and extracts all of the middleware types into a flat list.
+/// The resulting flat list is a topological sort (reverse postorder traversal) of the middleware dependency graph.
+/// If the middleware is executed in this order, dependencies will always be resolved before their dependents require their result.
+fn analyze(comptime Context: type, comptime stack: []const type) []const type {
+    comptime {
+        var middlewares: []const type = &.{};
+        for (dependencyFields(Context)) |f| {
+            if (extractMiddleware(f.type, stack.len == 0)) |M| {
+                // Check if middleware recursive dependencies form a cycle
+                for (stack) |C| {
+                    if (C == M) @compileError("Middleware contains recursive dependency cycle");
+                }
+                // Check if middleware has already been discovered
+                for (middlewares) |E| {
+                    if (E == M) break;
+                } else {
+                    // Recursively analyze dependencies
+                    for (analyze(dependencies(M), stack ++ .{M})) |A| {
+                        for (middlewares) |E| {
+                            if (E == A) break;
+                        } else {
+                            middlewares = middlewares ++ .{A};
+                        }
+                    }
+                    // Add middleware
+                    middlewares = middlewares ++ .{M};
                 }
             }
         }
+        return middlewares;
+    }
+}
 
-        /// Execute middleware in order, de-duplicate middleware results, and provide results to dependents
-        pub fn execute(self: *const Self) void {
-            var cache: MiddlewareCache = .{};
-            // TODO
-
-            // Calculate final middleware order by resolving middleware dependencies
-            inline for (self.toposort()) |M| {
-                // TODO need to support optional middleware
-
-                // const M = f.type;
-                @field(ctx.deps, f.name) = try M.middleware(&.{
-                    .ctx = &{}, // TODO need to recursively resolve dependencies
-                    .alloc = ctx.alloc,
-                    .server = ctx.server,
-                    .req = ctx.req,
-                });
-            }
-        }
-
-        /// Topologically sort the middleware types in the graph.
-        /// This is also known as a reverse postorder traversal.
-        /// If the middleware is executed in this order, dependencies will always be resolved before their dependents require their result.
-        fn toposort(self: *const Self) []const type {
-            // TODO
-            unreachable;
-        }
-
-        /// Get the dependencies of a middleware type.
-        /// The dependencies are defined at comptime in a struct type (or void).
-        pub fn dependencies(comptime M: type) type {
-            if (!std.meta.hasFn(M, "middleware")) @compileError("Invalid middleware: Missing function");
-            const fnInfo = @typeInfo(@TypeOf(M.middleware)).@"fn";
-            if (fnInfo.params.len != 1) @compileError("Invalid middleware: Incorrect number of function params");
-            const ctxPtrInfo = @typeInfo(fnInfo.params[0].type orelse @compileError("Null context type!"));
-            if (ctxPtrInfo != .pointer) @compileError("Invalid middleware: First param is not a context pointer");
-            const Ctx = ctxPtrInfo.pointer.child;
-            if (@typeInfo(Ctx) != .@"struct" or !@hasDecl(Ctx, "Ctx")) @compileError("Invalid middleware: First param is not a context: " ++ @typeName(Ctx));
-            const Deps = Ctx.Dependencies;
-            if (@typeInfo(Deps) != .@"struct" and Deps != void) @compileError("Invalid middleware: Context dependencies are not a struct");
-            return Deps;
+test "analyze and execute" {
+    const M1 = struct {
+        pub fn middleware(ctx: *const MiddlewareContext(void)) !@This() {
+            _ = ctx;
+            return .{};
         }
     };
+    const M2 = struct {
+        const D = struct {
+            m: M1,
+        };
+
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !@This() {
+            _ = ctx;
+            return .{};
+        }
+    };
+    const M3 = struct {
+        const D = struct {
+            m: M1,
+            m2: *M2,
+        };
+
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !@This() {
+            _ = ctx;
+            return .{};
+        }
+    };
+    const C = struct {
+        m: M3,
+        m1: M1,
+        m2: M2,
+    };
+
+    const t = analyze(C, &.{});
+    try std.testing.expect(t[0] == M1);
+    try std.testing.expect(t[1] == M2);
+    try std.testing.expect(t[2] == M3);
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = &undefined,
+        .req = undefined,
+    };
+    try execute(C, &ctx);
+}
+
+/// Get the dependencies of a middleware type.
+/// The dependencies are defined at comptime in a struct type (or void).
+fn dependencies(comptime M: type) type {
+    if (!std.meta.hasFn(M, "middleware")) @compileError("Invalid middleware: Missing function");
+    const fnInfo = @typeInfo(@TypeOf(M.middleware)).@"fn";
+    if (fnInfo.params.len != 1) @compileError("Invalid middleware: Incorrect number of function params");
+    const ctxPtrInfo = @typeInfo(fnInfo.params[0].type orelse @compileError("Null context type!"));
+    if (ctxPtrInfo != .pointer) @compileError("Invalid middleware: First param is not a context pointer");
+    if (!ctxPtrInfo.pointer.is_const) @compileError("Invalid middleware: Context pointer must be const");
+    const Ctx: type = ctxPtrInfo.pointer.child;
+    if (@typeInfo(Ctx) != .@"struct" or !@hasField(Ctx, "deps")) @compileError("Invalid middleware: First param is not a context: " ++ @typeName(Ctx));
+    const Deps: type = @FieldType(Ctx, "deps");
+    if (@typeInfo(Deps) != .@"struct" and Deps != void) @compileError("Invalid middleware: Context dependencies are not a struct");
+    return Deps;
+}
+
+fn dependencyFields(comptime D: type) []const Type.StructField {
+    return switch (@typeInfo(D)) {
+        .void => &.{},
+        .@"struct" => |S| S.fields,
+        else => @compileError("Middleware dependencies must be a struct or void"),
+    };
+}
+
+/// Search context for middleware and return a read-only pointer to the middleware result memory.
+fn ptr(comptime Context: type, comptime Middleware: type, ctx: *Context) ?*Middleware {
+    const f = field(Context, Middleware);
+    return types.unwrapPtr(f.type, &(@field(ctx, f.name)));
+}
+
+test "ptr" {
+    const E = struct {
+        i: i32,
+    };
+    const S = struct {
+        e: E,
+    };
+    var s: S = .{ .e = .{ .i = 123 } };
+    var p: ?*E = ptr(S, E, &s);
+    p.?.i = 456;
+    try std.testing.expectEqual(456, s.e.i);
+}
+
+fn field(comptime Context: type, comptime Middleware: type) Type.StructField {
+    comptime {
+        const ctxInfo = @typeInfo(Context);
+        if (ctxInfo != .@"struct") @compileError("Context must be a struct");
+        var found: ?Type.StructField = null;
+        for (ctxInfo.@"struct".fields) |f| {
+            if (types.Unwrap(f.type) == Middleware) {
+                if (found != null) @compileError("Duplicate middleware defined in top-level endpoint context: " ++ @typeName(f.type));
+                found = f;
+            }
+        }
+        return found orelse @compileError("Unable to find middleware defined in top-level endpoint context: " ++ @typeName(Middleware));
+    }
+}
+
+test "field" {
+    const E = struct {
+        i: i32,
+    };
+    const S = struct {
+        e: E,
+    };
+    const T = struct {
+        e: ?E,
+    };
+    const p: Type.StructField = field(S, E);
+    try std.testing.expectEqualStrings("e", p.name);
+    const q: Type.StructField = field(T, E);
+    try std.testing.expectEqualStrings("e", q.name);
 }

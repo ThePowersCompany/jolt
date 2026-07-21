@@ -15,7 +15,7 @@ const UnionRepr = types.UnionRepr;
 /// Context must have a member named "body" which resolves to the type meant to be parsed into an object.
 ///
 /// Note: Enable optional fields by setting default value in struct.
-pub fn parseBody(comptime Context: type, ctx: *const MiddlewareContext(Context)) !void {
+pub fn parseBody(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     if (!@hasField(Context, "body")) {
         @compileError("\"body\" property was not provided for parse body middleware.");
     }

@@ -18,11 +18,8 @@ const stringify = @import("../utils/json.zig").stringify;
 const Json = @import("../utils/types.zig").Json;
 
 pub fn MiddlewareContext(comptime D: type) type {
-    // TODO verify dependencies contains no pointers
     return struct {
-        pub const Dependencies = D;
-
-        deps: Dependencies,
+        deps: D,
         alloc: Allocator,
         server: *const JoltServer,
         req: Request,
