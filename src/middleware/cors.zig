@@ -16,10 +16,11 @@ pub fn isEnabled(comptime Context: type) bool {
 pub fn setCors(req: *const Request) !void {
     _setHeaders(req) catch |err| {
         std.log.err("CORS error: {}\n", .{err});
-        return try req.respondWithError(
+        try req.respondWithError(
             .internal_server_error,
             "Failed to set CORS headers",
         );
+        return error.InternalServerError;
     };
 }
 

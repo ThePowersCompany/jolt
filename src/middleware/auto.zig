@@ -3,6 +3,7 @@ const Type = std.builtin.Type;
 
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
+const MiddlewareResult = zap.Endpoint.MiddlewareResult;
 const Request = zap.Request;
 
 const types = @import("../utils/types.zig");
@@ -19,7 +20,6 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
 
     if (cors.isEnabled(Context) or ctx.server.cors) {
         try cors.setCors(&ctx.req);
-        if (ctx.req.isFinished()) return;
     }
     if (@hasField(Context, "req")) {
         @field(ctx.deps, "req") = ctx.req;
@@ -29,12 +29,10 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
 
     if (@hasField(Context, "query_params")) {
         try parseQueryParams(Context, ctx);
-        if (ctx.req.isFinished()) return;
     }
 
     if (@hasField(Context, "body")) {
         try parseBody(Context, ctx);
-        if (ctx.req.isFinished()) return;
     }
 }
 
@@ -71,17 +69,27 @@ fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
             break :deps d;
         };
         // Execute middleware with dependencies
-        const result: anyerror!M = M.middleware(&.{
+        const result: MiddlewareResult(M) = try M.middleware(&.{
             .deps = deps,
             .alloc = ctx.alloc,
             .server = ctx.server,
             .req = ctx.req,
         });
+        // Note: If middleware produces a Zig error, the endpoint is immediately aborted
         // Store middleware result in top-level context
         const ctx_field = field(Context, M);
         @field(ctx.deps, ctx_field.name) = switch (@typeInfo(ctx_field.type)) {
-            .optional => result catch null,
-            else => try result,
+            .optional => switch (result) {
+                .ok => |v| v,
+                .err => null,
+            },
+            else => switch (result) {
+                .ok => |v| v,
+                .err => |e| {
+                    try ctx.req.respondWithError(e.status, e.msg);
+                    return error.MiddlewareError;
+                },
+            },
         };
     }
 }
@@ -141,9 +149,9 @@ fn analyze(comptime Context: type, comptime stack: []const type) []const type {
 
 test "analyze and execute" {
     const M1 = struct {
-        pub fn middleware(ctx: *const MiddlewareContext(void)) !@This() {
+        pub fn middleware(ctx: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
             _ = ctx;
-            return .{};
+            return .{ .ok = .{} };
         }
     };
     const M2 = struct {
@@ -151,9 +159,9 @@ test "analyze and execute" {
             m: M1,
         };
 
-        pub fn middleware(ctx: *const MiddlewareContext(D)) !@This() {
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
             _ = ctx;
-            return .{};
+            return .{ .ok = .{} };
         }
     };
     const M3 = struct {
@@ -162,9 +170,9 @@ test "analyze and execute" {
             m2: *M2,
         };
 
-        pub fn middleware(ctx: *const MiddlewareContext(D)) !@This() {
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
             _ = ctx;
-            return .{};
+            return .{ .ok = .{} };
         }
     };
     const C = struct {

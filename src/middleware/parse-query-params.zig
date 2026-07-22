@@ -684,7 +684,10 @@ pub fn parseQueryParams(comptime Context: type, ctx: *MiddlewareContext(Context)
     const QueryType = @FieldType(Context, query_params);
     switch (try parseQueryLeaky(QueryType, ctx.alloc, ctx.req.query orelse "")) {
         .success => |value| @field(ctx.deps, query_params) = value,
-        .fail => |message| try ctx.req.respondWithError(StatusCode.bad_request, message),
+        .fail => |message| {
+            try ctx.req.respondWithError(StatusCode.bad_request, message);
+            return error.BadRequest;
+        },
     }
 }
 

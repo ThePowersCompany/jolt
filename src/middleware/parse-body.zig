@@ -31,14 +31,16 @@ pub fn parseBody(comptime Context: type, ctx: *MiddlewareContext(Context)) !void
                     .{},
                 ) catch |err| {
                     std.log.info("Invalid body sent: {}\n", .{err});
-                    return try ctx.req.respondWithError(
+                    try ctx.req.respondWithError(
                         StatusCode.bad_request,
                         "Unexpected body structure",
                     );
+                    return error.BadRequest;
                 };
                 // Enforce constraints now that the body is populated.
                 if (types.validateConstraints(@TypeOf(ctx.deps.body), parsed_body)) |err_msg| {
-                    return try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
+                    try ctx.req.respondWithError(StatusCode.bad_request, err_msg);
+                    return error.BadRequest;
                 }
 
                 ctx.deps.body = parsed_body;
@@ -47,6 +49,7 @@ pub fn parseBody(comptime Context: type, ctx: *MiddlewareContext(Context)) !void
                     StatusCode.bad_request,
                     "Body was not provided",
                 );
+                return error.BadRequest;
             }
         },
         .pointer => {
@@ -60,6 +63,7 @@ pub fn parseBody(comptime Context: type, ctx: *MiddlewareContext(Context)) !void
                     StatusCode.bad_request,
                     "Body was not provided",
                 );
+                return error.BadRequest;
             }
         },
         else => {

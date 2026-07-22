@@ -26,6 +26,16 @@ pub fn MiddlewareContext(comptime D: type) type {
     };
 }
 
+pub fn MiddlewareResult(comptime M: type) type {
+    return union(enum) {
+        ok: M,
+        err: struct {
+            status: StatusCode,
+            msg: []const u8,
+        },
+    };
+}
+
 pub const EnabledContext = struct {
     env: *std.process.EnvMap,
     alloc: Allocator,
@@ -105,16 +115,14 @@ pub const RequestHandler = struct {
                     .server = server,
                     .req = req,
                 };
-                auto(Context, &ctx) catch |err| {
+                const auto_result = auto(Context, &ctx);
+                if (req.isFinished()) return;
+                auto_result catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
                     };
                 };
-
-                if (req.isFinished()) {
-                    return;
-                }
 
                 const response: Response(ReturnType) = last_fn(&ctx.deps, alloc) catch |err| {
                     std.log.err("Endpoint fn error - {}\n", .{err});
