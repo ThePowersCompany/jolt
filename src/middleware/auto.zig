@@ -127,14 +127,10 @@ fn analyze(comptime Context: type, comptime stack: []const type) []const type {
                     if (C == M) @compileError("Middleware contains recursive dependency cycle");
                 }
                 // Check if middleware has already been discovered
-                for (middlewares) |E| {
-                    if (E == M) break;
-                } else {
+                if (std.mem.indexOfScalar(type, middlewares, M) == null) {
                     // Recursively analyze dependencies
                     for (analyze(dependencies(M), stack ++ .{M})) |A| {
-                        for (middlewares) |E| {
-                            if (E == A) break;
-                        } else {
+                        if (std.mem.indexOfScalar(type, middlewares, A) == null) {
                             middlewares = middlewares ++ .{A};
                         }
                     }
