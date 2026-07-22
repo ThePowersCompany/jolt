@@ -1,149 +1,266 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
-const eql = std.mem.eql;
+const Type = std.builtin.Type;
 
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
-const MiddlewareFn = zap.Endpoint.MiddlewareFn;
+const MiddlewareResult = zap.Endpoint.MiddlewareResult;
 const Request = zap.Request;
-const HttpError = zap.HttpError;
-const StatusCode = zap.StatusCode;
 
-// Auto middleware
+const types = @import("../utils/types.zig");
+
+// Built-in middleware
+const cors = @import("cors.zig");
 const parseQueryParams = @import("parse-query-params.zig").parseQueryParams;
 const parseBody = @import("parse-body.zig").parseBody;
-const cors = @import("cors.zig").cors;
 
-// NOTE: When adding new auto middleware,
-// add the name of the checked Context field (e.g. "body") to this struct.
-// Then, update the `auto` function.
-const AutoMiddleware = struct {
-    // pub const _
-    decls: struct {
-        cors: bool = false,
-        middleware: bool = false,
-    } = .{},
-    // Normal fields within a Context object
-    fields: struct {
-        req: bool = false,
-        body: bool = false,
-        query_params: bool = false,
-    } = .{},
-};
+pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
+    if (@typeInfo(Context) != .@"struct") {
+        @compileError("Endpoint context must be a struct");
+    }
 
-/// Populates AutoMiddleware based on the given context.
-fn determine_middleware(comptime Context: type) AutoMiddleware {
-    const ctx_info = @typeInfo(Context);
-    assert(ctx_info == .@"struct");
+    if (cors.isEnabled(Context) or ctx.server.cors) {
+        try cors.setCors(&ctx.req);
+    }
+    if (@hasField(Context, "req")) {
+        @field(ctx.deps, "req") = ctx.req;
+    }
 
-    comptime var auto_middleware: AutoMiddleware = .{};
+    try execute(Context, ctx);
 
+    if (@hasField(Context, "query_params")) {
+        try parseQueryParams(Context, ctx);
+    }
+
+    if (@hasField(Context, "body")) {
+        try parseBody(Context, ctx);
+    }
+}
+
+fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
+    inline for (analyze(Context, &.{})) |M| {
+        // Prepare middleware dependencies
+        const D = dependencies(M);
+        const deps: D = deps: {
+            // Loop through each dependency
+            var d: D = undefined;
+            inline for (dependencyFields(D)) |f| {
+                const F: type = extractDependency(f.type, false);
+                const p: ?*F = ptr(Context, F, &ctx.deps);
+                // Copy the middleware result from context memory (p) into dependency field
+                @field(d, f.name) = switch (@typeInfo(f.type)) {
+                    .pointer => (
+                        // Middleware dependencies can be pointers
+                        p orelse {
+                            // Middleware result is null in the context
+                            return error.MiddlewareError;
+                        }),
+                    .optional => |O| (
+                        // Middleware dependencies can be optional (if dependency fails, middleware can proceed with null dependency result)
+                        switch (@typeInfo(O.child)) {
+                            .pointer => p,
+                            else => if (p) |pp| pp.* else null,
+                        }),
+                    else => (p orelse {
+                        // Middleware result is null in the context
+                        return error.MiddlewareError;
+                    }).*,
+                };
+            }
+            break :deps d;
+        };
+        // Execute middleware with dependencies
+        const result: MiddlewareResult(M) = try M.middleware(&.{
+            .deps = deps,
+            .alloc = ctx.alloc,
+            .server = ctx.server,
+            .req = ctx.req,
+        });
+        // Note: If middleware produces a Zig error, the endpoint is immediately aborted
+        // Store middleware result in top-level context
+        const ctx_field = field(Context, M);
+        @field(ctx.deps, ctx_field.name) = switch (@typeInfo(ctx_field.type)) {
+            .optional => switch (result) {
+                .ok => |v| v,
+                .err => null,
+            },
+            else => switch (result) {
+                .ok => |v| v,
+                .err => |e| {
+                    try ctx.req.respondWithError(e.status, e.msg);
+                    return error.MiddlewareError;
+                },
+            },
+        };
+    }
+}
+
+fn extractDependency(comptime T: type, comptime top_level: bool) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |P| {
+            if (@typeInfo(P.child) == .optional) @compileError("Middleware dependency cannot be a pointer to optional");
+            if (top_level) @compileError("Pointers are not supported in endpoint context");
+            return P.child;
+        },
+        .optional => |O| {
+            if (@typeInfo(O.child) == .optional) @compileError("Middleware dependency cannot be double optional");
+            return extractDependency(O.child, top_level);
+        },
+        else => T,
+    };
+}
+
+fn extractMiddleware(comptime T: type, comptime top_level: bool) ?type {
+    const B: type = extractDependency(T, top_level);
+    return if (std.meta.hasFn(B, "middleware")) B else null;
+}
+
+/// Recursively processes an endpoint context struct and extracts all of the middleware types into a flat list.
+/// The resulting flat list is a topological sort (reverse postorder traversal) of the middleware dependency graph.
+/// If the middleware is executed in this order, dependencies will always be resolved before their dependents require their result.
+fn analyze(comptime Context: type, comptime stack: []const type) []const type {
     comptime {
-        const auto_middleware_info = @typeInfo(AutoMiddleware);
-        assert(auto_middleware_info == .@"struct");
-
-        // Declarations (pub const)
-
-        if (@hasDecl(Context, "cors")) {
-            if (@TypeOf(Context.cors) != bool) {
-                @compileError(@typeName(Context) ++ " \"cors\" field is not a bool");
-            }
-            if (Context.cors) {
-                auto_middleware.decls.cors = true;
-            }
-        }
-
-        if (@hasDecl(Context, "middleware")) {
-            for (@field(Context, "middleware")) |f| {
-                if ((@TypeOf(f) != MiddlewareFn(Context))) {
-                    @compileError("Invalid middleware on: " ++ @typeName(Context));
+        var middlewares: []const type = &.{};
+        for (dependencyFields(Context)) |f| {
+            if (extractMiddleware(f.type, stack.len == 0)) |M| {
+                // Check if middleware recursive dependencies form a cycle
+                for (stack) |C| {
+                    if (C == M) @compileError("Middleware contains recursive dependency cycle");
                 }
-            }
-            auto_middleware.decls.middleware = true;
-        }
-
-        // Fields
-        auto_middleware.fields.req = @hasField(Context, "req");
-        auto_middleware.fields.body = @hasField(Context, "body");
-        auto_middleware.fields.query_params = @hasField(Context, "query_params");
-    }
-    return auto_middleware;
-}
-
-pub fn auto(comptime Context: type) MiddlewareFn(Context) {
-    const auto_middleware: AutoMiddleware = comptime determine_middleware(Context);
-
-    return struct {
-        fn auto(ctx: *MiddlewareContext(Context)) anyerror!void {
-            if (comptime auto_middleware.fields.req) {
-                @field(ctx.ctx, "req") = ctx.req;
-            }
-
-            if (comptime auto_middleware.decls.cors) {
-                try cors(Context)(ctx);
-                if (ctx.req.isFinished()) return;
-            }
-
-            if (comptime auto_middleware.fields.query_params) {
-                try parseQueryParams(Context)(ctx);
-                if (ctx.req.isFinished()) return;
-            }
-
-            if (comptime auto_middleware.fields.body) {
-                try parseBody(Context)(ctx);
-                if (ctx.req.isFinished()) return;
-            }
-
-            if (comptime auto_middleware.decls.middleware) {
-                inline for (@field(Context, "middleware")) |middleware| {
-                    try middleware(ctx);
-                    if (ctx.req.isFinished()) return;
+                // Check if middleware has already been discovered
+                if (std.mem.indexOfScalar(type, middlewares, M) == null) {
+                    // Recursively analyze dependencies
+                    for (analyze(dependencies(M), stack ++ .{M})) |A| {
+                        if (std.mem.indexOfScalar(type, middlewares, A) == null) {
+                            middlewares = middlewares ++ .{A};
+                        }
+                    }
+                    // Add middleware
+                    middlewares = middlewares ++ .{M};
                 }
             }
         }
-    }.auto;
-}
-
-test "AutoMiddleware is false for everything with an empty context" {
-    const EmptyContext = struct {};
-    const auto_middleware = determine_middleware(EmptyContext);
-
-    const decls = @typeInfo(@FieldType(AutoMiddleware, "decls"));
-    inline for (decls.@"struct".fields) |field| {
-        assert(@field(@field(auto_middleware, "decls"), field.name) == false);
-    }
-
-    const fields = @typeInfo(@FieldType(AutoMiddleware, "fields"));
-    inline for (fields.@"struct".fields) |field| {
-        assert(@field(@field(auto_middleware, "fields"), field.name) == false);
+        return middlewares;
     }
 }
 
-test "AutoMiddleware is true for everything with a \"full\" context" {
-    const FullContext = struct {
-        pub const cors = true;
+test "analyze and execute" {
+    const M1 = struct {
+        pub fn middleware(ctx: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            _ = ctx;
+            return .{ .ok = .{} };
+        }
+    };
+    const M2 = struct {
+        const D = struct {
+            m: M1,
+        };
 
-        // Example of providing extra middleware
-        pub const Self = @This();
-        pub const middleware = &.{parseBody(Self)};
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
+            _ = ctx;
+            return .{ .ok = .{} };
+        }
+    };
+    const M3 = struct {
+        const D = struct {
+            m: M1,
+            m2: *M2,
+        };
 
-        req: Request,
-        body: struct {},
-        query_params: struct {},
+        pub fn middleware(ctx: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
+            _ = ctx;
+            return .{ .ok = .{} };
+        }
+    };
+    const C = struct {
+        m: M3,
+        m1: M1,
+        m2: M2,
     };
 
-    const auto_middleware = determine_middleware(FullContext);
+    const t = analyze(C, &.{});
+    try std.testing.expect(t[0] == M1);
+    try std.testing.expect(t[1] == M2);
+    try std.testing.expect(t[2] == M3);
 
-    // The following checks should auto-fail if anything is added to the AutoMiddleware type.
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = &undefined,
+        .req = undefined,
+    };
+    try execute(C, &ctx);
+}
 
-    const decls = @typeInfo(@FieldType(AutoMiddleware, "decls"));
-    inline for (decls.@"struct".fields) |field| {
-        assert(@field(@field(auto_middleware, "decls"), field.name) == true);
+/// Get the dependencies of a middleware type.
+/// The dependencies are defined at comptime in a struct type (or void).
+fn dependencies(comptime M: type) type {
+    if (!std.meta.hasFn(M, "middleware")) @compileError("Invalid middleware: Missing function");
+    const fnInfo = @typeInfo(@TypeOf(M.middleware)).@"fn";
+    if (fnInfo.params.len != 1) @compileError("Invalid middleware: Incorrect number of function params");
+    const ctxPtrInfo = @typeInfo(fnInfo.params[0].type orelse @compileError("Null context type!"));
+    if (ctxPtrInfo != .pointer) @compileError("Invalid middleware: First param is not a context pointer");
+    if (!ctxPtrInfo.pointer.is_const) @compileError("Invalid middleware: Context pointer must be const");
+    const Ctx: type = ctxPtrInfo.pointer.child;
+    if (@typeInfo(Ctx) != .@"struct" or !@hasField(Ctx, "deps")) @compileError("Invalid middleware: First param is not a context: " ++ @typeName(Ctx));
+    const Deps: type = @FieldType(Ctx, "deps");
+    if (@typeInfo(Deps) != .@"struct" and Deps != void) @compileError("Invalid middleware: Context dependencies are not a struct");
+    return Deps;
+}
+
+fn dependencyFields(comptime D: type) []const Type.StructField {
+    return switch (@typeInfo(D)) {
+        .void => &.{},
+        .@"struct" => |S| S.fields,
+        else => @compileError("Middleware dependencies must be a struct or void"),
+    };
+}
+
+/// Search context for middleware and return a read-only pointer to the middleware result memory.
+fn ptr(comptime Context: type, comptime Middleware: type, ctx: *Context) ?*Middleware {
+    const f = field(Context, Middleware);
+    return types.unwrapPtr(f.type, &(@field(ctx, f.name)));
+}
+
+test "ptr" {
+    const E = struct {
+        i: i32,
+    };
+    const S = struct {
+        e: E,
+    };
+    var s: S = .{ .e = .{ .i = 123 } };
+    var p: ?*E = ptr(S, E, &s);
+    p.?.i = 456;
+    try std.testing.expectEqual(456, s.e.i);
+}
+
+fn field(comptime Context: type, comptime Middleware: type) Type.StructField {
+    comptime {
+        const ctxInfo = @typeInfo(Context);
+        if (ctxInfo != .@"struct") @compileError("Context must be a struct");
+        var found: ?Type.StructField = null;
+        for (ctxInfo.@"struct".fields) |f| {
+            if (types.Unwrap(f.type) == Middleware) {
+                if (found != null) @compileError("Duplicate middleware defined in top-level endpoint context: " ++ @typeName(f.type));
+                found = f;
+            }
+        }
+        return found orelse @compileError("Unable to find middleware defined in top-level endpoint context: " ++ @typeName(Middleware));
     }
+}
 
-    const fields = @typeInfo(@FieldType(AutoMiddleware, "fields"));
-    inline for (fields.@"struct".fields) |field| {
-        assert(@field(@field(auto_middleware, "fields"), field.name) == true);
-    }
+test "field" {
+    const E = struct {
+        i: i32,
+    };
+    const S = struct {
+        e: E,
+    };
+    const T = struct {
+        e: ?E,
+    };
+    const p: Type.StructField = field(S, E);
+    try std.testing.expectEqualStrings("e", p.name);
+    const q: Type.StructField = field(T, E);
+    try std.testing.expectEqualStrings("e", q.name);
 }

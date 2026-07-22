@@ -12,21 +12,28 @@ const StatusCode = zap.StatusCode;
 
 const JoltServer = @import("../main.zig").JoltServer;
 
+const auto = @import("../middleware/auto.zig").auto;
 const sortByStringLengthDesc = @import("../utils/array_utils.zig").sortByStringLengthDesc;
 const stringify = @import("../utils/json.zig").stringify;
 const Json = @import("../utils/types.zig").Json;
 
-pub fn MiddlewareContext(comptime Context: type) type {
+pub fn MiddlewareContext(comptime D: type) type {
     return struct {
-        ctx: *Context,
+        deps: D,
         alloc: Allocator,
-        server: *JoltServer,
+        server: *const JoltServer,
         req: Request,
     };
 }
 
-pub fn MiddlewareFn(comptime Context: type) type {
-    return fn (ctx: *MiddlewareContext(Context)) anyerror!void;
+pub fn MiddlewareResult(comptime M: type) type {
+    return union(enum) {
+        ok: M,
+        err: struct {
+            status: StatusCode,
+            msg: []const u8,
+        },
+    };
 }
 
 pub const EnabledContext = struct {
@@ -67,9 +74,9 @@ pub fn Response(comptime ReturnType: type) type {
 }
 
 pub const RequestHandler = struct {
-    handle_fn: *const fn (Allocator, *JoltServer, Request, ErrorHandlerFn) anyerror!void,
+    handle_fn: *const fn (Allocator, *const JoltServer, Request, ErrorHandlerFn) anyerror!void,
 
-    pub fn init(comptime auto: anytype, comptime last_fn: anytype) !RequestHandler {
+    pub fn init(comptime last_fn: anytype) !RequestHandler {
         const info: std.builtin.Type = @typeInfo(@TypeOf(last_fn));
 
         const ContextPtr = info.@"fn".params[0].type orelse @compileError("Null Context type!");
@@ -92,37 +99,32 @@ pub const RequestHandler = struct {
         if (ResponseType != Response(ReturnType)) {
             @compileError("Handler function must return a Response!");
         }
-        return _init(Context, ReturnType, auto, last_fn);
+        return _init(Context, ReturnType, last_fn);
     }
 
     fn _init(
         comptime Context: type,
         comptime ReturnType: type,
-        comptime auto: anytype,
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(alloc: Allocator, server: *JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
-                var context: Context = undefined;
-                var middleware_context: MiddlewareContext(Context) = .{
-                    .ctx = &context,
+            pub fn handle(alloc: Allocator, server: *const JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+                var ctx: MiddlewareContext(Context) = .{
+                    .deps = undefined,
                     .alloc = alloc,
                     .server = server,
                     .req = req,
                 };
-
-                auto(Context)(&middleware_context) catch |err| {
+                const auto_result = auto(Context, &ctx);
+                if (req.isFinished()) return;
+                auto_result catch |err| {
                     std.log.err("Middleware error - {}\n", .{err});
                     return req.respondWithStatus(StatusCode.internal_server_error) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
                     };
                 };
 
-                if (req.isFinished()) {
-                    return;
-                }
-
-                const response: Response(ReturnType) = last_fn(&context, alloc) catch |err| {
+                const response: Response(ReturnType) = last_fn(&ctx.deps, alloc) catch |err| {
                     std.log.err("Endpoint fn error - {}\n", .{err});
                     return sendErrorResponse(req, err) catch |failed| {
                         std.log.err("Failed to send error to client: {}\n", .{failed});
@@ -188,7 +190,7 @@ pub const RequestHandler = struct {
     pub fn handle(
         self: RequestHandler,
         allocator: Allocator,
-        server: *JoltServer,
+        server: *const JoltServer,
         req: Request,
         sendErrorResponse: ErrorHandlerFn,
     ) void {
@@ -212,13 +214,13 @@ pub const RequestHandlers = struct {
 };
 
 pub const Endpoint = struct {
-    server: *JoltServer,
+    server: *const JoltServer,
     path: []const u8,
     handlers: RequestHandlers,
     sendErrorResponse: ErrorHandlerFn,
 
     pub fn init(
-        server: *JoltServer,
+        server: *const JoltServer,
         path: []const u8,
         sendErrorResponse: ErrorHandlerFn,
         handlers: RequestHandlers,
