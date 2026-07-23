@@ -23,7 +23,9 @@ const endpoint = "/param-parse";
 describe(endpoint, () => {
   it("runs paramParse and echoes the parsed value", async () => {
     const millis = 1700000000000;
-    const res = await GET(`${endpoint}?when=${millis}`, null);
+    const res = await GET(endpoint, {
+      queryParams: { when: millis.toString() },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -33,7 +35,7 @@ describe(endpoint, () => {
   });
 
   it("treats the scalar as absent when omitted", async () => {
-    const res = await GET(endpoint, null);
+    const res = await GET(endpoint);
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -43,7 +45,7 @@ describe(endpoint, () => {
   });
 
   it("rejects a value that paramParse cannot parse", async () => {
-    const res = await GET(`${endpoint}?when=abc`, null);
+    const res = await GET(endpoint, "?when=abc");
     assert.strictEqual(res.status, 400);
   });
 });

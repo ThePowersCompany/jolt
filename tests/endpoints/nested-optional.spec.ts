@@ -13,19 +13,20 @@ const endpoint = "/nested-optional";
 //      }) = .not_provided,
 //  }
 //
-// The nested `filter` struct is entirely optional (no required keys), so it does not form a gated group.
+// The nested `filter` struct is entirely optional (no required keys),
+// so it does not form a gated group.
 // Any subset of its keys, including none, is valid.
 
 describe(endpoint, () => {
   it("accepts an empty request (all defaults)", async () => {
-    const res = await GET(endpoint, null);
+    const res = await GET(endpoint);
     if (res.status != 200) {
       assert.fail(await res.text());
     }
   });
 
   it("accepts just the base page key", async () => {
-    const res = await GET(`${endpoint}?page=2`, null);
+    const res = await GET(endpoint, { queryParams: { page: 2 } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -36,7 +37,7 @@ describe(endpoint, () => {
   });
 
   it("accepts only category from the nested struct", async () => {
-    const res = await GET(`${endpoint}?category=books`, null);
+    const res = await GET(endpoint, { queryParams: { category: "books" } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -49,7 +50,7 @@ describe(endpoint, () => {
   });
 
   it("accepts only status from the nested struct", async () => {
-    const res = await GET(`${endpoint}?status=active`, null);
+    const res = await GET(endpoint, { queryParams: { status: "active" } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -59,7 +60,9 @@ describe(endpoint, () => {
   });
 
   it("accepts both nested keys together", async () => {
-    const res = await GET(`${endpoint}?category=books&status=active`, null);
+    const res = await GET(endpoint, {
+      queryParams: { category: "books", status: "active" },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -69,7 +72,9 @@ describe(endpoint, () => {
   });
 
   it("accepts page combined with a partial filter", async () => {
-    const res = await GET(`${endpoint}?page=3&status=active`, null);
+    const res = await GET(endpoint, {
+      queryParams: { page: 3, status: "active" },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -80,8 +85,7 @@ describe(endpoint, () => {
   });
 
   it("rejects a page of the wrong type", async () => {
-    const res = await GET(`${endpoint}?page=abc`, null);
+    const res = await GET(endpoint, "?page=abc");
     assert.strictEqual(res.status, 400);
   });
 });
-

@@ -16,7 +16,7 @@ const endpoint = "/arrays";
 
 describe(endpoint, () => {
   it("parses a comma separated int array", async () => {
-    const res = await GET(`${endpoint}?ids=1,2,3`, null);
+    const res = await GET(endpoint, { queryParams: { ids: [1, 2, 3] } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -26,7 +26,7 @@ describe(endpoint, () => {
   });
 
   it("parses a single element int array", async () => {
-    const res = await GET(`${endpoint}?ids=32`, null);
+    const res = await GET(endpoint, { queryParams: { ids: [32] } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -35,7 +35,9 @@ describe(endpoint, () => {
   });
 
   it("parses a comma separated enum array", async () => {
-    const res = await GET(`${endpoint}?tags=red,blue`, null);
+    const res = await GET(endpoint, {
+      queryParams: { tags: ["red", "blue"] },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -44,7 +46,9 @@ describe(endpoint, () => {
   });
 
   it("parses both arrays together", async () => {
-    const res = await GET(`${endpoint}?ids=7,8&tags=green`, null);
+    const res = await GET(endpoint, {
+      queryParams: { ids: [7, 8], tags: ["green"] },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -54,7 +58,7 @@ describe(endpoint, () => {
   });
 
   it("accepts a request with no arrays at all", async () => {
-    const res = await GET(endpoint, null);
+    const res = await GET(endpoint);
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -64,12 +68,12 @@ describe(endpoint, () => {
   });
 
   it("rejects a non-numeric element in an int array", async () => {
-    const res = await GET(`${endpoint}?ids=1,x,3`, null);
+    const res = await GET(endpoint, "?ids=1,x,3");
     assert.strictEqual(res.status, 400);
   });
 
   it("rejects an unknown enum variant", async () => {
-    const res = await GET(`${endpoint}?tags=red,purple`, null);
+    const res = await GET(endpoint, "?tags=red,purple");
     assert.strictEqual(res.status, 400);
   });
 });

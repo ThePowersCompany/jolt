@@ -21,7 +21,7 @@ const endpoint = "/union-variant";
 
 describe(endpoint, () => {
   it("selects the `id` variant when only id is present", async () => {
-    const res = await GET(`${endpoint}?id=42`, null);
+    const res = await GET(endpoint, { queryParams: { id: 42 } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -31,7 +31,7 @@ describe(endpoint, () => {
   });
 
   it("selects the `date_range` variant", async () => {
-    const res = await GET(`${endpoint}?start_date=123`, null);
+    const res = await GET(endpoint, { queryParams: { start_date: 123 } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -41,7 +41,9 @@ describe(endpoint, () => {
   });
 
   it("selects `date_range` and parses its optional keys", async () => {
-    const res = await GET(`${endpoint}?start_date=123&line=1&shift=2`, null);
+    const res = await GET(endpoint, {
+      queryParams: { start_date: 123, line: 1, shift: 2 },
+    });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -53,7 +55,7 @@ describe(endpoint, () => {
   });
 
   it("Selects the `all` variant", async () => {
-    const res = await GET(`${endpoint}?line=1&shift=2`, null);
+    const res = await GET(endpoint, { queryParams: { line: 1, shift: 2 } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -64,7 +66,7 @@ describe(endpoint, () => {
   });
 
   it("resolves an empty query to the fallback variant", async () => {
-    const res = await GET(endpoint, null);
+    const res = await GET(endpoint);
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -75,9 +77,11 @@ describe(endpoint, () => {
   });
 
   it("errors on an incorrect param value", async () => {
-    const res = await GET(`${endpoint}?start_date=invalid`, null);
+    const res = await GET(endpoint, "?start_date=invalid");
     assert.strictEqual(res.status, 400);
-    assert.strictEqual("Incorrect query parameter for: start_date", await res.text());
+    assert.strictEqual(
+      "Incorrect query parameter for: start_date",
+      await res.text(),
+    );
   });
 });
-

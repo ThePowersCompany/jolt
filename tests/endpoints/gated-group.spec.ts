@@ -20,7 +20,7 @@ const endpoint = "/gated-group";
 describe(endpoint, () => {
   describe("base keys", () => {
     it("accepts the required room with no gated group", async () => {
-      const res = await GET(`${endpoint}?room=1`, null);
+      const res = await GET(endpoint, { queryParams: { room: 1 } });
       if (res.status != 200) {
         assert.fail(await res.text());
       }
@@ -37,7 +37,9 @@ describe(endpoint, () => {
     });
 
     it("accepts room together with a default field (limit)", async () => {
-      const res = await GET(`${endpoint}?room=1&limit=5`, null);
+      const res = await GET(endpoint, {
+        queryParams: { room: 1, limit: 5 },
+      });
       if (res.status != 200) {
         assert.fail(await res.text());
       }
@@ -47,21 +49,26 @@ describe(endpoint, () => {
     });
 
     it("rejects a missing required room", async () => {
-      const res = await GET(endpoint, null);
+      const res = await GET(endpoint);
       assert.strictEqual(res.status, 400);
       assert.strictEqual("No query params were provided", await res.text());
     });
 
     it("rejects a room of the wrong type", async () => {
-      const res = await GET(`${endpoint}?room=abc`, null);
+      const res = await GET(endpoint, "?room=abc");
       assert.strictEqual(res.status, 400);
-      assert.strictEqual("Incorrect query parameter for: room", await res.text());
+      assert.strictEqual(
+        "Incorrect query parameter for: room",
+        await res.text(),
+      );
     });
   });
 
   describe("gated group", () => {
     it("accepts the group present with only its required key", async () => {
-      const res = await GET(`${endpoint}?room=1&cursor=100`, null);
+      const res = await GET(endpoint, {
+        queryParams: { room: 1, cursor: 100 },
+      });
       if (res.status != 200) {
         assert.fail(await res.text());
       }
@@ -73,7 +80,9 @@ describe(endpoint, () => {
     });
 
     it("accepts the group present with its required and optional keys", async () => {
-      const res = await GET(`${endpoint}?room=1&cursor=100&before=true`, null);
+      const res = await GET(endpoint, {
+        queryParams: { room: 1, cursor: 100, before: true },
+      });
       if (res.status != 200) {
         assert.fail(await res.text());
       }
@@ -84,16 +93,18 @@ describe(endpoint, () => {
     });
 
     it("rejects partial presence", async () => {
-      const res = await GET(`${endpoint}?room=1&before=true`, null);
+      const res = await GET(endpoint, "?room=1&before=true");
       assert.strictEqual(res.status, 400);
       assert.strictEqual("Missing query parameter: cursor", await res.text());
     });
 
     it("rejects the group's required key of the wrong type", async () => {
-      const res = await GET(`${endpoint}?room=1&cursor=notanumber`, null);
+      const res = await GET(endpoint, "?room=1&cursor=notanumber");
       assert.strictEqual(res.status, 400);
-      assert.strictEqual("Incorrect query parameter for: cursor", await res.text());
+      assert.strictEqual(
+        "Incorrect query parameter for: cursor",
+        await res.text(),
+      );
     });
   });
 });
-

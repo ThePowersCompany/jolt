@@ -11,6 +11,36 @@ env:
   HUSKY: 0
 
 jobs:
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: "npm"
+          cache-dependency-path: ./package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Next.js types
+        run: cd next && npx next typegen
+
+      - name: TypeScript
+        run: npm run type-check
+
+      - name: Prettier check next
+        run: cd next && npx prettier --ignore-unknown --check .
+
+      - name: Prettier check utils
+        run: cd packages/utils && npx prettier --ignore-unknown --check .
+
+      - name: Prettier check server
+        run: cd server && npx prettier --ignore-unknown --check .
+
   tests:
     runs-on: ubuntu-latest
     name: Run Tests

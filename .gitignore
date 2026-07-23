@@ -3,3 +3,4 @@ zig-out
 .env
 *.log
 types.d.ts
+node_modules

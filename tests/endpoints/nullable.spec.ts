@@ -11,12 +11,12 @@ const endpoint = "/nullable";
 
 describe(endpoint, () => {
   it("rejects the request when the nullable field is absent", async () => {
-    const res = await GET(endpoint, null);
+    const res = await GET(endpoint);
     assert.strictEqual(res.status, 400);
   });
 
   it("accepts an explicit null value", async () => {
-    const res = await GET(`${endpoint}?required=null`, null);
+    const res = await GET(endpoint, { queryParams: { required: null } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -26,7 +26,7 @@ describe(endpoint, () => {
   });
 
   it("accepts a concrete value", async () => {
-    const res = await GET(`${endpoint}?required=32`, null);
+    const res = await GET(endpoint, { queryParams: { required: 32 } });
     if (res.status != 200) {
       assert.fail(await res.text());
     }
@@ -36,7 +36,7 @@ describe(endpoint, () => {
   });
 
   it("rejects a non-numeric value", async () => {
-    const res = await GET(`${endpoint}?required=abc`, null);
+    const res = await GET(endpoint, "?required=abc");
     assert.strictEqual(res.status, 400);
   });
 });
