@@ -98,11 +98,7 @@ fn runServer(alloc: Allocator) !void {
     // Default = Same Origin
     server.cors = server.getEnvBool("ENABLE_CORS", false);
 
-    try server.run(
-        &endpoints,
-        &tasks,
-        jolt.middleware.auto,
-    );
+    try server.run(&endpoints, &tasks);
 }
 
 test {
