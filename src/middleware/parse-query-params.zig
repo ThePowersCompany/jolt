@@ -4,7 +4,6 @@ const Allocator = std.mem.Allocator;
 
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
-const MiddlewareFn = zap.Endpoint.MiddlewareFn;
 const Request = zap.Request;
 const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
@@ -661,7 +660,7 @@ fn parseQueryLeaky(comptime QP: type, alloc: Allocator, query: []const u8) !Pars
 /// This uses the leaky variant because the per-request arena in `ctx.alloc`
 /// already owns the parsed value for the whole request.
 /// Parsing must not free the data when the middleware returns.
-pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
+pub fn parseQueryParams(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     if (!@hasField(Context, query_params)) {
         @compileError(
             comptimePrint(
@@ -682,15 +681,14 @@ pub fn parseQueryParams(comptime Context: type) MiddlewareFn(Context) {
 
     comptime assertNoQueryKeyCollisions(@FieldType(Context, query_params));
 
-    return struct {
-        fn parseQueryParams(ctx: *MiddlewareContext(Context)) anyerror!void {
-            const QueryType = @FieldType(Context, query_params);
-            switch (try parseQueryLeaky(QueryType, ctx.alloc, ctx.req.query orelse "")) {
-                .success => |value| @field(ctx.ctx, query_params) = value,
-                .fail => |message| try ctx.req.respondWithError(StatusCode.bad_request, message),
-            }
-        }
-    }.parseQueryParams;
+    const QueryType = @FieldType(Context, query_params);
+    switch (try parseQueryLeaky(QueryType, ctx.alloc, ctx.req.query orelse "")) {
+        .success => |value| @field(ctx.deps, query_params) = value,
+        .fail => |message| {
+            try ctx.req.respondWithError(StatusCode.bad_request, message);
+            return error.BadRequest;
+        },
+    }
 }
 
 const Basic = struct {
