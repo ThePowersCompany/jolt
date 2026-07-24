@@ -12,7 +12,7 @@ const endpoint = "/nullable";
 
 describe(endpoint, () => {
   it("rejects the request when a required field is missing", async () => {
-    const res = await GET(endpoint, { queryParams: { first: 1 } });
+    const res = await GET(endpoint, "?first=1");
     assert.strictEqual(res.status, 400);
   });
 
