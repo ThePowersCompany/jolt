@@ -1,0 +1,29 @@
+{
+  "name": "e2e-tests",
+  "type": "module",
+  "scripts": {
+    "all-tests": "node --enable-source-maps --import tsx suite.ts",
+    "bench": "node --enable-source-maps --import tsx bench.ts",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "lint-staged": {
+    "*.{js,jsx,json,ts,tsx,md,html,css,yml,yaml}": "prettier --write"
+  },
+  "dependencies": {
+    "dotenv": "^16",
+    "temporal-polyfill": "^0.3.0",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "eslint": "^9",
+    "eslint-config-prettier": "^9",
+    "prettier": "^3.9.6",
+    "tsx": "^4",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8"
+  }
+}

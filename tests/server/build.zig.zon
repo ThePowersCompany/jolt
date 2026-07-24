@@ -1,0 +1,16 @@
+.{
+    .paths = .{""},
+    .name = .server,
+    .version = "0.0.1",
+    .fingerprint = 0x5a6dd5f6e7890691,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .dotenv = .{
+            .url = "git+https://github.com/dying-will-bullet/dotenv?ref=master#a678aee59c193f3e53497bfff1bc0c46d5b26762",
+            .hash = "dotenv-0.2.2-ikMfwFR3AADpfrO6CJ9asM3fp_0ullYHMYd6cxNo_hnV",
+        },
+        .jolt = .{
+            .path = "../../",
+        },
+    },
+}
