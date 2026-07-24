@@ -56,6 +56,7 @@ export type UnionVariantQpDetails = {
   variant: string;
   id?: number | null;
   start_date?: number | null;
+  end_date?: number | null;
   line?: number | null;
   shift?: number | null;
 };

@@ -35,6 +35,7 @@ pub const UnionVariantQpDetails = struct {
     variant: []const u8,
     id: ?i32 = null,
     start_date: ?i32 = null,
+    end_date: ?i32 = null,
     line: ?i32 = null,
     shift: ?i32 = null,
 };
@@ -48,6 +49,7 @@ pub fn get(ctx: *GetContext, _: Allocator) !Response(UnionVariantQpDetails) {
         .date_range => |v| .{
             .variant = "date_range",
             .start_date = v.start_date,
+            .end_date = v.end_date.get(),
             .line = v.line.get(),
             .shift = v.shift.get(),
         },

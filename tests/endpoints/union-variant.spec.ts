@@ -42,7 +42,7 @@ describe(endpoint, () => {
 
   it("selects `date_range` and parses its optional keys", async () => {
     const res = await GET(endpoint, {
-      queryParams: { start_date: 123, line: 1, shift: 2 },
+      queryParams: { start_date: 123, end_date: 456, line: 1, shift: 2 },
     });
     if (res.status != 200) {
       assert.fail(await res.text());
@@ -50,8 +50,22 @@ describe(endpoint, () => {
     const body = await res.json();
     assert.strictEqual(body.variant, "date_range");
     assert.strictEqual(body.start_date, 123);
+    assert.strictEqual(body.end_date, 456);
     assert.strictEqual(body.line, 1);
     assert.strictEqual(body.shift, 2);
+  });
+
+  it("parses the optional end_date for the date_range variant", async () => {
+    const res = await GET(endpoint, {
+      queryParams: { start_date: 123, end_date: 456 },
+    });
+    if (res.status != 200) {
+      assert.fail(await res.text());
+    }
+    const body = await res.json();
+    assert.strictEqual(body.variant, "date_range");
+    assert.strictEqual(body.start_date, 123);
+    assert.strictEqual(body.end_date, 456);
   });
 
   it("Selects the `all` variant", async () => {
@@ -81,6 +95,24 @@ describe(endpoint, () => {
     assert.strictEqual(res.status, 400);
     assert.strictEqual(
       "Incorrect query parameter for: start_date",
+      await res.text(),
+    );
+  });
+
+  it("rejects an invalid end_date", async () => {
+    const res = await GET(endpoint, "?start_date=123&end_date=invalid");
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(
+      "Incorrect query parameter for: end_date",
+      await res.text(),
+    );
+  });
+
+  it("rejects query parameters from conflicting union variants", async () => {
+    const res = await GET(endpoint, "?id=42&start_date=123");
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(
+      "Unexpected query parameters were provided: start_date",
       await res.text(),
     );
   });
