@@ -43,8 +43,10 @@ export type NestedOptionalQpDetails = {
 };
 
 export type NullableQpDetails = {
-  is_null: boolean;
-  value: number | null;
+  first_is_null: boolean;
+  first_value: number | null;
+  second_is_null: boolean;
+  second_value: number | null;
 };
 
 export type ParamParseQpDetails = {
@@ -116,7 +118,8 @@ export type Spec = {
     };
     "/nullable": {
       queryParams: {
-        required: number | null;
+        first: number | null;
+        second: number | null;
       };
       response: NullableQpDetails;
     };

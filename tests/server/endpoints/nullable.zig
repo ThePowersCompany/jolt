@@ -7,19 +7,25 @@ const Response = jolt.Response;
 // A bare `?T` field is both required and nullable
 const GetContext = struct {
     query_params: struct {
-        required: ?i32,
+        first: ?i32,
+        second: ?i32,
     },
 };
 
 pub const NullableQpDetails = struct {
-    is_null: bool,
-    value: ?i32,
+    first_is_null: bool,
+    first_value: ?i32,
+    second_is_null: bool,
+    second_value: ?i32,
 };
 
 pub fn get(ctx: *GetContext, _: Allocator) !Response(NullableQpDetails) {
-    const v = ctx.query_params.required;
+    const a = ctx.query_params.first;
+    const b = ctx.query_params.second;
     return .{ .body = .{
-        .is_null = v == null,
-        .value = v,
+        .first_is_null = a == null,
+        .first_value = a,
+        .second_is_null = b == null,
+        .second_value = b,
     } };
 }

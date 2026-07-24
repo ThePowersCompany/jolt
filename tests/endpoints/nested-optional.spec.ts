@@ -87,5 +87,6 @@ describe(endpoint, () => {
   it("rejects a page of the wrong type", async () => {
     const res = await GET(endpoint, "?page=abc");
     assert.strictEqual(res.status, 400);
+    assert.strictEqual("Incorrect query parameter for: page", await res.text());
   });
 });

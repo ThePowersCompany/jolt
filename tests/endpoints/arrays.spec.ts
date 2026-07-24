@@ -70,6 +70,7 @@ describe(endpoint, () => {
   it("rejects a non-numeric element in an int array", async () => {
     const res = await GET(endpoint, "?ids=1,x,3");
     assert.strictEqual(res.status, 400);
+    assert.strictEqual("Incorrect query parameter for: ids", await res.text());
   });
 
   it("rejects an unknown enum variant", async () => {
