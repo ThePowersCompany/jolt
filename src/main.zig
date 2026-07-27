@@ -31,7 +31,7 @@ pub const WebSockets = @import("zap/websockets.zig");
 pub const util = @import("zap/util.zig");
 
 const unions_mod = @import("./utils/unions.zig");
-pub const jsonParseUnion = unions_mod.UnionRepr;
+pub const jsonParseUnion = unions_mod.jsonParseUnion;
 pub const UnionRepr = unions_mod.UnionRepr;
 
 // Utilities

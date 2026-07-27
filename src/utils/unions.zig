@@ -28,7 +28,7 @@ pub fn jsonParseUnion(
     allocator: Allocator,
     source: anytype,
     options: ParseOptions,
-    repr: UnionRepr,
+    comptime repr: UnionRepr,
 ) std.json.ParseError(@TypeOf(source.*))!T {
     comptime {
         const info = @typeInfo(T);
@@ -42,7 +42,7 @@ pub fn jsonParseUnion(
     const value = try Value.jsonParse(allocator, source, options);
     return switch (repr) {
         .external => parseExternal(T, allocator, value, options),
-        .internal => |cfg| parseInternal(T, allocator, value, options, cfg.discriminator),
+        .internal => |i| parseInternal(T, allocator, value, options, i.discriminator),
         // The adjacent discriminator is consumed by the parent object,
         // so from here it is indistinguishable from untagged.
         .adjacently, .untagged => parseByInference(T, allocator, value, options),
