@@ -9,19 +9,6 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
-/// Various ways to represent tagged unions in JSON.
-/// Reference (Rust): https://serde.rs/enum-representations.html
-pub const UnionRepr = union(enum) {
-    external,
-    internal: struct {
-        discriminator: []const u8,
-    },
-    adjacently: struct {
-        discriminator: []const u8,
-    },
-    untagged,
-};
-
 pub fn Unwrap(T: type) type {
     if (isOptional(T)) return Unwrap(T.childType());
     if (@typeInfo(T) == .optional) return Unwrap(@typeInfo(T).optional.child);

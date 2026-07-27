@@ -29,7 +29,10 @@ pub const StatusCode = zap.StatusCode;
 pub const mustache = @import("zap/mustache.zig");
 pub const WebSockets = @import("zap/websockets.zig");
 pub const util = @import("zap/util.zig");
-pub const UnionRepr = types.UnionRepr;
+
+const unions_mod = @import("./utils/unions.zig");
+pub const jsonParseUnion = unions_mod.UnionRepr;
+pub const UnionRepr = unions_mod.UnionRepr;
 
 // Utilities
 pub const array = @import("./utils/array_utils.zig");

@@ -7,7 +7,7 @@ const Optional = types_module.Optional;
 const isOptional = types_module.isOptional;
 const Unwrap = types_module.Unwrap;
 
-const UnionRepr = @import("../../utils/types.zig").UnionRepr;
+const UnionRepr = @import("../../utils/unions.zig").UnionRepr;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;

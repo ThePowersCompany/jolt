@@ -9,7 +9,7 @@ const allocPrint = std.fmt.allocPrint;
 const stringToEnum = std.meta.stringToEnum;
 
 const EndpointDef = @import("../main.zig").EndpointDef;
-const UnionRepr = types.UnionRepr;
+const UnionRepr = @import("../utils/unions.zig").UnionRepr;
 
 const types = @import("../utils/types.zig");
 const Optional = types.Optional;
