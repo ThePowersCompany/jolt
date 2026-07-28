@@ -225,15 +225,14 @@ fn assertAtMostOneFallbackVariant(comptime T: type) void {
     }
 }
 
-/// Attempt to parse each variant and keep the first that fully matches, trying the most
-/// specific variants first (see `orderedFields`). Unknown fields are rejected during
-/// inference (regardless of the caller's `ignore_unknown_fields`) so that an object with
-/// extra keys does not match a narrower variant.
+/// Attempt to parse each variant and keep the first that fully matches,
+/// trying the most specific variants first (see `orderedFields`).
+/// Unknown fields are rejected during inference (regardless of the caller's `ignore_unknown_fields`)
+/// so that an object with extra keys does not match a narrower variant.
 ///
-/// Trying variants most-specific-first is what prevents a variant whose fields are all
-/// optional/defaulted (including our `Optional(T)` fields, which carry a `.not_provided`
-/// default) from greedily swallowing an object intended for a more specific variant:
-/// the specific variant is attempted and succeeds before the fallback is ever reached.
+/// Trying variants most-specific-first is what prevents a variant whose fields are all optional/defaulted
+/// from greedily swallowing an object intended for a more specific variant.
+/// The specific variant is attempted and succeeds before the fallback is ever reached.
 fn parseByInference(
     comptime T: type,
     allocator: Allocator,
