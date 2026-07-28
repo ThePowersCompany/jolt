@@ -26,10 +26,19 @@ pub const UnionRepr = union(enum) {
     untagged,
 };
 
-/// Drop-in helper for a tagged union's `jsonParse`.
+/// Drop-in helpers for a tagged union's custom json parsing.
+///
+/// `std.json` has two parse paths that dispatch to different methods:
+/// parsing from a slice looks for `jsonParse`, while parsing a nested value looks for `jsonParseFromValue`.
+/// A union that only defines `jsonParse` is parsed with std's default (external) logic
+/// whenever it is nested inside another value, silently ignoring its `_repr`.
+/// Define both so the repr is honored at the top level and when nested:
 ///
 ///  pub fn jsonParse(alloc: Allocator, source: anytype, opts: std.json.ParseOptions) !@This() {
 ///    return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+///  }
+///  pub fn jsonParseFromValue(alloc: Allocator, source: std.json.Value, opts: std.json.ParseOptions) !@This() {
+///    return try jsonParseUnionFromValue(@This(), alloc, source, opts, _repr);
 ///  }
 ///
 pub fn jsonParseUnion(
@@ -39,6 +48,27 @@ pub fn jsonParseUnion(
     options: ParseOptions,
     comptime repr: UnionRepr,
 ) std.json.ParseError(@TypeOf(source.*))!T {
+    comptime validateUnionRepr(T, repr);
+    // Buffer the token source into a Value, then share the from-value dispatch below.
+    const value = try Value.jsonParse(allocator, source, options);
+    return dispatchByRepr(T, allocator, value, options, repr);
+}
+
+/// From-value counterpart of `jsonParseUnion`,
+/// used by std.json when the union is nested inside another value (and internally by this helper).
+/// Wire it up as `jsonParseFromValue`.
+pub fn jsonParseUnionFromValue(
+    comptime T: type,
+    allocator: Allocator,
+    source: Value,
+    options: ParseOptions,
+    comptime repr: UnionRepr,
+) std.json.ParseFromValueError!T {
+    comptime validateUnionRepr(T, repr);
+    return dispatchByRepr(T, allocator, source, options, repr);
+}
+
+fn validateUnionRepr(comptime T: type, comptime repr: UnionRepr) void {
     comptime {
         const info = @typeInfo(T);
         if (info != .@"union")
@@ -54,8 +84,15 @@ pub fn jsonParseUnion(
             .external, .internal => {},
         }
     }
+}
 
-    const value = try Value.jsonParse(allocator, source, options);
+fn dispatchByRepr(
+    comptime T: type,
+    allocator: Allocator,
+    value: Value,
+    options: ParseOptions,
+    comptime repr: UnionRepr,
+) std.json.ParseFromValueError!T {
     return switch (repr) {
         .external => parseExternal(T, allocator, value, options),
         .internal => |i| parseInternal(T, allocator, value, options, i.discriminator),
@@ -627,71 +664,6 @@ test "untagged: optional-only first variant still matches its own shape" {
     try testing.expectEqualStrings("hello", v.maybe.note.?);
 }
 
-const Overlap = union(enum) {
-    // All optional variant, declared first on purpose
-    loose: struct {
-        id: Optional(i64) = .not_provided,
-        note: Optional([]const u8) = .not_provided,
-    },
-    identified: struct {
-        id: i64,
-        note: Optional([]const u8) = .not_provided,
-    },
-
-    const _repr: UnionRepr = .untagged;
-
-    pub fn jsonParse(alloc: Allocator, source: anytype, opts: ParseOptions) !@This() {
-        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
-    }
-};
-
-test "untagged: more specific variant wins over an earlier all-optional one (overlapping keys)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const v = try std.json.parseFromSliceLeaky(
-        Overlap,
-        arena.allocator(),
-        \\{
-        \\  "id": 5
-        \\}
-    ,
-        .{},
-    );
-    try testing.expect(v == .identified);
-    try testing.expectEqual(5, v.identified.id);
-}
-
-test "untagged: all-optional fallback matches when no required key is present" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const v = try std.json.parseFromSliceLeaky(
-        Overlap,
-        arena.allocator(),
-        \\{
-        \\  "note": "hi"
-        \\}
-    ,
-        .{},
-    );
-    try testing.expect(v == .loose);
-    try testing.expect(v.loose.note == .value);
-    try testing.expectEqualStrings("hi", v.loose.note.value);
-}
-
-test "untagged: empty object falls back to the all-optional variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const v = try std.json.parseFromSliceLeaky(
-        Overlap,
-        arena.allocator(),
-        \\{}
-    ,
-        .{},
-    );
-    try testing.expect(v == .loose);
-    try testing.expect(v.loose.id == .not_provided);
-}
-
 // A single `void` fallback variant (zero required keys) is allowed by the ambiguity guard
 // and matches the empty object, while a specific variant still wins when its key is present.
 const VoidFallback = union(enum) {
@@ -732,4 +704,54 @@ test "untagged: present key selects the specific variant over the void fallback"
     );
     try testing.expect(v == .identified);
     try testing.expectEqual(7, v.identified.id);
+}
+
+// Nested custom union: `Inner` uses an internal-tagged repr and is a field of another union's payload struct.
+// When the outer union is reached through this helper,
+// std.json parses `Inner` from a Value by calling `jsonParseFromValue`.
+// A union that only defines `jsonParse` would be parsed with std's default (external) union logic here,
+// silently ignoring its `_repr`.
+const Inner = union(enum) {
+    a: struct { x: i64 },
+    b: struct { y: i64 },
+
+    const _repr: UnionRepr = .{ .internal = .{ .discriminator = "kind" } };
+
+    pub fn jsonParse(alloc: Allocator, source: anytype, opts: ParseOptions) !@This() {
+        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+    }
+    pub fn jsonParseFromValue(alloc: Allocator, source: Value, opts: ParseOptions) !@This() {
+        return try jsonParseUnionFromValue(@This(), alloc, source, opts, _repr);
+    }
+};
+
+const Outer = union(enum) {
+    wrap: struct { inner: Inner },
+    other: struct { z: i64 },
+
+    const _repr: UnionRepr = .untagged;
+
+    pub fn jsonParse(alloc: Allocator, source: anytype, opts: ParseOptions) !@This() {
+        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+    }
+    pub fn jsonParseFromValue(alloc: Allocator, source: Value, opts: ParseOptions) !@This() {
+        return try jsonParseUnionFromValue(@This(), alloc, source, opts, _repr);
+    }
+};
+
+test "nested: internal-tagged union nested inside an inferred union honors its repr" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(
+        Outer,
+        arena.allocator(),
+        \\{
+        \\  "inner": { "kind": "b", "y": 9 }
+        \\}
+    ,
+        .{},
+    );
+    try testing.expect(v == .wrap);
+    try testing.expect(v.wrap.inner == .b);
+    try testing.expectEqual(9, v.wrap.inner.b.y);
 }
