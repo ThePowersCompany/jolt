@@ -94,7 +94,7 @@ pub fn Optional(comptime T: type) type {
             allocator: std.mem.Allocator,
             source: json.Value,
             options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(allocator))!Self {
+        ) json.ParseFromValueError!Self {
             const info = @typeInfo(T);
             if (info == .optional) {
                 return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
@@ -412,8 +412,8 @@ pub fn JsonArray(comptime T: type) type {
             allocator: std.mem.Allocator,
             source: json.Value,
             options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(allocator))!Self {
-            const slice: []T = try json.parseFromValueLeaky(T, allocator, source, options);
+        ) json.ParseFromValueError!Self {
+            const slice: []T = try json.parseFromValueLeaky([]T, allocator, source, options);
             return .{ .list = .fromOwnedSlice(slice) };
         }
 

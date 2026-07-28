@@ -25,10 +25,12 @@ const ParseResult = common.ParseResult;
 const AdjacentUnion = common.AdjacentUnion;
 const FlatLeaf = common.FlatLeaf;
 
-const qp_validation = @import("../middleware/query_params/validation.zig");
-const hasParamParse = qp_validation.hasParamParse;
-const isLiftableUnion = qp_validation.isLiftableUnion;
-const getRequiredKeyCount = qp_validation.getRequiredKeyCount;
+const containers_mod = @import("../utils/containers.zig");
+const hasParamParse = containers_mod.hasParamParse;
+const getRequiredKeyCount = containers_mod.getRequiredKeyCount;
+
+const unions_mod = @import("../utils/unions.zig");
+const isLiftableUnion = unions_mod.isLiftableUnion;
 
 const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
