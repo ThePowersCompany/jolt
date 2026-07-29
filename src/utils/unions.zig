@@ -334,11 +334,9 @@ const External = union(enum) {
 };
 
 test "external: struct payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "point": { "x": 1, "y": 2 }
         \\}
@@ -351,11 +349,9 @@ test "external: struct payload" {
 }
 
 test "external: string payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "text": "hi"
         \\}
@@ -367,11 +363,9 @@ test "external: string payload" {
 }
 
 test "external: void payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "ping": {}
         \\}
@@ -382,13 +376,11 @@ test "external: void payload" {
 }
 
 test "external: unknown variant errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             External,
-            arena.allocator(),
+            testing.allocator,
             \\{
             \\  "nope": 1
             \\}
@@ -413,11 +405,9 @@ const Internal = union(enum) {
 };
 
 test "internal: request variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Internal,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "type": "request",
         \\  "id": "abc123",
@@ -432,11 +422,9 @@ test "internal: request variant" {
 }
 
 test "internal: response variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Internal,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "type": "response",
         \\  "id": "abc123",
@@ -450,11 +438,9 @@ test "internal: response variant" {
 }
 
 test "internal: void variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Internal,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "type": "ping"
         \\}
@@ -465,13 +451,11 @@ test "internal: void variant" {
 }
 
 test "internal: missing discriminator errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.MissingField,
         std.json.parseFromSliceLeaky(
             Internal,
-            arena.allocator(),
+            testing.allocator,
             \\{
             \\  "id": "abc123",
             \\  "method": "GET"
@@ -504,8 +488,6 @@ const Alert = struct {
 };
 
 test "adjacently: payload inferred from downtime" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const json =
         \\{
         \\  "id": 1,
@@ -513,7 +495,7 @@ test "adjacently: payload inferred from downtime" {
         \\  "payload": { "line": "A", "minutes": 5.0 }
         \\}
     ;
-    const alert = try std.json.parseFromSliceLeaky(Alert, arena.allocator(), json, .{});
+    const alert = try std.json.parseFromSliceLeaky(Alert, testing.allocator, json, .{});
     try testing.expectEqual(1, alert.id);
     try testing.expectEqual(AlertTopic.downtime, alert.topic);
     try testing.expect(alert.payload == .downtime);
@@ -522,8 +504,6 @@ test "adjacently: payload inferred from downtime" {
 }
 
 test "adjacently: payload inferred from lost_production" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const json =
         \\{
         \\  "id": 2,
@@ -531,7 +511,7 @@ test "adjacently: payload inferred from lost_production" {
         \\  "payload": { "line": "B", "units": 12.5 }
         \\}
     ;
-    const alert = try std.json.parseFromSliceLeaky(Alert, arena.allocator(), json, .{});
+    const alert = try std.json.parseFromSliceLeaky(Alert, testing.allocator, json, .{});
     try testing.expectEqual(2, alert.id);
     try testing.expect(alert.payload == .lost_production);
     try testing.expectEqualStrings("B", alert.payload.lost_production.line);
@@ -553,19 +533,15 @@ const Untagged = union(enum) {
 };
 
 test "untagged: scalar variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const v = try std.json.parseFromSliceLeaky(Untagged, arena.allocator(), "7", .{});
+    const v = try std.json.parseFromSliceLeaky(Untagged, testing.allocator, "7", .{});
     try testing.expect(v == .number);
     try testing.expectEqual(7, v.number);
 }
 
 test "untagged: pair struct variant inferred by shape" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Untagged,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "a": 1,
         \\  "b": 2
@@ -578,11 +554,9 @@ test "untagged: pair struct variant inferred by shape" {
 }
 
 test "untagged: named struct variant inferred by shape" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Untagged,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "name": "zig"
         \\}
@@ -594,13 +568,11 @@ test "untagged: named struct variant inferred by shape" {
 }
 
 test "untagged: no matching variant errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             Untagged,
-            arena.allocator(),
+            testing.allocator,
             \\{
             \\  "x": 1,
             \\  "y": 2,
@@ -628,13 +600,11 @@ const OptionalFirst = union(enum) {
 };
 
 test "untagged: optional-only first variant does not swallow a later variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     // { "x": 1, "y": 2 } has unknown keys for `maybe`,
     // so strict matching rejects it and inference falls through to `coords`.
     const v = try std.json.parseFromSliceLeaky(
         OptionalFirst,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "x": 1,
         \\  "y": 2
@@ -648,11 +618,9 @@ test "untagged: optional-only first variant does not swallow a later variant" {
 }
 
 test "untagged: optional-only first variant still matches its own shape" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         OptionalFirst,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "note": "hello"
         \\}
@@ -678,11 +646,9 @@ const VoidFallback = union(enum) {
 };
 
 test "untagged: empty object selects the void fallback variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         VoidFallback,
-        arena.allocator(),
+        testing.allocator,
         \\{}
     ,
         .{},
@@ -691,11 +657,9 @@ test "untagged: empty object selects the void fallback variant" {
 }
 
 test "untagged: present key selects the specific variant over the void fallback" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         VoidFallback,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "id": 7
         \\}
@@ -720,11 +684,9 @@ const IdOrAuto = union(enum) {
 };
 
 test "untagged: IdOrAuto - should not allocate memory for i32" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     const v = try std.json.parseFromSliceLeaky(
         IdOrAuto,
-        arena.allocator(),
+        testing.allocator,
         "123",
         .{},
     );
@@ -733,11 +695,9 @@ test "untagged: IdOrAuto - should not allocate memory for i32" {
 }
 
 test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     const v = try std.json.parseFromSliceLeaky(
         IdOrAuto,
-        arena.allocator(),
+        testing.allocator,
         "\"auto\"",
         .{},
     );
@@ -745,13 +705,11 @@ test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid number" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            arena.allocator(),
+            testing.allocator,
             "123456789000",
             .{},
         ),
@@ -759,13 +717,11 @@ test "untagged: IdOrAuto - should not allocate memory for invalid number" {
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid string" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            arena.allocator(),
+            testing.allocator,
             "\"abc\"",
             .{},
         ),
@@ -773,13 +729,11 @@ test "untagged: IdOrAuto - should not allocate memory for invalid string" {
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid type" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            arena.allocator(),
+            testing.allocator,
             "{}",
             .{},
         ),
@@ -801,11 +755,9 @@ const TestAction = union(enum) {
 };
 
 test "untagged: TestAction - should not allocate memory for 'replace" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     const v = try std.json.parseFromSliceLeaky(
         TestAction,
-        arena.allocator(),
+        testing.allocator,
         "\"replace\"",
         .{},
     );
@@ -813,13 +765,11 @@ test "untagged: TestAction - should not allocate memory for 'replace" {
 }
 
 test "untagged: TestAction - should not allocate memory for invalid string" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             TestAction,
-            arena.allocator(),
+            testing.allocator,
             "\"auto\"",
             .{},
         ),
@@ -827,13 +777,11 @@ test "untagged: TestAction - should not allocate memory for invalid string" {
 }
 
 test "untagged: TestAction - should fail for number" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    // defer arena.deinit(); // intentionally commented out
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             TestAction,
-            arena.allocator(),
+            testing.allocator,
             "123",
             .{},
         ),
@@ -874,11 +822,9 @@ const Outer = union(enum) {
 };
 
 test "nested: internal-tagged union nested inside an inferred union honors its repr" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         Outer,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "inner": { "kind": "b", "y": 9 }
         \\}
