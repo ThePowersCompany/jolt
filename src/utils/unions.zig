@@ -706,6 +706,140 @@ test "untagged: present key selects the specific variant over the void fallback"
     try testing.expectEqual(7, v.identified.id);
 }
 
+/// Simple, mutually-exclusive, scalar type
+/// This type should be parsable without allocation.
+const IdOrAuto = union(enum) {
+    id: i32,
+    auto,
+
+    pub const _repr: UnionRepr = .untagged;
+
+    pub fn jsonParse(alloc: Allocator, source: anytype, opts: std.json.ParseOptions) !@This() {
+        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+    }
+};
+
+test "untagged: IdOrAuto - should not allocate memory for i32" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    const v = try std.json.parseFromSliceLeaky(
+        IdOrAuto,
+        arena.allocator(),
+        "123",
+        .{},
+    );
+    try testing.expect(v == .id);
+    try testing.expectEqual(123, v.id);
+}
+
+test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    const v = try std.json.parseFromSliceLeaky(
+        IdOrAuto,
+        arena.allocator(),
+        "\"auto\"",
+        .{},
+    );
+    try testing.expect(v == .auto);
+}
+
+test "untagged: IdOrAuto - should not allocate memory for invalid number" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            IdOrAuto,
+            arena.allocator(),
+            "123456789000",
+            .{},
+        ),
+    );
+}
+
+test "untagged: IdOrAuto - should not allocate memory for invalid string" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            IdOrAuto,
+            arena.allocator(),
+            "\"abc\"",
+            .{},
+        ),
+    );
+}
+
+test "untagged: IdOrAuto - should not allocate memory for invalid type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            IdOrAuto,
+            arena.allocator(),
+            "{}",
+            .{},
+        ),
+    );
+}
+
+/// Simple union-enum type (equivalent to normal enum)
+/// This type should be parsable without allocation.
+const TestAction = union(enum) {
+    find,
+    replace,
+    trim,
+
+    pub const _repr: UnionRepr = .untagged;
+
+    pub fn jsonParse(alloc: Allocator, source: anytype, opts: std.json.ParseOptions) !@This() {
+        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+    }
+};
+
+test "untagged: TestAction - should not allocate memory for 'replace" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    const v = try std.json.parseFromSliceLeaky(
+        TestAction,
+        arena.allocator(),
+        "\"replace\"",
+        .{},
+    );
+    try testing.expect(v == .replace);
+}
+
+test "untagged: TestAction - should not allocate memory for invalid string" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            TestAction,
+            arena.allocator(),
+            "\"auto\"",
+            .{},
+        ),
+    );
+}
+
+test "untagged: TestAction - should fail for number" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    // defer arena.deinit(); // intentionally commented out
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            TestAction,
+            arena.allocator(),
+            "123",
+            .{},
+        ),
+    );
+}
+
 // Nested custom union: `Inner` uses an internal-tagged repr and is a field of another union's payload struct.
 // When the outer union is reached through this helper,
 // std.json parses `Inner` from a Value by calling `jsonParseFromValue`.
