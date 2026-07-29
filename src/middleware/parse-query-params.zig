@@ -22,52 +22,17 @@ const containsString = @import("../utils/array_utils.zig").containsString;
 
 const validation = @import("./query_params/validation.zig");
 const assertNoQueryKeyCollisions = validation.assertNoQueryKeyCollisions;
-const hasParamParse = validation.hasParamParse;
-const getRequiredKeyCount = validation.getRequiredKeyCount;
-const containerKind = validation.containerKind;
-const findFallbackVariant = validation.findFallbackVariant;
-const requiredKeysPresent = validation.requiredKeysPresent;
-const anyStructLeafKeyPresent = validation.anyStructLeafKeyPresent;
+
+const containers_module = @import("../utils/containers.zig");
+const containerKind = containers_module.containerKind;
+const hasParamParse = containers_module.hasParamParse;
+const isNotRequired = containers_module.isNotRequired;
+const getRequiredKeyCount = containers_module.getRequiredKeyCount;
+
+const unions_module = @import("../utils/unions.zig");
+const orderedFields = unions_module.orderedFields;
 
 const query_params = "query_params";
-
-/// The fields of union `T`, ordered most specific first:
-/// a field requiring more keys comes before one requiring fewer,
-/// so the all-optional fallback (zero required keys) is always tried last.
-/// The order is fixed at compile time and independent of the request,
-/// so callers just walk it and build the first variant whose keys are present.
-///
-/// The sort is stable, so two fields requiring the same number of keys keep their declaration order.
-/// Such a pair can only both match when the request mixes keys from both,
-/// which is rejected later as unexpected query params,
-/// so their relative order does not change the outcome of a valid request.
-fn orderedFields(comptime T: type) [@typeInfo(T).@"union".fields.len]Type.UnionField {
-    comptime {
-        const Entry = struct {
-            field: *const Type.UnionField,
-            required_keys: usize,
-
-            fn moreSpecific(_: void, a: @This(), b: @This()) bool {
-                return a.required_keys > b.required_keys;
-            }
-        };
-
-        const fields = @typeInfo(T).@"union".fields;
-        var entries: [fields.len]Entry = undefined;
-        for (fields, 0..) |f, i| {
-            entries[i] = .{
-                .field = &f,
-                .required_keys = getRequiredKeyCount(f.type),
-            };
-        }
-
-        std.sort.insertion(Entry, &entries, {}, Entry.moreSpecific);
-
-        var sorted: [fields.len]Type.UnionField = undefined;
-        for (entries, 0..) |e, i| sorted[i] = e.field.*;
-        return sorted;
-    }
-}
 
 /// Specificity score of `variant` given the present `keys`,
 /// or null if it does not match.
@@ -106,6 +71,32 @@ pub fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []cons
     if (!containsString(keys, variant.name)) return null;
 
     return 1;
+}
+
+/// Returns if every required leaf key of struct `T` is in `present_keys`.
+pub fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime isNotRequired(field)) continue;
+
+        if (comptime @typeInfo(field.type) == .@"struct" and containerKind(field.type) == .composite) {
+            if (!requiredKeysPresent(field.type, present_keys)) return false;
+        } else if (!containsString(present_keys, field.name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Returns if any leaf key of struct `T` is in `present_keys`.
+pub fn anyStructLeafKeyPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime @typeInfo(field.type) == .@"struct" and containerKind(field.type) == .composite) {
+            if (anyStructLeafKeyPresent(field.type, present_keys)) return true;
+        } else if (containsString(present_keys, field.name)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 pub fn ParseQueryResult(comptime ReturnType: type) type {
@@ -508,7 +499,7 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
 
     // Attempt variants most specific first; the all-optional fallback is ordered last.
     // A specific variant is tried when its keys are present.
-    inline for (comptime orderedFields(T)) |f| {
+    inline for (comptime orderedFields(T, .{ .allow_void_fields = false })) |f| {
         const tag = @field(T, f.name);
         const matches = if (fallback == tag)
             first_failure == null
@@ -532,6 +523,26 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
     }
     ctx.fail("No matching query parameters were provided");
     return null;
+}
+
+/// Field index of union `T`'s all-optional fallback variant (zero required keys),
+/// or null if it has none.
+/// At most one may exist (enforced here at compile time).
+fn findFallbackVariant(comptime T: type) ?std.meta.Tag(T) {
+    comptime {
+        var found: ?std.meta.Tag(T) = null;
+        for (@typeInfo(T).@"union".fields) |f| {
+            if (getRequiredKeyCount(f.type) == 0) {
+                if (found != null) {
+                    @compileError("Union " ++ @typeName(T) ++
+                        " has more than one all-optional variant;" ++
+                        " at most one may act as the fallback.");
+                }
+                found = @field(T, f.name);
+            }
+        }
+        return found;
+    }
 }
 
 /// Records a 400 if there are any unexpected query params.
@@ -717,7 +728,7 @@ const CustomParam = struct {
 
 test "orderedVariants: most specific first, all-optional fallback last" {
     // detailed (2 keys) > basic (1 key) > all (0 keys, the fallback).
-    const fields = orderedFields(RangeUnion);
+    const fields = orderedFields(RangeUnion, .{ .allow_void_fields = false });
     try std.testing.expectEqualStrings("detailed", fields[0].name);
     try std.testing.expectEqualStrings("basic", fields[1].name);
     try std.testing.expectEqualStrings("all", fields[2].name);
@@ -735,7 +746,7 @@ test "orderedVariants: orders by required key count, not declaration order" {
         },
     };
 
-    const fields = orderedFields(U);
+    const fields = orderedFields(U, .{ .allow_void_fields = false });
     try std.testing.expectEqualStrings("nested", fields[0].name);
     try std.testing.expectEqualStrings("other", fields[1].name);
 }

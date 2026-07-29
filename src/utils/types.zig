@@ -9,19 +9,6 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
-/// Various ways to represent tagged unions in JSON.
-/// Reference (Rust): https://serde.rs/enum-representations.html
-pub const UnionRepr = union(enum) {
-    external,
-    internal: struct {
-        discriminator: []const u8,
-    },
-    adjacently: struct {
-        discriminator: []const u8,
-    },
-    untagged,
-};
-
 pub fn Unwrap(T: type) type {
     if (isOptional(T)) return Unwrap(T.childType());
     if (@typeInfo(T) == .optional) return Unwrap(@typeInfo(T).optional.child);
@@ -107,7 +94,7 @@ pub fn Optional(comptime T: type) type {
             allocator: std.mem.Allocator,
             source: json.Value,
             options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(allocator))!Self {
+        ) json.ParseFromValueError!Self {
             const info = @typeInfo(T);
             if (info == .optional) {
                 return .{ .value = try json.parseFromValueLeaky(T, allocator, source, options) };
@@ -425,8 +412,8 @@ pub fn JsonArray(comptime T: type) type {
             allocator: std.mem.Allocator,
             source: json.Value,
             options: json.ParseOptions,
-        ) json.ParseError(@TypeOf(allocator))!Self {
-            const slice: []T = try json.parseFromValueLeaky(T, allocator, source, options);
+        ) json.ParseFromValueError!Self {
+            const slice: []T = try json.parseFromValueLeaky([]T, allocator, source, options);
             return .{ .list = .fromOwnedSlice(slice) };
         }
 
