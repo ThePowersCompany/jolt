@@ -32,10 +32,6 @@ const getRequiredKeyCount = containers_module.getRequiredKeyCount;
 const unions_module = @import("../utils/unions.zig");
 const orderedFields = unions_module.orderedFields;
 
-const structs_module = @import("../utils/structs.zig");
-const requiredKeysPresent = structs_module.requiredKeysPresent;
-const anyStructLeafKeyPresent = structs_module.anyStructLeafKeyPresent;
-
 const query_params = "query_params";
 
 /// Specificity score of `variant` given the present `keys`,
@@ -75,6 +71,32 @@ pub fn variantMatchScore(comptime variant: Type.UnionField, keys: []const []cons
     if (!containsString(keys, variant.name)) return null;
 
     return 1;
+}
+
+/// Returns if every required leaf key of struct `T` is in `present_keys`.
+pub fn requiredKeysPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime isNotRequired(field)) continue;
+
+        if (comptime @typeInfo(field.type) == .@"struct" and containerKind(field.type) == .composite) {
+            if (!requiredKeysPresent(field.type, present_keys)) return false;
+        } else if (!containsString(present_keys, field.name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Returns if any leaf key of struct `T` is in `present_keys`.
+pub fn anyStructLeafKeyPresent(comptime T: type, present_keys: []const []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime @typeInfo(field.type) == .@"struct" and containerKind(field.type) == .composite) {
+            if (anyStructLeafKeyPresent(field.type, present_keys)) return true;
+        } else if (containsString(present_keys, field.name)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 pub fn ParseQueryResult(comptime ReturnType: type) type {

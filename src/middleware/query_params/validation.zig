@@ -8,10 +8,7 @@ const isOptional = types_module.isOptional;
 const Unwrap = types_module.Unwrap;
 
 const containers_module = @import("../../utils/containers.zig");
-const containerKind = containers_module.containerKind;
 const hasParamParse = containers_module.hasParamParse;
-const isNotRequired = containers_module.isNotRequired;
-const getRequiredKeyCount = containers_module.getRequiredKeyCount;
 
 const unions_module = @import("../../utils/unions.zig");
 const hasTaggedRepr = unions_module.hasTaggedRepr;
