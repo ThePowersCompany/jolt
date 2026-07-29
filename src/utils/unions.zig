@@ -648,7 +648,7 @@ const IdOrAuto = union(enum) {
 test "untagged: IdOrAuto - should not allocate memory for i32" {
     const v = try std.json.parseFromSliceLeaky(
         IdOrAuto,
-        testing.allocator,
+        @import("../utils/testing.zig").no_alloc,
         "123",
         .{},
     );
@@ -659,7 +659,7 @@ test "untagged: IdOrAuto - should not allocate memory for i32" {
 test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
     const v = try std.json.parseFromSliceLeaky(
         IdOrAuto,
-        testing.allocator,
+        @import("../utils/testing.zig").no_alloc,
         "\"auto\"",
         .{},
     );
@@ -671,7 +671,7 @@ test "untagged: IdOrAuto - should not allocate memory for invalid number" {
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            testing.allocator,
+            @import("../utils/testing.zig").no_alloc,
             "123456789000",
             .{},
         ),
@@ -683,7 +683,7 @@ test "untagged: IdOrAuto - should not allocate memory for invalid string" {
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            testing.allocator,
+            @import("../utils/testing.zig").no_alloc,
             "\"abc\"",
             .{},
         ),
@@ -695,7 +695,7 @@ test "untagged: IdOrAuto - should not allocate memory for invalid type" {
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             IdOrAuto,
-            testing.allocator,
+            @import("../utils/testing.zig").no_alloc,
             "{}",
             .{},
         ),
@@ -719,7 +719,7 @@ const TestAction = union(enum) {
 test "untagged: TestAction - should not allocate memory for 'replace" {
     const v = try std.json.parseFromSliceLeaky(
         TestAction,
-        testing.allocator,
+        @import("../utils/testing.zig").no_alloc,
         "\"replace\"",
         .{},
     );
@@ -731,7 +731,7 @@ test "untagged: TestAction - should not allocate memory for invalid string" {
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             TestAction,
-            testing.allocator,
+            @import("../utils/testing.zig").no_alloc,
             "\"auto\"",
             .{},
         ),
@@ -743,7 +743,7 @@ test "untagged: TestAction - should fail for number" {
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             TestAction,
-            testing.allocator,
+            @import("../utils/testing.zig").no_alloc,
             "123",
             .{},
         ),
