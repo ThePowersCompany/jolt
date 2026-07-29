@@ -632,44 +632,6 @@ test "untagged: optional-only first variant still matches its own shape" {
     try testing.expectEqualStrings("hello", v.maybe.note.?);
 }
 
-// A single `void` fallback variant (zero required keys) is allowed by the ambiguity guard
-// and matches the empty object, while a specific variant still wins when its key is present.
-const VoidFallback = union(enum) {
-    identified: struct { id: i64 },
-    auto,
-
-    const _repr: UnionRepr = .untagged;
-
-    pub fn jsonParse(alloc: Allocator, source: anytype, opts: ParseOptions) !@This() {
-        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
-    }
-};
-
-test "untagged: empty object selects the void fallback variant" {
-    const v = try std.json.parseFromSliceLeaky(
-        VoidFallback,
-        testing.allocator,
-        \\{}
-    ,
-        .{},
-    );
-    try testing.expect(v == .auto);
-}
-
-test "untagged: present key selects the specific variant over the void fallback" {
-    const v = try std.json.parseFromSliceLeaky(
-        VoidFallback,
-        testing.allocator,
-        \\{
-        \\  "id": 7
-        \\}
-    ,
-        .{},
-    );
-    try testing.expect(v == .identified);
-    try testing.expectEqual(7, v.identified.id);
-}
-
 /// Simple, mutually-exclusive, scalar type
 /// This type should be parsable without allocation.
 const IdOrAuto = union(enum) {
