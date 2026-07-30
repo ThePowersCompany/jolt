@@ -6,6 +6,7 @@ const ObjectMap = std.json.ObjectMap;
 const Type = std.builtin.Type;
 
 const types_mod = @import("../utils/types.zig");
+const Unwrap = types_mod.Unwrap;
 const Optional = types_mod.Optional;
 const isOptional = types_mod.isOptional;
 
@@ -50,17 +51,24 @@ pub fn jsonParseUnion(
 ) std.json.ParseError(@TypeOf(source.*))!T {
     comptime validateUnionRepr(T, repr);
 
-    // Simple inferred unions (scalar/void variants) are resolved by the first token's JSON type,
-    // so it does not need to buffer into a Value and does not allocate.
     switch (repr) {
-        .untagged, .adjacently => if (comptime isSimpleInferableUnion(T)) {
-            return parseInferredFromSource(T, allocator, source, options);
+        .untagged, .adjacently => {
+            // Simple inferred unions (scalar/void variants) are resolved by the first token's JSON type,
+            // so it does not need to buffer into a Value.
+            if (comptime isSimpleInferableUnion(T)) |M| {
+                return parseInferredFromSource(T, M, allocator, source, options);
+            }
         },
-        .external, .internal => {},
+        .external => {
+            // External representations explicitly encode the variant name,
+            // so we don't need to buffer into a Value.
+            return parseExternal(T, allocator, source, options);
+        },
+        .internal => {},
     }
 
     // Buffer the token source into a Value, then share the from-value dispatch below.
-    const value = try Value.jsonParse(allocator, source, options);
+    const value: Value = try Value.jsonParse(allocator, source, options);
     return dispatchByRepr(T, allocator, value, options, repr);
 }
 
@@ -104,11 +112,11 @@ fn dispatchByRepr(
     comptime repr: UnionRepr,
 ) std.json.ParseFromValueError!T {
     return switch (repr) {
-        .external => parseExternal(T, allocator, value, options),
         .internal => |i| parseInternal(T, allocator, value, options, i.discriminator),
         // The adjacent discriminator is consumed by the parent object,
         // so from here it is indistinguishable from untagged.
         .adjacently, .untagged => parseByInference(T, allocator, value, options),
+        .external => @compileError("Invalid for Value"),
     };
 }
 
@@ -116,38 +124,47 @@ fn dispatchByRepr(
 fn parseExternal(
     comptime T: type,
     allocator: Allocator,
-    value: Value,
+    source: anytype,
     options: ParseOptions,
-) std.json.ParseFromValueError!T {
-    const info = @typeInfo(T).@"union";
-    if (value != .object) return error.UnexpectedToken;
-    if (value.object.count() != 1) return error.UnexpectedToken;
+) std.json.ParseError(@TypeOf(source.*))!T {
+    if (try source.peekNextTokenType() != .object_begin) return error.UnexpectedToken;
+    _ = try source.next();
 
-    var it = value.object.iterator();
-    const kv = it.next().?;
-    const name = kv.key_ptr.*;
+    const output: T = output: {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
 
-    inline for (info.fields) |field| {
-        if (std.mem.eql(u8, field.name, name)) {
-            const payload = try parsePayload(field.type, allocator, kv.value_ptr.*, options);
-            return @unionInit(T, field.name, payload);
+        const max_len = options.max_value_len orelse std.json.default_max_value_len;
+        const token: std.json.Token = try source.nextAllocMax(allocator, .alloc_if_needed, max_len);
+        defer if (token == .allocated_string) allocator.free(token.allocated_string);
+
+        const field_name = switch (token) {
+            inline .string, .allocated_string => |s| s,
+            else => return error.UnknownField,
+        };
+
+        inline for (@typeInfo(T).@"union".fields) |f| {
+            if (std.mem.eql(u8, f.name, field_name)) {
+                if (comptime f.type == void) {
+                    // `void` in external representation is an empty object
+                    if (try source.peekNextTokenType() != .object_begin) return error.UnexpectedToken;
+                    _ = try source.next();
+                    if (try source.peekNextTokenType() != .object_end) return error.UnexpectedToken;
+                    _ = try source.next();
+
+                    break :output @unionInit(T, f.name, {});
+                }
+                const payload = try std.json.innerParse(f.type, allocator, source, options);
+                break :output @unionInit(T, f.name, payload);
+            }
         }
-    }
-    return error.UnknownField;
-}
+        return error.UnknownField;
+    };
 
-/// Parse a single variant payload
-fn parsePayload(
-    comptime P: type,
-    allocator: Allocator,
-    value: Value,
-    options: ParseOptions,
-) std.json.ParseFromValueError!P {
-    if (P == void) {
-        if (value == .object and value.object.count() == 0) return {};
-        return error.UnexpectedToken;
-    }
-    return std.json.innerParseFromValue(P, allocator, value, options);
+    // Object should only have one variant and should immediately end
+    if (try source.peekNextTokenType() != .object_end) return error.UnexpectedToken;
+    _ = try source.next();
+
+    return output;
 }
 
 /// `{ "<discriminator>": "Variant", ...payload fields }`
@@ -159,51 +176,34 @@ fn parseInternal(
     discriminator: []const u8,
 ) std.json.ParseFromValueError!T {
     if (value != .object) return error.UnexpectedToken;
+    var obj = value.object;
 
-    const tag_value = value.object.get(discriminator) orelse return error.MissingField;
-    const name = switch (tag_value) {
+    // Remove the discriminator key from the object before parsing the remainder of the payload
+    const kv = obj.fetchSwapRemove(discriminator) orelse return error.MissingField;
+    const name = switch (kv.value) {
         .string => |s| s,
         else => return error.UnexpectedToken,
     };
 
     inline for (@typeInfo(T).@"union".fields) |field| {
         if (std.mem.eql(u8, field.name, name)) {
-            if (field.type == void) {
+            if (comptime field.type == void) {
                 // Void variant: the object should hold nothing but the discriminator.
-                if (!options.ignore_unknown_fields and value.object.count() != 1) {
+                if (!options.ignore_unknown_fields and obj.count() > 0) {
                     return error.UnknownField;
                 }
                 return @unionInit(T, field.name, {});
             }
-            // Recreate the object without the discriminator key,
-            // then parse the remainder as the variant's payload struct.
-            const obj_map = try cloneObjectExcluding(allocator, value.object, discriminator);
-            const val = try std.json.innerParseFromValue(
+            const parsed = try std.json.innerParseFromValue(
                 field.type,
                 allocator,
-                Value{ .object = obj_map },
+                .{ .object = obj },
                 options,
             );
-            return @unionInit(T, field.name, val);
+            return @unionInit(T, field.name, parsed);
         }
     }
     return error.UnknownField;
-}
-
-/// Shallow copy of `obj` with `exclude` removed.
-/// Keys/values are shared with the original (both live in the same arena during a normal parse).
-fn cloneObjectExcluding(
-    allocator: Allocator,
-    obj: ObjectMap,
-    exclude: []const u8,
-) Allocator.Error!ObjectMap {
-    var out = ObjectMap.init(allocator);
-    var it = obj.iterator();
-    while (it.next()) |kv| {
-        if (std.mem.eql(u8, kv.key_ptr.*, exclude)) continue;
-        try out.put(kv.key_ptr.*, kv.value_ptr.*);
-    }
-    return out;
 }
 
 pub const OrderedFieldsOptions = struct {
@@ -309,26 +309,36 @@ fn parseByInference(
     return error.UnknownField;
 }
 
+const JsonValueType = std.meta.Tag(std.json.Value);
+
 /// A union is "simple" when every variant is either `void` or a single-token scalar (numeric or bool).
 /// Such unions can be inferred straight from the token stream.
 /// The first token's JSON type uniquely selects a variant, so no Value buffering or retry is needed.
 ///
 /// Because a consumed token cannot be replayed,
 /// each JSON scalar type must map to at most one variant (at most one numeric and one bool variant).
-fn isSimpleInferableUnion(comptime T: type) bool {
+fn isSimpleInferableUnion(comptime T: type) ?std.EnumMap(JsonValueType, []const u8) {
     comptime {
-        var numeric_count: usize = 0;
-        var bool_count: usize = 0;
+        var map: std.EnumMap(JsonValueType, []const u8) = .init(.{});
         for (@typeInfo(T).@"union".fields) |f| {
             if (f.type == void) continue;
-            switch (@typeInfo(f.type)) {
-                .int, .comptime_int, .float, .comptime_float => numeric_count += 1,
-                .bool => bool_count += 1,
-                // Strings, structs, optionals, nested unions, etc. need shape-based inference.
-                else => return false,
+            const info = @typeInfo(f.type);
+            if (info == .optional) {
+                if (map.fetchPut(.null, f.name) != null) return null;
             }
+            const value_type: JsonValueType = switch (@typeInfo(Unwrap(f.type))) {
+                .bool => .bool,
+                .int, .comptime_int, .float, .comptime_float => .float, // number
+                .pointer => |p| if (p.child == u8) .string else .array,
+                .@"struct" => if (std.meta.hasFn(f.type, "jsonParse") or std.meta.hasFn(f.type, "jsonParseFromValue"))
+                    return null
+                else
+                    .object,
+                else => return null,
+            };
+            if (map.fetchPut(value_type, f.name) != null) return null;
         }
-        return numeric_count <= 1 and bool_count <= 1;
+        return map;
     }
 }
 
@@ -337,70 +347,47 @@ fn isSimpleInferableUnion(comptime T: type) bool {
 /// and a numeric/bool variant is matched by the corresponding JSON scalar token.
 fn parseInferredFromSource(
     comptime T: type,
+    comptime map: std.EnumMap(JsonValueType, []const u8),
     allocator: Allocator,
     source: anytype,
     options: ParseOptions,
 ) std.json.ParseError(@TypeOf(source.*))!T {
     const fields = @typeInfo(T).@"union".fields;
-    switch (try source.peekNextTokenType()) {
-        .number => {
-            inline for (fields) |f| {
-                if (comptime isNumeric(f.type)) {
-                    const payload = std.json.innerParse(f.type, allocator, source, options) catch
-                        return error.UnknownField;
-                    return @unionInit(T, f.name, payload);
-                }
-            }
-            return error.UnknownField;
-        },
-        .true, .false => {
-            inline for (fields) |f| {
-                if (comptime f.type == bool) {
-                    const payload = std.json.innerParse(f.type, allocator, source, options) catch
-                        return error.UnknownField;
-                    return @unionInit(T, f.name, payload);
-                }
-            }
-            return error.UnknownField;
-        },
+    return switch (try source.peekNextTokenType()) {
+        .null => parseInit(T, map, .null, allocator, source, options),
+        .number => parseInit(T, map, .float, allocator, source, options),
+        .true, .false => parseInit(T, map, .bool, allocator, source, options),
+        .object_begin => parseInit(T, map, .object, allocator, source, options),
+        .array_begin => parseInit(T, map, .array, allocator, source, options),
         .string => {
-            // A string can only match a void variant by name
-            if (comptime !hasVoidField(T)) return error.UnknownField;
-
-            const max_len = options.max_value_len orelse std.json.default_max_value_len;
-            const token: std.json.Token = try source.nextAllocMax(allocator, .alloc_if_needed, max_len);
-            defer if (token == .allocated_string) allocator.free(token.allocated_string);
-
-            const slice = switch (token) {
-                inline .string, .allocated_string => |s| s,
-                else => return error.UnknownField,
-            };
-
+            // Strings can match more than one union fields if 'void' types are used
+            // These union fields that are void are treated as string literals
+            const str: []const u8 = try std.json.innerParse([]const u8, allocator, source, options);
             inline for (fields) |f| {
                 if (comptime f.type == void) {
-                    if (std.mem.eql(u8, slice, f.name)) return @unionInit(T, f.name, {});
+                    if (std.mem.eql(u8, str, f.name)) return @unionInit(T, f.name, {});
                 }
             }
-            return error.UnknownField;
+            const field_name = (comptime map.get(.string)) orelse return error.UnknownField;
+            return @unionInit(T, field_name, str);
         },
-        else => return error.UnknownField,
-    }
-}
-
-fn isNumeric(comptime P: type) bool {
-    return switch (@typeInfo(P)) {
-        .int, .comptime_int, .float, .comptime_float => true,
-        else => false,
+        else => return error.SyntaxError,
     };
 }
 
-fn hasVoidField(comptime T: type) bool {
-    comptime {
-        for (@typeInfo(T).@"union".fields) |f| {
-            if (f.type == void) return true;
-        }
-        return false;
+fn parseInit(
+    comptime T: type,
+    comptime map: std.EnumMap(JsonValueType, []const u8),
+    comptime value_type: JsonValueType,
+    allocator: Allocator,
+    source: anytype,
+    options: ParseOptions,
+) !T {
+    if (comptime map.get(value_type)) |field_name| {
+        const payload = try std.json.innerParse(@FieldType(T, field_name), allocator, source, options);
+        return @unionInit(T, field_name, payload);
     }
+    return error.UnknownField;
 }
 
 /// Whether a union carries a `_repr` declaration,
@@ -442,11 +429,9 @@ const External = union(enum) {
 };
 
 test "external: struct payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "point": { "x": 1, "y": 2 }
         \\}
@@ -459,11 +444,9 @@ test "external: struct payload" {
 }
 
 test "external: string payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "text": "hi"
         \\}
@@ -475,11 +458,9 @@ test "external: string payload" {
 }
 
 test "external: void payload" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         External,
-        arena.allocator(),
+        testing.allocator,
         \\{
         \\  "ping": {}
         \\}
@@ -490,13 +471,11 @@ test "external: void payload" {
 }
 
 test "external: unknown variant errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             External,
-            arena.allocator(),
+            testing.allocator,
             \\{
             \\  "nope": 1
             \\}
@@ -507,23 +486,19 @@ test "external: unknown variant errors" {
 }
 
 test "external: non-object input errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.UnexpectedToken,
-        std.json.parseFromSliceLeaky(External, arena.allocator(), "42", .{}),
+        std.json.parseFromSliceLeaky(External, testing.allocator, "42", .{}),
     );
 }
 
 test "external: object with multiple keys errors" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     // More than one key is ambiguous about which variant is meant, so it is rejected.
     try testing.expectError(
         error.UnexpectedToken,
-        std.json.parseFromSliceLeaky(
+        std.json.parseFromSlice(
             External,
-            arena.allocator(),
+            testing.allocator,
             \\{ "text": "hi", "ping": {} }
         ,
             .{},
@@ -881,7 +856,7 @@ test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
 
 test "untagged: IdOrAuto - should not allocate memory for invalid number" {
     try testing.expectError(
-        error.UnknownField,
+        error.Overflow,
         std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "123456789000", .{}),
     );
 }
@@ -937,8 +912,11 @@ test "untagged: TestAction - should fail for number" {
 // so this uses `isSimpleInferableUnion` and parses straight from the token stream without allocation.
 const Val = union(enum) {
     count: i64,
-    enabled: bool,
-    auto,
+    enabled: ?bool,
+    auto, // string literal
+    fallback: []const u8, // fallback string
+    obj: struct { x: i32, y: i32 }, // json obj
+    arr: []i32, // json arr
 
     pub const _repr: UnionRepr = .untagged;
 
@@ -953,15 +931,41 @@ test "untagged: Val - should not allocate for a number token" {
     try testing.expectEqual(42, v.count);
 }
 
+test "untagged: Val - should not allocate for a null token" {
+    const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "null", .{});
+    try testing.expect(v == .enabled);
+    try testing.expectEqual(null, v.enabled);
+}
+
 test "untagged: Val - should not allocate for a bool token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "true", .{});
     try testing.expect(v == .enabled);
     try testing.expectEqual(true, v.enabled);
 }
 
-test "untagged: Val - should not allocate for a string token" {
+test "untagged: Val - should not allocate for a 'auto' string token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "\"auto\"", .{});
     try testing.expect(v == .auto);
+}
+
+test "untagged: Val - should not allocate for a fallback string token" {
+    const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "\"fallback\"", .{});
+    try testing.expect(v == .fallback);
+    try testing.expectEqualStrings("fallback", v.fallback);
+}
+
+test "untagged: Val - obj token" {
+    const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "{ \"x\": 1, \"y\": 2 }", .{});
+    try testing.expect(v == .obj);
+    try testing.expectEqual(1, v.obj.x);
+    try testing.expectEqual(2, v.obj.y);
+}
+
+test "untagged: Val - arr token" {
+    const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "[1,2,3]", .{});
+    try testing.expect(v == .arr);
+    try testing.expectEqual(3, v.arr.len);
+    testing.allocator.free(v.arr);
 }
 
 // Nested custom union: `Inner` uses an internal-tagged repr and is a field of another union's payload struct.
@@ -1028,18 +1032,14 @@ const AutoOrPoint = union(enum) {
 };
 
 test "untagged: void variant matched by name string" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const v = try std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "\"auto\"", .{});
+    const v = try std.json.parseFromSliceLeaky(AutoOrPoint, no_alloc, "\"auto\"", .{});
     try testing.expect(v == .auto);
 }
 
 test "untagged: struct variant inferred by shape" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(
         AutoOrPoint,
-        arena.allocator(),
+        testing.allocator,
         \\{ "x": 1, "y": 2 }
     ,
         .{},
@@ -1050,19 +1050,15 @@ test "untagged: struct variant inferred by shape" {
 }
 
 test "untagged: empty object does not match the void variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
-        error.UnknownField,
-        std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "{}", .{}),
+        error.MissingField,
+        std.json.parseFromSliceLeaky(AutoOrPoint, testing.allocator, "{}", .{}),
     );
 }
 
 test "untagged: wrong string does not match the void variant" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "\"nope\"", .{}),
+        std.json.parseFromSliceLeaky(AutoOrPoint, no_alloc, "\"nope\"", .{}),
     );
 }

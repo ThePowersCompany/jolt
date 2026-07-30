@@ -499,7 +499,7 @@ fn parseCompositeUnion(comptime T: type, ctx: *ParseCtx) !?T {
 
     // Attempt variants most specific first; the all-optional fallback is ordered last.
     // A specific variant is tried when its keys are present.
-    inline for (comptime orderedFields(T, .{ .allow_void_fields = false })) |f| {
+    inline for (comptime orderedFields(T, .{})) |f| {
         const tag = @field(T, f.name);
         const matches = if (fallback == tag)
             first_failure == null
@@ -728,7 +728,7 @@ const CustomParam = struct {
 
 test "orderedVariants: most specific first, all-optional fallback last" {
     // detailed (2 keys) > basic (1 key) > all (0 keys, the fallback).
-    const fields = orderedFields(RangeUnion, .{ .allow_void_fields = false });
+    const fields = orderedFields(RangeUnion, .{});
     try std.testing.expectEqualStrings("detailed", fields[0].name);
     try std.testing.expectEqualStrings("basic", fields[1].name);
     try std.testing.expectEqualStrings("all", fields[2].name);
@@ -746,7 +746,7 @@ test "orderedVariants: orders by required key count, not declaration order" {
         },
     };
 
-    const fields = orderedFields(U, .{ .allow_void_fields = false });
+    const fields = orderedFields(U, .{});
     try std.testing.expectEqualStrings("nested", fields[0].name);
     try std.testing.expectEqualStrings("other", fields[1].name);
 }
