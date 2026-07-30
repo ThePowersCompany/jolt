@@ -506,6 +506,31 @@ test "external: unknown variant errors" {
     );
 }
 
+test "external: non-object input errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnexpectedToken,
+        std.json.parseFromSliceLeaky(External, arena.allocator(), "42", .{}),
+    );
+}
+
+test "external: object with multiple keys errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // More than one key is ambiguous about which variant is meant, so it is rejected.
+    try testing.expectError(
+        error.UnexpectedToken,
+        std.json.parseFromSliceLeaky(
+            External,
+            arena.allocator(),
+            \\{ "text": "hi", "ping": {} }
+        ,
+            .{},
+        ),
+    );
+}
+
 // Internal
 
 const Internal = union(enum) {
@@ -588,6 +613,64 @@ test "internal: missing discriminator errors" {
             .{},
         ),
     );
+}
+
+test "internal: unknown discriminator value errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            Internal,
+            arena.allocator(),
+            \\{ "type": "nope", "id": "x", "method": "GET" }
+        ,
+            .{},
+        ),
+    );
+}
+
+test "internal: non-string discriminator errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnexpectedToken,
+        std.json.parseFromSliceLeaky(
+            Internal,
+            arena.allocator(),
+            \\{ "type": 5 }
+        ,
+            .{},
+        ),
+    );
+}
+
+test "internal: void variant rejects extra fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(
+            Internal,
+            arena.allocator(),
+            \\{ "type": "ping", "extra": 1 }
+        ,
+            .{},
+        ),
+    );
+}
+
+test "internal: void variant tolerates extra fields when ignore_unknown_fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(
+        Internal,
+        arena.allocator(),
+        \\{ "type": "ping", "extra": 1 }
+    ,
+        .{ .ignore_unknown_fields = true },
+    );
+    try testing.expect(v == .ping);
 }
 
 // Adjacently
@@ -929,4 +1012,57 @@ test "nested: internal-tagged union nested inside an inferred union honors its r
     try testing.expect(v == .wrap);
     try testing.expect(v.wrap.inner == .b);
     try testing.expectEqual(9, v.wrap.inner.b.y);
+}
+
+// Untagged union mixing a void variant with a struct variant,
+// which exercises the void name matching inside `parseByInference`
+const AutoOrPoint = union(enum) {
+    point: struct { x: i64, y: i64 },
+    auto,
+
+    const _repr: UnionRepr = .untagged;
+
+    pub fn jsonParse(alloc: Allocator, source: anytype, opts: ParseOptions) !@This() {
+        return try jsonParseUnion(@This(), alloc, source, opts, _repr);
+    }
+};
+
+test "untagged: void variant matched by name string" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "\"auto\"", .{});
+    try testing.expect(v == .auto);
+}
+
+test "untagged: struct variant inferred by shape" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(
+        AutoOrPoint,
+        arena.allocator(),
+        \\{ "x": 1, "y": 2 }
+    ,
+        .{},
+    );
+    try testing.expect(v == .point);
+    try testing.expectEqual(1, v.point.x);
+    try testing.expectEqual(2, v.point.y);
+}
+
+test "untagged: empty object does not match the void variant" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "{}", .{}),
+    );
+}
+
+test "untagged: wrong string does not match the void variant" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnknownField,
+        std.json.parseFromSliceLeaky(AutoOrPoint, arena.allocator(), "\"nope\"", .{}),
+    );
 }
