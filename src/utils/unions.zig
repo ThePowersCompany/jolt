@@ -425,6 +425,7 @@ pub fn isLiftableUnion(comptime T: type) bool {
 }
 
 const testing = std.testing;
+const no_alloc = @import("../utils/testing.zig").no_alloc;
 
 // External
 
@@ -785,59 +786,34 @@ const IdOrAuto = union(enum) {
 };
 
 test "untagged: IdOrAuto - should not allocate memory for i32" {
-    const v = try std.json.parseFromSliceLeaky(
-        IdOrAuto,
-        @import("../utils/testing.zig").no_alloc,
-        "123",
-        .{},
-    );
+    const v = try std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "123", .{});
     try testing.expect(v == .id);
     try testing.expectEqual(123, v.id);
 }
 
 test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
-    const v = try std.json.parseFromSliceLeaky(
-        IdOrAuto,
-        @import("../utils/testing.zig").no_alloc,
-        "\"auto\"",
-        .{},
-    );
+    const v = try std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "\"auto\"", .{});
     try testing.expect(v == .auto);
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid number" {
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(
-            IdOrAuto,
-            @import("../utils/testing.zig").no_alloc,
-            "123456789000",
-            .{},
-        ),
+        std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "123456789000", .{}),
     );
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid string" {
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(
-            IdOrAuto,
-            @import("../utils/testing.zig").no_alloc,
-            "\"abc\"",
-            .{},
-        ),
+        std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "\"abc\"", .{}),
     );
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid type" {
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(
-            IdOrAuto,
-            @import("../utils/testing.zig").no_alloc,
-            "{}",
-            .{},
-        ),
+        std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "{}", .{}),
     );
 }
 
@@ -856,36 +832,21 @@ const TestAction = union(enum) {
 };
 
 test "untagged: TestAction - should not allocate memory for 'replace" {
-    const v = try std.json.parseFromSliceLeaky(
-        TestAction,
-        @import("../utils/testing.zig").no_alloc,
-        "\"replace\"",
-        .{},
-    );
+    const v = try std.json.parseFromSliceLeaky(TestAction, no_alloc, "\"replace\"", .{});
     try testing.expect(v == .replace);
 }
 
 test "untagged: TestAction - should not allocate memory for invalid string" {
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(
-            TestAction,
-            @import("../utils/testing.zig").no_alloc,
-            "\"auto\"",
-            .{},
-        ),
+        std.json.parseFromSliceLeaky(TestAction, no_alloc, "\"auto\"", .{}),
     );
 }
 
 test "untagged: TestAction - should fail for number" {
     try testing.expectError(
         error.UnknownField,
-        std.json.parseFromSliceLeaky(
-            TestAction,
-            @import("../utils/testing.zig").no_alloc,
-            "123",
-            .{},
-        ),
+        std.json.parseFromSliceLeaky(TestAction, no_alloc, "123", .{}),
     );
 }
 
@@ -904,19 +865,19 @@ const Val = union(enum) {
 };
 
 test "untagged: Val - should not allocate for a number token" {
-    const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "42", .{});
+    const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "42", .{});
     try testing.expect(v == .count);
     try testing.expectEqual(42, v.count);
 }
 
 test "untagged: Val - should not allocate for a bool token" {
-    const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "true", .{});
+    const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "true", .{});
     try testing.expect(v == .enabled);
     try testing.expectEqual(true, v.enabled);
 }
 
 test "untagged: Val - should not allocate for a string token" {
-    const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "\"auto\"", .{});
+    const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "\"auto\"", .{});
     try testing.expect(v == .auto);
 }
 
