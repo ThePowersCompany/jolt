@@ -49,6 +49,12 @@ pub const types = @import("./utils/types.zig");
 pub const uuid = @import("./utils/uuid.zig");
 pub const patch = @import("./utils/patch.zig");
 
+pub const Str = @import("./utils/str.zig").Str;
+pub const DateStr = Str(datetime.Date);
+pub const DateTimeStr = Str(datetime.DateTime);
+pub const TimeStr = Str(datetime.Time);
+pub const PlainDateTimeStr = Str(datetime.PlainDateTime);
+
 pub const generateTypesFile = @import("typegen.zig").generateTypesFile;
 
 pub const ServerOpts = struct {
