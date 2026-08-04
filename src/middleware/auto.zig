@@ -61,8 +61,6 @@ pub const ValidationError = enum {
     /// A union middleware field is untagged (union without an enum tag),
     /// so the active variant cannot be discriminated.
     untagged_union,
-    /// A union middleware field is optional (?union), which is not supported.
-    optional_union,
     /// A required (non-optional) dependency is only satisfied by an optional field,
     /// which may be null at runtime, so the requirement is not guaranteed.
     optional_provider,
@@ -93,9 +91,13 @@ fn validateContextChain(comptime Context: type, comptime parent_contexts: []cons
         for (orderedDependencies(Context, &.{})) |M| {
             if (hasFieldOfType(Context, M)) {
                 // Dependencies must be guaranteed from inside of Context.
-                // Each of its required dependencies must be satisfied by a non-optional provider.
-                for (dependencyFields(dependencies(M))) |f| {
-                    if (optionalProviderError(f.type, contexts_chain)) |d| break :blk d;
+                // If M itself is stored optionally and a required dependency is null at runtime,
+                // M is simply skipped, so an optional provider is fine.
+                // Only enforce non-optional providers for a non-optional M.
+                if (fieldProvidingIsOptional(Context, M) == false) {
+                    for (dependencyFields(dependencies(M))) |f| {
+                        if (optionalProviderError(f.type, contexts_chain)) |d| break :blk d;
+                    }
                 }
                 continue;
             }
@@ -116,7 +118,7 @@ fn validateContextChain(comptime Context: type, comptime parent_contexts: []cons
 
         // Validate union fields of `Context`
         for (unionFields(Context)) |uf| {
-            for (@typeInfo(uf.type).@"union".fields) |vf| {
+            for (@typeInfo(unwrapOptional(uf.type)).@"union".fields) |vf| {
                 const V = vf.type;
                 if (std.meta.hasFn(V, "middleware")) {
                     // Each direct dependency must be guaranteed by the current context or an enclosing one.
@@ -236,28 +238,35 @@ fn run(comptime Context: type, ctx: *MiddlewareContext(Context), parents: anytyp
         // `validate` has already proven every middleware is reachable, so no error handling is needed.
         if (comptime !hasFieldOfType(Context, M)) continue;
 
-        // Prepare middleware dependencies,
-        // resolving each against the current context first, then up the parent chain.
-        const deps = try buildDeps(M, .{&ctx.deps} ++ parents);
-        const result: MiddlewareResult(M) = try M.middleware(&.{
+        const ctx_field = comptime field(Context, M);
+        const is_optional = comptime @typeInfo(ctx_field.type) == .optional;
+
+        // Resolve dependencies against this context first, then the parent chain.
+        // A required dependency that resolves to null makes buildDeps fail.
+        // An optional field tolerates that as null and a guaranteed field propagates it.
+        const maybe_deps: ?dependencies(M) = if (comptime is_optional)
+            buildDeps(M, .{&ctx.deps} ++ parents) catch |err|
+                if (err == error.MiddlewareError) null else return err
+        else
+            try buildDeps(M, .{&ctx.deps} ++ parents);
+
+        // Run the middleware, reducing to the value to store.
+        // `null` means the middleware did not run (no deps) or failed (.err).
+        const res = if (maybe_deps) |deps| switch (try M.middleware(&.{
             .deps = deps,
             .alloc = ctx.alloc,
             .server = ctx.server,
             .req = ctx.req,
-        });
+        })) {
+            .ok => |v| v,
+            .err => null,
+        } else null;
 
-        // Store the middleware result back into the context.
-        const ctx_field = field(Context, M);
-        switch (@typeInfo(ctx_field.type)) {
-            .optional => @field(ctx.deps, ctx_field.name) = switch (result) {
-                .ok => |v| v,
-                .err => null,
-            },
-            else => switch (result) {
-                .ok => |v| @field(ctx.deps, ctx_field.name) = v,
-                .err => return false,
-            },
-        }
+        // An optional field keeps null, a guaranteed field must have a value.
+        @field(ctx.deps, ctx_field.name) = if (comptime is_optional)
+            res
+        else
+            res orelse return false;
     }
 
     inline for (unionFields(Context)) |uf| {
@@ -267,15 +276,17 @@ fn run(comptime Context: type, ctx: *MiddlewareContext(Context), parents: anytyp
 }
 
 /// Try each variant in declaration order and commit the first that succeeds.
-/// Returns false if none do.
 /// A middleware .err falls through to the next variant, a real Zig error aborts the union.
+/// If no variant succeeds, an optional union field is left null and treated as success,
+/// otherwise the union fails and we return false.
 fn runUnion(
     comptime Context: type,
     comptime uf: Type.StructField,
     ctx: *MiddlewareContext(Context),
     parents: anytype,
 ) !bool {
-    const U = uf.type;
+    const is_optional = comptime @typeInfo(uf.type) == .optional;
+    const U = comptime unwrapOptional(uf.type);
     inline for (@typeInfo(U).@"union".fields) |vf| {
         const V = vf.type;
         if (comptime std.meta.hasFn(V, "middleware")) {
@@ -307,6 +318,11 @@ fn runUnion(
                 return true;
             }
         }
+    }
+    // No variant succeeded - an optional union accepts this as null.
+    if (is_optional) {
+        @field(ctx.deps, uf.name) = null;
+        return true;
     }
     return false;
 }
@@ -426,21 +442,32 @@ fn unionFields(comptime Context: type) []const Type.StructField {
         var fields: []const Type.StructField = &.{};
         for (dependencyFields(Context)) |f| {
             if (isReservedField(f.name)) continue;
-            if (@typeInfo(f.type) == .@"union") fields = fields ++ .{f};
+            if (@typeInfo(unwrapOptional(f.type)) == .@"union") {
+                fields = fields ++ .{f};
+            }
         }
         return fields;
     }
 }
 
+/// Removes an optional wrapper (`?T`) if it exists, otherwise returns T.
+fn unwrapOptional(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+}
+
 /// Structural diagnostic for a single context field whose type is a union,
 /// or `null` if the field can be used.
+/// A union field must be tagged so its active variant can be discriminated.
+/// An optional union is allowed and means "run a variant if one succeeds, otherwise leave the field null".
 fn unionShapeError(comptime f: Type.StructField) ?Diagnostic {
-    return switch (@typeInfo(f.type)) {
-        .optional => |O| if (@typeInfo(O.child) == .@"union") .{
-            .err = .optional_union,
-            .message = "Optional union middleware fields are not supported, so make '" ++
-                f.name ++ "' a non-optional union(enum)",
-        } else null,
+    const inner = switch (@typeInfo(f.type)) {
+        .optional => |O| O.child,
+        else => f.type,
+    };
+    return switch (@typeInfo(inner)) {
         .@"union" => |u| if (u.tag_type == null) .{
             .err = .untagged_union,
             .message = "Union middleware field '" ++ f.name ++
@@ -685,16 +712,26 @@ test "validate - rejects an untagged union middleware field" {
     try std.testing.expectEqual(ValidationError.untagged_union, d.?.err);
 }
 
-test "validate - rejects an optional union middleware field" {
+test "validate - accepts an optional union middleware field" {
     const C = struct {
         auth: ?union(enum) {
             user: Auth,
             kiosk: Kiosk,
         },
     };
+    try std.testing.expectEqual(null, validate(C));
+}
+
+test "validate - rejects an optional untagged union middleware field" {
+    const C = struct {
+        auth: ?union {
+            user: Auth,
+            kiosk: Kiosk,
+        },
+    };
     const d = validate(C);
     try std.testing.expect(d != null);
-    try std.testing.expectEqual(ValidationError.optional_union, d.?.err);
+    try std.testing.expectEqual(ValidationError.untagged_union, d.?.err);
 }
 
 test "validate - accepts a properly tagged union middleware field" {
@@ -802,6 +839,14 @@ test "validate - accepts an optional dependency for an optional field" {
     try std.testing.expectEqual(null, validate(C));
 }
 
+test "validate - accepts an optional provider for an optional dependent middleware" {
+    const C = struct {
+        auth: ?Auth,
+        role: ?Role,
+    };
+    try std.testing.expectEqual(null, validate(C));
+}
+
 test "orderedDependencies and execute" {
     const M1 = struct {
         pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
@@ -902,14 +947,14 @@ test "union - falls through to a later variant" {
         .req = undefined,
     };
     try execute(C, &ctx);
-    try std.testing.expect(activeTag(ctx.deps.auth) == .second);
+    try std.testing.expectEqual(.second, activeTag(ctx.deps.auth));
 }
 
 test "union - struct variant resolves an in-variant dependency" {
     const Authentication = struct {
-        user: u32,
+        id: u32,
         pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
-            return .{ .ok = .{ .user = 7 } };
+            return .{ .ok = .{ .id = 7 } };
         }
     };
     const AtLeastRole = struct {
@@ -917,12 +962,12 @@ test "union - struct variant resolves an in-variant dependency" {
             auth: Authentication,
         };
         pub fn middleware(ctx: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
-            if (ctx.deps.auth.user == 7) return .{ .ok = .{} };
+            if (ctx.deps.auth.id == 7) return .{ .ok = .{} };
             return .{ .err = .{ .status = .forbidden, .msg = "role" } };
         }
     };
     const C = struct {
-        auth: union(enum) {
+        foo: union(enum) {
             user: struct {
                 auth: Authentication,
                 role: AtLeastRole,
@@ -938,8 +983,8 @@ test "union - struct variant resolves an in-variant dependency" {
         .req = undefined,
     };
     try execute(C, &ctx);
-    try std.testing.expect(activeTag(ctx.deps.auth) == .user);
-    try std.testing.expectEqual(7, ctx.deps.auth.user.auth.user);
+    try std.testing.expectEqual(.user, activeTag(ctx.deps.foo));
+    try std.testing.expectEqual(7, ctx.deps.foo.user.auth.id);
 }
 
 test "union - struct variant walks up to a guaranteed enclosing dependency" {
@@ -1183,5 +1228,92 @@ test "optional - a failed optional middleware is tolerated and dependents see nu
     // `execute` succeeds even though Flaky failed, because the field is optional.
     try execute(C, &ctx);
     try std.testing.expectEqual(null, ctx.deps.flaky);
-    try std.testing.expectEqual(true, ctx.deps.dep.saw_null);
+    try std.testing.expect(ctx.deps.dep.saw_null);
+}
+
+test "optional - an optional middleware whose required dependency is null is skipped" {
+    const FailAuth = struct {
+        v: u32,
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "no auth" } };
+        }
+    };
+    const NeedsAuth = struct {
+        const D = struct { auth: FailAuth };
+        pub fn middleware(_: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
+            return .{ .ok = .{} };
+        }
+    };
+    const C = struct {
+        auth: ?FailAuth,
+        role: ?NeedsAuth,
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+    try execute(C, &ctx);
+    try std.testing.expectEqual(null, ctx.deps.auth);
+    try std.testing.expectEqual(null, ctx.deps.role);
+}
+
+test "optional union - leaves the field null when no variant succeeds" {
+    const FailA = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "a" } };
+        }
+    };
+    const FailB = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "b" } };
+        }
+    };
+    const C = struct {
+        auth: ?union(enum) {
+            a: FailA,
+            b: FailB,
+        },
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+    try execute(C, &ctx);
+    try std.testing.expectEqual(null, ctx.deps.auth);
+}
+
+test "optional union - commits the first variant that succeeds" {
+    const FailA = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "a" } };
+        }
+    };
+    const OkB = struct {
+        v: u32 = 7,
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .ok = .{} };
+        }
+    };
+    const C = struct {
+        auth: ?union(enum) {
+            a: FailA,
+            b: OkB,
+        },
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+    try execute(C, &ctx);
+    try std.testing.expect(ctx.deps.auth != null);
+    try std.testing.expectEqual(.b, activeTag(ctx.deps.auth.?));
 }
