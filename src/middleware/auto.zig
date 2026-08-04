@@ -63,6 +63,9 @@ pub const ValidationError = enum {
     untagged_union,
     /// A union middleware field is optional (?union), which is not supported.
     optional_union,
+    /// A required (non-optional) dependency is only satisfied by an optional field,
+    /// which may be null at runtime, so the requirement is not guaranteed.
+    optional_provider,
 };
 
 pub const Diagnostic = struct {
@@ -76,18 +79,28 @@ fn validate(comptime Context: type) ?Diagnostic {
     return validateContextChain(Context, &.{});
 }
 
-/// `parentContexts` - The list of guaranteed enclosing context types,
+/// `parent_contexts` - The list of guaranteed enclosing context types,
 /// used to resolve dependencies that live outside the current Context's scope.
-fn validateContextChain(comptime Context: type, comptime parentContexts: []const type) ?Diagnostic {
+fn validateContextChain(comptime Context: type, comptime parent_contexts: []const type) ?Diagnostic {
     return comptime blk: {
-        if (validateLocalContext(Context, parentContexts)) |d| break :blk d;
+        if (validateLocalContext(Context, parent_contexts)) |d| break :blk d;
+
+        const contexts_chain = parent_contexts ++ .{Context};
 
         // Every middleware reachable from this context (fields and their dependencies)
         // must be guaranteed here or in an enclosing scope,
         // exactly as `run` requires before executing.
         for (orderedDependencies(Context, &.{})) |M| {
-            if (hasFieldOfType(Context, M)) continue;
-            if (typeListProvides(parentContexts, M)) continue;
+            if (hasFieldOfType(Context, M)) {
+                // Dependencies must be guaranteed from inside of Context.
+                // Each of its required dependencies must be satisfied by a non-optional provider.
+                for (dependencyFields(dependencies(M))) |f| {
+                    if (optionalProviderError(f.type, contexts_chain)) |d| break :blk d;
+                }
+                continue;
+            }
+            // Not guaranteed from Context, it must come from an enclosing scope.
+            if (typeListProvides(parent_contexts, M)) continue;
             if (appearsInUnion(Context, M)) break :blk .{
                 .err = .conditional_dependency,
                 .message = "Middleware '" ++ @typeName(M) ++ "' is only present inside a union variant, " ++
@@ -102,7 +115,6 @@ fn validateContextChain(comptime Context: type, comptime parentContexts: []const
         }
 
         // Validate union fields of `Context`
-        const currentContextsChain = parentContexts ++ .{Context};
         for (unionFields(Context)) |uf| {
             for (@typeInfo(uf.type).@"union".fields) |vf| {
                 const V = vf.type;
@@ -110,15 +122,17 @@ fn validateContextChain(comptime Context: type, comptime parentContexts: []const
                     // Each direct dependency must be guaranteed by the current context or an enclosing one.
                     for (dependencyFields(dependencies(V))) |f| {
                         const F: type = extractDependency(f.type, false);
-                        if (!typeListProvides(currentContextsChain, F)) break :blk .{
+                        if (!typeListProvides(contexts_chain, F)) break :blk .{
                             .err = .missing_dependency,
                             .message = "Union variant '" ++ vf.name ++ "' depends on '" ++ @typeName(F) ++
                                 "' which is not guaranteed in this or an enclosing scope.",
                         };
+                        // A required dependency needs a non-optional provider
+                        if (optionalProviderError(f.type, contexts_chain)) |d| break :blk d;
                     }
                 } else {
                     // V is not directly middleware, recurse into the type
-                    if (validateContextChain(V, currentContextsChain)) |d| break :blk d;
+                    if (validateContextChain(V, contexts_chain)) |d| break :blk d;
                 }
             }
         }
@@ -126,8 +140,8 @@ fn validateContextChain(comptime Context: type, comptime parentContexts: []const
     };
 }
 
-/// `parentContexts` - The guaranteed enclosing context types.
-fn validateLocalContext(comptime Context: type, comptime parentContexts: []const type) ?Diagnostic {
+/// `parent_contexts` - The guaranteed enclosing context types.
+fn validateLocalContext(comptime Context: type, comptime parent_contexts: []const type) ?Diagnostic {
     return comptime blk: {
         // Structural checks on this context's fields
         var seen: []const type = &.{};
@@ -145,7 +159,7 @@ fn validateLocalContext(comptime Context: type, comptime parentContexts: []const
                             "' is declared more than once in this context",
                     };
                     // The same type guaranteed by an enclosing context would be shadowed and run twice.
-                    if (typeListProvides(parentContexts, M)) break :blk .{
+                    if (typeListProvides(parent_contexts, M)) break :blk .{
                         .err = .shadowed_dependency,
                         .message = "Middleware '" ++ @typeName(M) ++
                             "' is already guaranteed by an enclosing context, so declaring it again " ++
@@ -165,6 +179,46 @@ fn typeListProvides(comptime types: []const type, comptime M: type) bool {
         if (hasFieldOfType(C, M)) return true;
     }
     return false;
+}
+
+/// Checks one middleware dependency: if it is required (non-optional),
+/// the field providing it must also be non-optional,
+/// otherwise it may be null at runtime and the requirement is not guaranteed.
+///
+/// `DeclaredType` is the dependency field's declared type (e.g. `Auth`, `?Auth`).
+/// Its optionality tells us whether the dependency is required,
+/// and stripping its `?`/`*` wrappers gives us the middleware type used to find the providing field.
+/// `context_chain` - The chain of context types that may provide the dependency.
+/// Returns a diagnostic when a required dependency is only provided optionally.
+fn optionalProviderError(
+    comptime DeclaredType: type,
+    comptime context_chain: []const type,
+) ?Diagnostic {
+    // An optional dependency tolerates a null provider, so only required ones matter.
+    if (@typeInfo(DeclaredType) == .optional) return null;
+    const Middleware = extractDependency(DeclaredType, false);
+    inline for (context_chain) |C| {
+        if (fieldProvidingIsOptional(C, Middleware)) |is_optional| {
+            if (is_optional) return .{
+                .err = .optional_provider,
+                .message = "Dependency '" ++ @typeName(Middleware) ++ "' is required, but the field providing" ++
+                    " it is optional and may be null at runtime. Make the providing field non-optional, " ++
+                    "or make the dependency optional (?" ++ @typeName(Middleware) ++ ").",
+            };
+            return null;
+        }
+    }
+    return null;
+}
+
+/// Whether the guaranteed (non-union) field of `Context` whose type unwraps to `M` is declared optional.
+/// Returns null when `Context` has no such field.
+fn fieldProvidingIsOptional(comptime Context: type, comptime M: type) ?bool {
+    inline for (@typeInfo(Context).@"struct".fields) |f| {
+        if (@typeInfo(f.type) == .@"union") continue;
+        if (Unwrap(f.type) == M) return @typeInfo(f.type) == .optional;
+    }
+    return null;
 }
 
 /// Run a context's middleware in dependency order, then resolve its union fields.
@@ -267,15 +321,15 @@ fn hasFieldOfType(comptime Context: type, comptime T: type) bool {
 }
 
 /// Build the dependency struct for middleware M
-/// by resolving each field against the given scopes, nearest first.
+/// by resolving each field against the given context_chain, nearest first.
 /// `validate` guarantees each dependency resolves,
 /// so a null here for a required dependency is an internal error.
-fn buildDeps(comptime M: type, scopes: anytype) !dependencies(M) {
+fn buildDeps(comptime M: type, context_chain: anytype) !dependencies(M) {
     const D = dependencies(M);
     var deps: D = undefined;
     inline for (dependencyFields(D)) |f| {
         const F: type = extractDependency(f.type, false);
-        const p: ?*F = resolveInParents(F, scopes);
+        const p: ?*F = resolveInParents(F, context_chain);
         @field(deps, f.name) = switch (@typeInfo(f.type)) {
             .pointer => p orelse return error.MiddlewareError,
             .optional => |O| switch (@typeInfo(O.child)) {
@@ -690,6 +744,62 @@ test "validate - rejects shadowing across multiple levels of nesting" {
     const d = validate(C);
     try std.testing.expect(d != null);
     try std.testing.expectEqual(ValidationError.shadowed_dependency, d.?.err);
+}
+
+test "validate - rejects a required dependency satisfied by an optional field" {
+    // Role requires Auth, but the context provides Auth optionally,
+    // so it may be null at runtime and the requirement is not guaranteed.
+    const C = struct {
+        auth: ?Auth,
+        role: Role,
+    };
+    const d = validate(C);
+    try std.testing.expect(d != null);
+    try std.testing.expectEqual(ValidationError.optional_provider, d.?.err);
+}
+
+test "validate - rejects a union variant requiring a dependency provided optionally by an enclosing context" {
+    const C = struct {
+        auth: ?Auth,
+        gate: union(enum) {
+            admin: struct { role: Role },
+            kiosk: Kiosk,
+        },
+    };
+    const d = validate(C);
+    try std.testing.expect(d != null);
+    try std.testing.expectEqual(ValidationError.optional_provider, d.?.err);
+}
+
+const OptRole = struct {
+    const D = struct { auth: ?Auth };
+    pub fn middleware(_: *const MiddlewareContext(D)) !MiddlewareResult(@This()) {
+        return .{ .ok = .{} };
+    }
+};
+
+test "validate - accepts an optional dependency satisfied by an optional field" {
+    const C = struct {
+        auth: ?Auth,
+        role: OptRole,
+    };
+    try std.testing.expectEqual(null, validate(C));
+}
+
+test "validate - accepts a required dependency satisfied by a non-optional field" {
+    const C = struct {
+        auth: Auth,
+        role: Role,
+    };
+    try std.testing.expectEqual(null, validate(C));
+}
+
+test "validate - accepts an optional dependency for an optional field" {
+    const C = struct {
+        auth: ?Auth,
+        role: ?OptRole,
+    };
+    try std.testing.expectEqual(null, validate(C));
 }
 
 test "orderedDependencies and execute" {
