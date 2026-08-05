@@ -718,12 +718,11 @@ pub const TypeGenerator = struct {
         if (comptime hasParamParse(T)) return .{ .parsed = "string" };
 
         const Inner = if (comptime isOptional(T)) T.childType() else T;
-        const is_nullable = comptime @typeInfo(Inner) == .optional;
-        const Leaf = comptime Unwrap(Inner);
-        if (comptime @typeInfo(Leaf) == .@"union") {
-            const base = try self.renderUntaggedUnion(@typeInfo(Leaf).@"union");
+        const inner_info = @typeInfo(Unwrap(Inner));
+        if (comptime inner_info == .@"union") {
+            const base = try self.renderUntaggedUnion(inner_info.@"union");
             return .{
-                .parsed = if (is_nullable)
+                .parsed = if (comptime @typeInfo(Inner) == .optional)
                     try allocPrint(self.arena_alloc, "{s} | null", .{base})
                 else
                     base,
