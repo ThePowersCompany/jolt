@@ -15,6 +15,7 @@ const types = @import("../utils/types.zig");
 const Optional = types.Optional;
 const isOptional = types.isOptional;
 const JsonArray = types.JsonArray;
+const Unwrap = types.Unwrap;
 
 const common = @import("./common.zig");
 const strEqls = common.strEqls;
@@ -624,23 +625,7 @@ pub const TypeGenerator = struct {
                         try res.appendSlice(self.arena_alloc, " }");
                     }
                 },
-                .untagged => {
-                    // Get the type of each enum state, join them together
-                    var first = true;
-                    inline for (U.fields) |field| {
-                        if (first) {
-                            first = false;
-                        } else {
-                            try res.appendSlice(self.arena_alloc, " | ");
-                        }
-                        if (@typeInfo(field.type) == .void) {
-                            try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
-                        } else {
-                            const ident = (try self.extractIdentifier(field.type)).parsed;
-                            try res.appendSlice(self.arena_alloc, ident);
-                        }
-                    }
-                },
+                .untagged => try res.appendSlice(self.arena_alloc, try self.renderUntaggedUnion(U)),
             }
         } else {
             std.log.err("{s} is missing a _repr declaration (must be public)", .{@typeName(T)});
@@ -731,6 +716,19 @@ pub const TypeGenerator = struct {
     /// Everything else delegates to `extractIdentifier`.
     fn queryLeafType(self: *Self, comptime T: type) !ParseResult {
         if (comptime hasParamParse(T)) return .{ .parsed = "string" };
+
+        const Inner = if (comptime isOptional(T)) T.childType() else T;
+        const is_nullable = comptime @typeInfo(Inner) == .optional;
+        const Leaf = comptime Unwrap(Inner);
+        if (comptime @typeInfo(Leaf) == .@"union") {
+            const base = try self.renderUntaggedUnion(@typeInfo(Leaf).@"union");
+            return .{
+                .parsed = if (is_nullable)
+                    try allocPrint(self.arena_alloc, "{s} | null", .{base})
+                else
+                    base,
+            };
+        }
         return self.extractIdentifier(T);
     }
 
@@ -817,6 +815,29 @@ pub const TypeGenerator = struct {
                 try allocPrint(self.arena_alloc, "XOR<({s}), ", .{variant}));
         }
         try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
+        return res.toOwnedSlice(self.arena_alloc);
+    }
+
+    /// Renders a union as an untagged TS union of its variant value types (e.g. `number | "unassigned"`).
+    /// A `void` variant contributes its name as a string-literal type.
+    /// Untagged unions have no discriminator, so it does not need `_repr`.
+    fn renderUntaggedUnion(self: *Self, U: Type.Union) ![]const u8 {
+        var res: ArrayList(u8) = .empty;
+        var first = true;
+        inline for (U.fields) |field| {
+            if (first) {
+                first = false;
+            } else {
+                try res.appendSlice(self.arena_alloc, " | ");
+            }
+
+            if (@typeInfo(field.type) == .void) {
+                try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
+            } else {
+                const ident = (try self.extractIdentifier(field.type)).parsed;
+                try res.appendSlice(self.arena_alloc, ident);
+            }
+        }
         return res.toOwnedSlice(self.arena_alloc);
     }
 
@@ -1265,6 +1286,135 @@ test "extractQueryParams: base keys + union variant keys" {
     ,
         parse_result.parsed,
     );
+}
+
+const WorkerFilter = union(enum) {
+    id: i32,
+    unassigned,
+
+    // Query param parsing does not need this, but confirm it is ignored when present.
+    pub const _repr: UnionRepr = .untagged;
+};
+
+const WorkerQuery = struct {
+    worker: Optional(WorkerFilter) = .not_provided,
+};
+
+test "extractQueryParams: Optional union leaf renders as an untagged TS union" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(WorkerQuery);
+    try expectContent(
+        \\ {
+        \\   worker?: number | "unassigned"
+        \\ }
+    ,
+        parse_result.parsed,
+    );
+}
+
+const WorkerFilterNoRepr = union(enum) {
+    id: i32,
+    unassigned,
+};
+
+test "extractQueryParams: query param union needs no _repr declaration" {
+    const WorkerQueryNoRepr = struct {
+        worker: Optional(WorkerFilterNoRepr) = .not_provided,
+    };
+
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(WorkerQueryNoRepr);
+    try expectContent(
+        \\ {
+        \\   worker?: number | "unassigned"
+        \\ }
+    ,
+        parse_result.parsed,
+    );
+}
+
+test "extractQueryParams: Optional(?Union) leaf is optional and nullable" {
+    const WorkerQueryNestedOptional = struct {
+        worker: Optional(?WorkerFilterNoRepr) = .not_provided,
+    };
+
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(WorkerQueryNestedOptional);
+    try expectContent(
+        \\ {
+        \\   worker?: number | "unassigned" | null
+        \\ }
+    ,
+        parse_result.parsed,
+    );
+}
+
+test "extractQueryParams: ?Union leaf is optional and nullable" {
+    const WorkerQueryNativeOptional = struct {
+        worker: ?WorkerFilterNoRepr = null,
+    };
+
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(WorkerQueryNativeOptional);
+    try expectContent(
+        \\ {
+        \\   worker?: number | "unassigned" | null
+        \\ }
+    ,
+        parse_result.parsed,
+    );
+}
+
+const WorkerQueryRequiredNative = struct {
+    worker: ?WorkerFilterNoRepr,
+};
+
+test "extractQueryParams: required native ?Union leaf is required and nullable" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const parse_result = try type_generator.extractQueryParams(WorkerQueryRequiredNative);
+    try expectContent(
+        \\ {
+        \\   worker: number | "unassigned" | null
+        \\ }
+    ,
+        parse_result.parsed,
+    );
+    try expectEqual(false, parse_result.optional);
 }
 
 // Mimics `Str(Date)`: a query-param wrapper whose runtime value is always a string,
