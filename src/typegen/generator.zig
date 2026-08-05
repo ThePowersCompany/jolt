@@ -15,7 +15,6 @@ const types = @import("../utils/types.zig");
 const Optional = types.Optional;
 const isOptional = types.isOptional;
 const JsonArray = types.JsonArray;
-const Unwrap = types.Unwrap;
 
 const common = @import("./common.zig");
 const strEqls = common.strEqls;
@@ -36,10 +35,14 @@ const isLiftableUnion = unions_mod.isLiftableUnion;
 const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
 
+const ParseContext = enum { body, query_params };
+
 pub const TypeGenerator = struct {
     const Self = @This();
 
     arena_alloc: Allocator,
+
+    parse_context: ParseContext = .body,
 
     /// short type name => ParseResult
     top_level_types: StringHashMap(?ParseResult),
@@ -53,6 +56,7 @@ pub const TypeGenerator = struct {
     pub fn init(arena_alloc: Allocator) !Self {
         return .{
             .arena_alloc = arena_alloc,
+            .parse_context = .body,
             .top_level_types = StringHashMap(?ParseResult).init(arena_alloc),
             .get_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
             .post_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
@@ -553,13 +557,15 @@ pub const TypeGenerator = struct {
             return res.toOwnedSlice(self.arena_alloc);
         }
 
-        var union_repr: ?UnionRepr = null;
-        inline for (U.decls) |decl| {
-            if (comptime strEqls(decl.name, "_repr")) {
-                union_repr = @field(T, decl.name);
-                break;
+        const union_repr: ?UnionRepr = blk: {
+            if (self.parse_context == .query_params) break :blk .untagged;
+            inline for (U.decls) |decl| {
+                if (comptime strEqls(decl.name, "_repr")) {
+                    break :blk @field(T, decl.name);
+                }
             }
-        }
+            break :blk null;
+        };
 
         if (union_repr) |repr| {
             switch (repr) {
@@ -625,7 +631,24 @@ pub const TypeGenerator = struct {
                         try res.appendSlice(self.arena_alloc, " }");
                     }
                 },
-                .untagged => try res.appendSlice(self.arena_alloc, try self.renderUntaggedUnion(U)),
+                .untagged => {
+                    // Get the type of each enum state, join them together
+                    var first = true;
+                    inline for (U.fields) |field| {
+                        if (first) {
+                            first = false;
+                        } else {
+                            try res.appendSlice(self.arena_alloc, " | ");
+                        }
+
+                        if (@typeInfo(field.type) == .void) {
+                            try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
+                        } else {
+                            const ident = (try self.extractIdentifier(field.type)).parsed;
+                            try res.appendSlice(self.arena_alloc, ident);
+                        }
+                    }
+                },
             }
         } else {
             std.log.err("{s} is missing a _repr declaration (must be public)", .{@typeName(T)});
@@ -714,20 +737,8 @@ pub const TypeGenerator = struct {
     /// so its typegen'd type should be `string`.
     /// `extractIdentifier` parses its struct fields, which is incorrect for query_params.
     /// Everything else delegates to `extractIdentifier`.
-    fn queryLeafType(self: *Self, comptime T: type) !ParseResult {
+    fn getQueryLeafType(self: *Self, comptime T: type) !ParseResult {
         if (comptime hasParamParse(T)) return .{ .parsed = "string" };
-
-        const Inner = if (comptime isOptional(T)) T.childType() else T;
-        const inner_info = @typeInfo(Unwrap(Inner));
-        if (comptime inner_info == .@"union") {
-            const base = try self.renderUntaggedUnion(inner_info.@"union");
-            return .{
-                .parsed = if (comptime @typeInfo(Inner) == .optional)
-                    try allocPrint(self.arena_alloc, "{s} | null", .{base})
-                else
-                    base,
-            };
-        }
         return self.extractIdentifier(T);
     }
 
@@ -735,6 +746,10 @@ pub const TypeGenerator = struct {
     /// The active variant is inferred at runtime from which keys are present.
     /// Anything else falls back to the normal struct handling.
     fn extractQueryParams(self: *Self, comptime T: type) !ParseResult {
+        const prev_context = self.parse_context;
+        self.parse_context = .query_params;
+        defer self.parse_context = prev_context;
+
         const type_name = comptime shortTypeName(@typeName(T));
         // The type was already registered at the top level
         if (self.getTopLevelType(type_name) != null) {
@@ -785,7 +800,7 @@ pub const TypeGenerator = struct {
                 try variants.append(self.arena_alloc, variant);
             } else {
                 // Scalar / array / enum / paramParse struct: variant name is key.
-                const ident = try self.queryLeafType(field.type);
+                const ident = try self.getQueryLeafType(field.type);
                 try variants.append(self.arena_alloc, try allocPrint(
                     self.arena_alloc,
                     "{{ {s}: {s} }}",
@@ -814,29 +829,6 @@ pub const TypeGenerator = struct {
                 try allocPrint(self.arena_alloc, "XOR<({s}), ", .{variant}));
         }
         try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
-        return res.toOwnedSlice(self.arena_alloc);
-    }
-
-    /// Renders a union as an untagged TS union of its variant value types (e.g. `number | "unassigned"`).
-    /// A `void` variant contributes its name as a string-literal type.
-    /// Untagged unions have no discriminator, so it does not need `_repr`.
-    fn renderUntaggedUnion(self: *Self, U: Type.Union) ![]const u8 {
-        var res: ArrayList(u8) = .empty;
-        var first = true;
-        inline for (U.fields) |field| {
-            if (first) {
-                first = false;
-            } else {
-                try res.appendSlice(self.arena_alloc, " | ");
-            }
-
-            if (@typeInfo(field.type) == .void) {
-                try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
-            } else {
-                const ident = (try self.extractIdentifier(field.type)).parsed;
-                try res.appendSlice(self.arena_alloc, ident);
-            }
-        }
         return res.toOwnedSlice(self.arena_alloc);
     }
 
@@ -989,7 +981,7 @@ pub const TypeGenerator = struct {
                     try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group);
                 }
             } else {
-                const ident = try self.queryLeafType(T);
+                const ident = try self.getQueryLeafType(T);
                 const leaf: FlatLeaf = .{
                     .name = field.name,
                     .ts_type = ident.parsed,
