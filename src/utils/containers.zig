@@ -41,6 +41,9 @@ pub fn containerKind(comptime T: type) ContainerKind {
 
                 // Composite when any variant is itself composite.
                 const is_comp: bool = for (u.fields) |f| {
+                    // A `void` variant carries no keys, so it is never composite.
+                    // The `is_strong` check below is what detects it.
+                    if (f.type == void) continue;
                     if (containerKind(f.type) == .composite) break true;
                 } else false;
                 // Otherwise a scalar union, strong when it can represent a `void` case.
