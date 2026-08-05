@@ -108,7 +108,12 @@ pub const RequestHandler = struct {
         comptime last_fn: *const fn (*Context, Allocator) anyerror!Response(ReturnType),
     ) !RequestHandler {
         const Wrapper = struct {
-            pub fn handle(alloc: Allocator, server: *const JoltServer, req: Request, sendErrorResponse: ErrorHandlerFn) !void {
+            pub fn handle(
+                alloc: Allocator,
+                server: *const JoltServer,
+                req: Request,
+                sendErrorResponse: ErrorHandlerFn,
+            ) !void {
                 var ctx: MiddlewareContext(Context) = .{
                     .deps = undefined,
                     .alloc = alloc,
