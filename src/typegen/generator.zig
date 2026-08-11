@@ -757,7 +757,7 @@ pub const TypeGenerator = struct {
             const res = try self.parseFlatQueryStruct(T, info.@"struct");
             if (is_top_level) {
                 try self.top_level_types.put(type_name, res);
-                return .{ .res = type_name, .optional = res.optional };
+                return .{ .parsed = type_name, .optional = res.optional };
             }
             return res;
         }
