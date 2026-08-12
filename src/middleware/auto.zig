@@ -118,7 +118,7 @@ fn validateContextChain(comptime Context: type, comptime parent_contexts: []cons
 
         // Validate union fields of `Context`
         for (unionFields(Context)) |uf| {
-            for (@typeInfo(unwrapOptional(uf.type)).@"union".fields) |vf| {
+            for (@typeInfo(Unwrap(uf.type)).@"union".fields) |vf| {
                 const V = vf.type;
                 if (std.meta.hasFn(V, "middleware")) {
                     // Each direct dependency must be guaranteed by the current context or an enclosing one.
@@ -148,7 +148,7 @@ fn validateLocalContext(comptime Context: type, comptime parent_contexts: []cons
         // Structural checks on this context's fields
         var seen: []const type = &.{};
         for (dependencyFields(Context)) |f| {
-            if (isReservedField(f.name)) continue;
+            if (reserved_field_names.has(f.name)) continue;
             // Untagged or optional union fields cannot be discriminated
             if (unionShapeError(f)) |d| break :blk d;
             // A middleware may be declared at most once as a guaranteed field
@@ -286,7 +286,7 @@ fn runUnion(
     parents: anytype,
 ) !bool {
     const is_optional = comptime @typeInfo(uf.type) == .optional;
-    const U = comptime unwrapOptional(uf.type);
+    const U = comptime Unwrap(uf.type);
     inline for (@typeInfo(U).@"union".fields) |vf| {
         const V = vf.type;
         if (comptime std.meta.hasFn(V, "middleware")) {
@@ -394,14 +394,13 @@ fn extractMiddleware(comptime T: type, comptime top_level: bool) ?type {
 /// Fields the framework populates directly, not through middleware.
 /// Skipped when scanning a context so their types never reach extractDependency,
 /// which matters because a special field may be a pointer (otherwise rejected).
-const reserved_field_names = [_][]const u8{ "query_params", "body", "req" };
-
-fn isReservedField(comptime name: []const u8) bool {
-    for (reserved_field_names) |reserved| {
-        if (std.mem.eql(u8, name, reserved)) return true;
-    }
-    return false;
-}
+const reserved_field_names: std.StaticStringMap(void) = .initComptime(
+    .{
+        .{"query_params"},
+        .{"body"},
+        .{"req"},
+    },
+);
 
 /// Recursively processes an endpoint context struct and extracts all of the middleware types into a flat list.
 /// The resulting flat list is a topological sort (reverse postorder traversal)
@@ -413,7 +412,7 @@ fn orderedDependencies(comptime Context: type, comptime stack: []const type) []c
     comptime {
         var middlewares: []const type = &.{};
         for (dependencyFields(Context)) |f| {
-            if (isReservedField(f.name)) continue;
+            if (reserved_field_names.has(f.name)) continue;
             if (extractMiddleware(f.type, stack.len == 0)) |M| {
                 // Check if middleware recursive dependencies form a cycle
                 for (stack) |C| {
@@ -441,21 +440,13 @@ fn unionFields(comptime Context: type) []const Type.StructField {
     comptime {
         var fields: []const Type.StructField = &.{};
         for (dependencyFields(Context)) |f| {
-            if (isReservedField(f.name)) continue;
-            if (@typeInfo(unwrapOptional(f.type)) == .@"union") {
+            if (reserved_field_names.has(f.name)) continue;
+            if (@typeInfo(Unwrap(f.type)) == .@"union") {
                 fields = fields ++ .{f};
             }
         }
         return fields;
     }
-}
-
-/// Removes an optional wrapper (`?T`) if it exists, otherwise returns T.
-fn unwrapOptional(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .optional => |o| o.child,
-        else => T,
-    };
 }
 
 /// Structural diagnostic for a single context field whose type is a union,
@@ -538,6 +529,22 @@ fn field(comptime Context: type, comptime Middleware: type) Type.StructField {
     }
 }
 
+test "field" {
+    const E = struct {
+        i: i32,
+    };
+    const S = struct {
+        e: E,
+    };
+    const T = struct {
+        e: ?E,
+    };
+    const p: Type.StructField = field(S, E);
+    try std.testing.expectEqualStrings("e", p.name);
+    const q: Type.StructField = field(T, E);
+    try std.testing.expectEqualStrings("e", q.name);
+}
+
 /// Whether Middleware appears inside any union variant of Context.
 /// Used to explain that a dependency exists only conditionally, behind a union.
 fn appearsInUnion(comptime Context: type, comptime Middleware: type) bool {
@@ -555,22 +562,6 @@ fn appearsInUnion(comptime Context: type, comptime Middleware: type) bool {
         }
         break :blk false;
     };
-}
-
-test "field" {
-    const E = struct {
-        i: i32,
-    };
-    const S = struct {
-        e: E,
-    };
-    const T = struct {
-        e: ?E,
-    };
-    const p: Type.StructField = field(S, E);
-    try std.testing.expectEqualStrings("e", p.name);
-    const q: Type.StructField = field(T, E);
-    try std.testing.expectEqualStrings("e", q.name);
 }
 
 const Auth = struct {
