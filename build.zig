@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) !void {
 
     define_deps(b, target, optimize);
 
+    const use_llvm = b.option(bool, "llvm", "if llvm backend should be used (default: true)") orelse true;
+
     const facilio = try build_facilio("facil.io", b, target, optimize, false);
 
     const jolt_module = b.addModule("jolt", .{
@@ -66,6 +68,7 @@ pub fn build(b: *std.Build) !void {
     var exe = b.addExecutable(.{
         .name = "server",
         .root_module = exe_mod,
+        .use_llvm = use_llvm,
     });
 
     exe.root_module.addImport("jolt", jolt_module);
@@ -104,6 +107,7 @@ pub fn build(b: *std.Build) !void {
     const types_exe = b.addExecutable(.{
         .name = "types",
         .root_module = types_module,
+        .use_llvm = use_llvm,
     });
 
     import_deps(types_exe.root_module);
@@ -126,6 +130,7 @@ pub fn build(b: *std.Build) !void {
     const unit_tests = b.addTest(.{
         .name = "test",
         .root_module = unit_tests_module,
+        .use_llvm = use_llvm,
     });
 
     import_deps(unit_tests.root_module);
