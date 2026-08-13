@@ -94,7 +94,7 @@ fn validateContextChain(comptime Context: type, comptime parent_contexts: []cons
                 // If M itself is stored optionally and a required dependency is null at runtime,
                 // M is simply skipped, so an optional provider is fine.
                 // Only enforce non-optional providers for a non-optional M.
-                if (fieldProvidingIsOptional(Context, M) == false) {
+                if (isStructFieldOptional(Context, M) == false) {
                     for (dependencyFields(dependencies(M))) |f| {
                         if (optionalProviderError(f.type, contexts_chain)) |d| break :blk d;
                     }
@@ -200,7 +200,7 @@ fn optionalProviderError(
     if (@typeInfo(DeclaredType) == .optional) return null;
     const Middleware = extractDependency(DeclaredType, false);
     inline for (context_chain) |C| {
-        if (fieldProvidingIsOptional(C, Middleware)) |is_optional| {
+        if (isStructFieldOptional(C, Middleware)) |is_optional| {
             if (is_optional) return .{
                 .err = .optional_provider,
                 .message = "Dependency '" ++ @typeName(Middleware) ++ "' is required, but the field providing" ++
@@ -213,14 +213,27 @@ fn optionalProviderError(
     return null;
 }
 
-/// Whether the guaranteed (non-union) field of `Context` whose type unwraps to `M` is declared optional.
-/// Returns null when `Context` has no such field.
-fn fieldProvidingIsOptional(comptime Context: type, comptime M: type) ?bool {
-    inline for (@typeInfo(Context).@"struct".fields) |f| {
-        if (@typeInfo(f.type) == .@"union") continue;
-        if (Unwrap(f.type) == M) return @typeInfo(f.type) == .optional;
+/// The guaranteed (non-union) field of `Context` whose type unwraps to `M`,
+/// or null when `Context` has no such field.
+fn findStructField(comptime Context: type, comptime M: type) ?Type.StructField {
+    comptime {
+        const info = @typeInfo(Context);
+        if (info != .@"struct") @compileError("Context must be a struct");
+        for (info.@"struct".fields) |f| {
+            if (@typeInfo(f.type) == .@"union") continue;
+            if (Unwrap(f.type) == M) return f;
+        }
+        return null;
     }
-    return null;
+}
+
+/// Whether the guaranteed (non-union) field of `Context` whose type unwraps to `M` is optional (?T).
+/// Returns null when `Context` has no such field.
+fn isStructFieldOptional(comptime Context: type, comptime M: type) ?bool {
+    comptime {
+        const f = findStructField(Context, M) orelse return null;
+        return @typeInfo(f.type) == .optional;
+    }
 }
 
 /// Run a context's middleware in dependency order, then resolve its union fields.
@@ -329,11 +342,7 @@ fn runUnion(
 
 /// Whether Context has a guaranteed (non-union) field whose type unwraps to T.
 fn hasFieldOfType(comptime Context: type, comptime T: type) bool {
-    inline for (@typeInfo(Context).@"struct".fields) |f| {
-        if (@typeInfo(f.type) == .@"union") continue;
-        if (Unwrap(f.type) == T) return true;
-    }
-    return false;
+    return comptime findStructField(Context, T) != null;
 }
 
 /// Build the dependency struct for middleware M
@@ -516,17 +525,9 @@ test "ptr" {
 }
 
 fn field(comptime Context: type, comptime Middleware: type) Type.StructField {
-    comptime {
-        const ctxInfo = @typeInfo(Context);
-        if (ctxInfo != .@"struct") @compileError("Context must be a struct");
-        for (ctxInfo.@"struct".fields) |f| {
-            if (@typeInfo(f.type) == .@"union") continue;
-            if (Unwrap(f.type) == Middleware) return f;
-        }
-        @compileError(
-            "Unable to find middleware defined in endpoint context: " ++ @typeName(Middleware),
-        );
-    }
+    return comptime findStructField(Context, Middleware) orelse @compileError(
+        "Unable to find middleware defined in endpoint context: " ++ @typeName(Middleware),
+    );
 }
 
 test "field" {
