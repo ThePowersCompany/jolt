@@ -751,18 +751,24 @@ pub const TypeGenerator = struct {
         defer self.parse_context = prev_context;
 
         const type_name = comptime shortTypeName(@typeName(T));
-        // The type was already registered at the top level
-        if (self.getTopLevelType(type_name) != null) {
+        const is_top_level = self.top_level_types.contains(type_name);
+        const info = @typeInfo(T);
+        if (comptime info == .@"struct") {
+            const res = try self.parseFlatQueryStruct(T, info.@"struct");
+            if (is_top_level) {
+                try self.top_level_types.put(type_name, res);
+                return .{ .parsed = type_name, .optional = res.optional };
+            }
+            return res;
+        }
+
+        if (is_top_level) {
             return .{ .parsed = type_name, .optional = comptime queryParamsOptional(T) };
         }
 
-        const info = @typeInfo(T);
         if (comptime info == .@"union" and !isOptional(T)) {
             const res = try self.parseFlatUnion(info.@"union");
             return .{ .parsed = res.parsed, .optional = comptime queryParamsOptional(T) };
-        }
-        if (comptime info == .@"struct") {
-            return self.parseFlatQueryStruct(T, info.@"struct");
         }
         return self.extractIdentifier(T);
     }
@@ -1686,6 +1692,56 @@ test "generateTypes: union query param with a paramParse leaf, shared by two end
         \\     }
         \\     "/company/dsc/report": {
         \\       queryParams: DscQuery
+        \\       response: boolean,
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
+}
+
+test "generateTypes: public struct query param coerces paramParse leaves into string" {
+    const DateFilterEndpoint = struct {
+        pub const DateFilter = struct {
+            start_date: StrDate,
+            end_date: StrDate,
+            worker: ?i32 = null,
+            hour: ?i32 = null,
+        };
+        const Ctx = struct { query_params: DateFilter };
+        const Res = struct { body: ?bool = null };
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/date-filter", DateFilterEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\ export type DateFilter =
+        \\   {
+        \\     start_date: string
+        \\     end_date: string
+        \\     worker?: number|null
+        \\     hour?: number|null
+        \\   }
+        \\
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/date-filter": {
+        \\       queryParams: DateFilter
         \\       response: boolean,
         \\     }
         \\   },
