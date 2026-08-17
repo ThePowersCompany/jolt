@@ -32,6 +32,9 @@ pub fn MiddlewareResult(comptime M: type) type {
         err: struct {
             status: StatusCode,
             msg: []const u8,
+            /// Whether the middleware error result is unrecoverable,
+            /// even if the middleware is specified as optional in the endpoint context
+            fatal: bool = false,
         },
     };
 }
