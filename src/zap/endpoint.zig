@@ -26,13 +26,18 @@ pub fn MiddlewareContext(comptime D: type) type {
     };
 }
 
+pub const MiddlewareError = struct {
+    status: StatusCode,
+    msg: []const u8,
+    /// Whether the middleware error result is unrecoverable,
+    /// even if the middleware is specified as optional in the endpoint context
+    fatal: bool = false,
+};
+
 pub fn MiddlewareResult(comptime M: type) type {
     return union(enum) {
         ok: M,
-        err: struct {
-            status: StatusCode,
-            msg: []const u8,
-        },
+        err: MiddlewareError,
     };
 }
 

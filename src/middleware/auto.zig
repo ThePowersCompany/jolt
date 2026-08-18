@@ -5,6 +5,7 @@ const activeTag = std.meta.activeTag;
 const zap = @import("../zap/zap.zig");
 const MiddlewareContext = zap.Endpoint.MiddlewareContext;
 const MiddlewareResult = zap.Endpoint.MiddlewareResult;
+const MiddlewareError = zap.Endpoint.MiddlewareError;
 
 const types_mod = @import("../utils/types.zig");
 const Unwrap = types_mod.Unwrap;
@@ -28,7 +29,10 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
         @field(ctx.deps, "req") = ctx.req;
     }
 
-    try execute(Context, ctx);
+    if (try execute(Context, ctx)) |err| {
+        try ctx.req.respondWithError(err.status, err.msg);
+        return;
+    }
 
     if (@hasField(Context, "query_params")) {
         try parseQueryParams(Context, ctx);
@@ -39,10 +43,13 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     }
 }
 
-fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
+/// Validate the context at comptime, then run its middleware chain.
+/// Returns null when the chain passed and the handler should run,
+/// or the failed middleware's response for the caller to send.
+/// This never touches the request, so the decision logic is unit-testable without a live request.
+fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !?MiddlewareError {
     comptime if (validate(Context)) |d| @compileError(d.message);
-
-    if (!try run(Context, ctx, .{})) return error.MiddlewareError;
+    return run(Context, ctx, .{});
 }
 
 pub const ValidationError = enum {
@@ -237,13 +244,14 @@ fn isStructFieldOptional(comptime Context: type, comptime M: type) ?bool {
 }
 
 /// Run a context's middleware in dependency order, then resolve its union fields.
-/// Returns false when a required middleware returns an error.
-/// At the top level this will abort, inside a union it tries the next variant.
+/// Returns null on success, or the failed middleware's response to send.
+/// At the top level a returned response aborts the request,
+/// inside a union it means the variant failed so the next one is tried.
 /// Optional fields tolerate failure as null, and real Zig errors always propagate.
 ///
 /// `parents` is a tuple of pointers to the enclosing contexts, nearest first.
 /// A dependency is looked up in `Context` first, then up the parent context chain.
-fn run(comptime Context: type, ctx: *MiddlewareContext(Context), parents: anytype) !bool {
+fn run(comptime Context: type, ctx: *MiddlewareContext(Context), parents: anytype) !?MiddlewareError {
     inline for (orderedDependencies(Context, &.{})) |M| {
         // `orderedDependencies` lists transitive dependencies too.
         // A middleware that is not a field of this context
@@ -252,71 +260,68 @@ fn run(comptime Context: type, ctx: *MiddlewareContext(Context), parents: anytyp
         if (comptime !hasFieldOfType(Context, M)) continue;
 
         const ctx_field = comptime field(Context, M);
-        const is_optional = comptime @typeInfo(ctx_field.type) == .optional;
 
         // Resolve dependencies against this context first, then the parent chain.
-        // A required dependency that resolves to null makes buildDeps fail.
-        // An optional field tolerates that as null and a guaranteed field propagates it.
-        const maybe_deps: ?dependencies(M) = if (comptime is_optional)
-            buildDeps(M, .{&ctx.deps} ++ parents) catch |err|
-                if (err == error.MiddlewareError) null else return err
-        else
-            try buildDeps(M, .{&ctx.deps} ++ parents);
-
-        // Run the middleware, reducing to the value to store.
-        // `null` means the middleware did not run (no deps) or failed (.err).
-        const res = if (maybe_deps) |deps| switch (try M.middleware(&.{
-            .deps = deps,
-            .alloc = ctx.alloc,
-            .server = ctx.server,
-            .req = ctx.req,
-        })) {
-            .ok => |v| v,
-            .err => null,
-        } else null;
-
-        // An optional field keeps null, a guaranteed field must have a value.
-        @field(ctx.deps, ctx_field.name) = if (comptime is_optional)
-            res
-        else
-            res orelse return false;
+        if (comptime @typeInfo(ctx_field.type) == .optional) {
+            // Store the value on success,
+            // or null if the middleware could not run (a required dependency was null) or failed.
+            // An optional field never aborts the chain, but real Zig errors still propagate.
+            @field(ctx.deps, ctx_field.name) = value: {
+                const deps = buildDeps(M, .{&ctx.deps} ++ parents) catch |err| {
+                    if (err == error.Middleware) break :value null;
+                    return err;
+                };
+                switch (try callMiddleware(M, ctx, deps)) {
+                    .ok => |v| break :value v,
+                    .err => |e| {
+                        if (e.fatal) return e;
+                        break :value null;
+                    },
+                }
+            };
+        } else {
+            const deps = try buildDeps(M, .{&ctx.deps} ++ parents);
+            switch (try callMiddleware(M, ctx, deps)) {
+                .ok => |v| @field(ctx.deps, ctx_field.name) = v,
+                .err => |e| return e,
+            }
+        }
     }
 
     inline for (unionFields(Context)) |uf| {
-        if (!try runUnion(Context, uf, ctx, parents)) return false;
+        if (try runUnion(Context, uf, ctx, parents)) |err| return err;
     }
-    return true;
+    return null;
 }
 
 /// Try each variant in declaration order and commit the first that succeeds.
 /// A middleware .err falls through to the next variant, a real Zig error aborts the union.
-/// If no variant succeeds, an optional union field is left null and treated as success,
-/// otherwise the union fails and we return false.
+/// If no variant succeeds, an optional union field is left null and null is returned (success),
+/// otherwise the last failing variant's response is returned so it can be sent above.
 fn runUnion(
     comptime Context: type,
     comptime uf: Type.StructField,
     ctx: *MiddlewareContext(Context),
     parents: anytype,
-) !bool {
+) !?MiddlewareError {
     const is_optional = comptime @typeInfo(uf.type) == .optional;
     const U = comptime Unwrap(uf.type);
+    // The response of the most recent failed variant, used when none succeed.
+    var last_err: ?MiddlewareError = null;
     inline for (@typeInfo(U).@"union".fields) |vf| {
         const V = vf.type;
         if (comptime std.meta.hasFn(V, "middleware")) {
             const deps = try buildDeps(V, .{&ctx.deps} ++ parents);
-            const result: MiddlewareResult(V) = try V.middleware(&.{
-                .deps = deps,
-                .alloc = ctx.alloc,
-                .server = ctx.server,
-                .req = ctx.req,
-            });
-            switch (result) {
+            switch (try callMiddleware(V, ctx, deps)) {
                 .ok => |v| {
                     @field(ctx.deps, uf.name) = @unionInit(U, vf.name, v);
-                    return true;
+                    return null;
                 },
-                // Variant failed, so fall through and try the next one
-                .err => {},
+                // Variant failed, so remember its response and try the next one.
+                .err => |e| {
+                    if (e.fatal) return e;
+                    last_err = e;
+                },
             }
         } else {
             // Not directly middleware, recurse
@@ -326,18 +331,31 @@ fn runUnion(
                 .server = ctx.server,
                 .req = ctx.req,
             };
-            if (try run(V, &sub, .{&ctx.deps} ++ parents)) {
+            if (try run(V, &sub, .{&ctx.deps} ++ parents)) |e| {
+                if (e.fatal) return e;
+                // Variant failed, so remember its response and try the next one.
+                last_err = e;
+            } else {
                 @field(ctx.deps, uf.name) = @unionInit(U, vf.name, sub.deps);
-                return true;
+                return null;
             }
         }
     }
     // No variant succeeded - an optional union accepts this as null.
     if (is_optional) {
         @field(ctx.deps, uf.name) = null;
-        return true;
+        return null;
     }
-    return false;
+    return last_err;
+}
+
+fn callMiddleware(comptime M: type, ctx: anytype, deps: dependencies(M)) !MiddlewareResult(M) {
+    return M.middleware(&.{
+        .deps = deps,
+        .alloc = ctx.alloc,
+        .server = ctx.server,
+        .req = ctx.req,
+    });
 }
 
 /// Whether Context has a guaranteed (non-union) field whose type unwraps to T.
@@ -356,12 +374,12 @@ fn buildDeps(comptime M: type, context_chain: anytype) !dependencies(M) {
         const F: type = extractDependency(f.type, false);
         const p: ?*F = resolveInParents(F, context_chain);
         @field(deps, f.name) = switch (@typeInfo(f.type)) {
-            .pointer => p orelse return error.MiddlewareError,
+            .pointer => p orelse return error.Middleware,
             .optional => |O| switch (@typeInfo(O.child)) {
                 .pointer => p,
                 else => if (p) |pp| pp.* else null,
             },
-            else => if (p) |pp| pp.* else return error.MiddlewareError,
+            else => if (p) |pp| pp.* else return error.Middleware,
         };
     }
     return deps;
@@ -883,7 +901,7 @@ test "orderedDependencies and execute" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
 }
 
 test "union - first successful variant wins" {
@@ -910,8 +928,8 @@ test "union - first successful variant wins" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
-    try std.testing.expect(activeTag(ctx.deps.auth) == .a);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
+    try std.testing.expectEqual(.a, activeTag(ctx.deps.auth));
 }
 
 test "union - falls through to a later variant" {
@@ -938,7 +956,7 @@ test "union - falls through to a later variant" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.second, activeTag(ctx.deps.auth));
 }
 
@@ -974,7 +992,7 @@ test "union - struct variant resolves an in-variant dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.user, activeTag(ctx.deps.foo));
     try std.testing.expectEqual(7, ctx.deps.foo.user.auth.id);
 }
@@ -1010,7 +1028,7 @@ test "union - struct variant walks up to a guaranteed enclosing dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(7, ctx.deps.auth.user);
     try std.testing.expectEqual(.admin, activeTag(ctx.deps.gate));
 }
@@ -1044,7 +1062,7 @@ test "union - bare variant walks up to a guaranteed enclosing dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.admin, activeTag(ctx.deps.gate));
 }
 
@@ -1090,7 +1108,7 @@ test "nested containers - leaf walks up two levels to a grandparent dependency" 
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(1, ctx.deps.base.v);
     try std.testing.expectEqual(.only, activeTag(ctx.deps.outer));
     try std.testing.expectEqual(.x, activeTag(ctx.deps.outer.only.inner));
@@ -1122,7 +1140,7 @@ test "nested containers - leaf resolves dependencies from two different ancestor
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.a, activeTag(ctx.deps.outer));
     try std.testing.expectEqual(.x, activeTag(ctx.deps.outer.a.inner));
     try std.testing.expectEqual(2, ctx.deps.outer.a.mid.v);
@@ -1159,7 +1177,7 @@ test "nested containers - inner union falls through then walks up" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.second, activeTag(ctx.deps.outer.a.inner));
 }
 
@@ -1188,7 +1206,7 @@ test "nested containers - deep bare variant walks up to a grandparent dependency
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.only, activeTag(ctx.deps.outer.a.inner));
 }
 
@@ -1218,7 +1236,7 @@ test "optional - a failed optional middleware is tolerated and dependents see nu
         .req = undefined,
     };
     // `execute` succeeds even though Flaky failed, because the field is optional.
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.flaky);
     try std.testing.expect(ctx.deps.dep.saw_null);
 }
@@ -1247,7 +1265,7 @@ test "optional - an optional middleware whose required dependency is null is ski
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.auth);
     try std.testing.expectEqual(null, ctx.deps.role);
 }
@@ -1276,7 +1294,7 @@ test "optional union - leaves the field null when no variant succeeds" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.auth);
 }
 
@@ -1305,7 +1323,175 @@ test "optional union - commits the first variant that succeeds" {
         .server = undefined,
         .req = undefined,
     };
-    try execute(C, &ctx);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expect(ctx.deps.auth != null);
     try std.testing.expectEqual(.b, activeTag(ctx.deps.auth.?));
+}
+
+test "error response - a failed guaranteed middleware surfaces its own status, not a 500" {
+    const Forbid = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .forbidden, .msg = "denied" } };
+        }
+    };
+    const C = struct {
+        auth: Forbid,
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+
+    const err = try execute(C, &ctx);
+    try std.testing.expect(err != null);
+    try std.testing.expectEqual(.forbidden, err.?.status);
+    try std.testing.expectEqualStrings("denied", err.?.msg);
+}
+
+test "error response - a fully failed union surfaces the last variant's response" {
+    const FailA = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "a" } };
+        }
+    };
+    const FailB = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .forbidden, .msg = "b" } };
+        }
+    };
+    const C = struct {
+        auth: union(enum) {
+            a: FailA,
+            b: FailB,
+        },
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+    const err = try execute(C, &ctx);
+    try std.testing.expect(err != null);
+    try std.testing.expectEqual(.forbidden, err.?.status);
+    try std.testing.expectEqualStrings("b", err.?.msg);
+}
+
+test "optional middleware has fatal error" {
+    const FatalMiddleware = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .bad_gateway, .msg = "fatal", .fatal = true } };
+        }
+    };
+    const C = struct {
+        a: ?FatalMiddleware,
+    };
+
+    var ctx: MiddlewareContext(C) = .{
+        .deps = undefined,
+        .alloc = std.testing.allocator,
+        .server = undefined,
+        .req = undefined,
+    };
+    const err = try execute(C, &ctx);
+    try std.testing.expect(err != null);
+    try std.testing.expectEqual(.bad_gateway, err.?.status);
+    try std.testing.expectEqualStrings("fatal", err.?.msg);
+}
+
+test "union has fatal error" {
+    const Success = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .ok = .{} };
+        }
+    };
+    const Recoverable = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .unauthorized, .msg = "recoverable" } };
+        }
+    };
+    const Fatal = struct {
+        pub fn middleware(_: *const MiddlewareContext(void)) !MiddlewareResult(@This()) {
+            return .{ .err = .{ .status = .forbidden, .msg = "fatal", .fatal = true } };
+        }
+    };
+
+    {
+        const C = struct {
+            required: union(enum) {
+                a: Recoverable,
+                b: Fatal,
+                ok: Success,
+            },
+        };
+        var ctx: MiddlewareContext(C) = .{
+            .deps = undefined,
+            .alloc = std.testing.allocator,
+            .server = undefined,
+            .req = undefined,
+        };
+        const err = try execute(C, &ctx);
+        try std.testing.expect(err != null);
+        try std.testing.expectEqual(.forbidden, err.?.status);
+        try std.testing.expectEqualStrings("fatal", err.?.msg);
+    }
+    {
+        const D = struct {
+            required: union(enum) {
+                b: Fatal,
+                a: Recoverable,
+                ok: Success,
+            },
+        };
+        var ctx: MiddlewareContext(D) = .{
+            .deps = undefined,
+            .alloc = std.testing.allocator,
+            .server = undefined,
+            .req = undefined,
+        };
+        const err = try execute(D, &ctx);
+        try std.testing.expect(err != null);
+        try std.testing.expectEqual(.forbidden, err.?.status);
+        try std.testing.expectEqualStrings("fatal", err.?.msg);
+    }
+    {
+        const O1 = struct {
+            opt: ?union(enum) {
+                a: Recoverable,
+                b: Fatal,
+            },
+        };
+        var ctx: MiddlewareContext(O1) = .{
+            .deps = undefined,
+            .alloc = std.testing.allocator,
+            .server = undefined,
+            .req = undefined,
+        };
+        const err = try execute(O1, &ctx);
+        try std.testing.expect(err != null);
+        try std.testing.expectEqual(.forbidden, err.?.status);
+        try std.testing.expectEqualStrings("fatal", err.?.msg);
+    }
+    {
+        const O2 = struct {
+            opt: ?union(enum) {
+                b: Fatal,
+                a: Recoverable,
+            },
+        };
+        var ctx: MiddlewareContext(O2) = .{
+            .deps = undefined,
+            .alloc = std.testing.allocator,
+            .server = undefined,
+            .req = undefined,
+        };
+        const err = try execute(O2, &ctx);
+        try std.testing.expect(err != null);
+        try std.testing.expectEqual(.forbidden, err.?.status);
+        try std.testing.expectEqualStrings("fatal", err.?.msg);
+    }
 }
