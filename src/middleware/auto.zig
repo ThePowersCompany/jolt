@@ -29,7 +29,10 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
         @field(ctx.deps, "req") = ctx.req;
     }
 
-    if (!try execute(Context, ctx)) return;
+    if (try execute(Context, ctx)) |err| {
+        try ctx.req.respondWithError(err.status, err.msg);
+        return;
+    }
 
     if (@hasField(Context, "query_params")) {
         try parseQueryParams(Context, ctx);
@@ -40,12 +43,13 @@ pub fn auto(comptime Context: type, ctx: *MiddlewareContext(Context)) !void {
     }
 }
 
-fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !bool {
+/// Validate the context at comptime, then run its middleware chain.
+/// Returns null when the chain passed and the handler should run,
+/// or the failed middleware's response for the caller to send.
+/// This never touches the request, so the decision logic is unit-testable without a live request.
+fn execute(comptime Context: type, ctx: *MiddlewareContext(Context)) !?ErrResponse {
     comptime if (validate(Context)) |d| @compileError(d.message);
-
-    const err = try run(Context, ctx, .{}) orelse return true;
-    try ctx.req.respondWithError(err.status, err.msg);
-    return false;
+    return run(Context, ctx, .{});
 }
 
 pub const ValidationError = enum {
@@ -890,7 +894,7 @@ test "orderedDependencies and execute" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
 }
 
 test "union - first successful variant wins" {
@@ -917,8 +921,8 @@ test "union - first successful variant wins" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
-    try std.testing.expect(activeTag(ctx.deps.auth) == .a);
+    try std.testing.expectEqual(null, try execute(C, &ctx));
+    try std.testing.expectEqual(.a, activeTag(ctx.deps.auth));
 }
 
 test "union - falls through to a later variant" {
@@ -945,7 +949,7 @@ test "union - falls through to a later variant" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.second, activeTag(ctx.deps.auth));
 }
 
@@ -981,7 +985,7 @@ test "union - struct variant resolves an in-variant dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.user, activeTag(ctx.deps.foo));
     try std.testing.expectEqual(7, ctx.deps.foo.user.auth.id);
 }
@@ -1017,7 +1021,7 @@ test "union - struct variant walks up to a guaranteed enclosing dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(7, ctx.deps.auth.user);
     try std.testing.expectEqual(.admin, activeTag(ctx.deps.gate));
 }
@@ -1051,7 +1055,7 @@ test "union - bare variant walks up to a guaranteed enclosing dependency" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.admin, activeTag(ctx.deps.gate));
 }
 
@@ -1097,7 +1101,7 @@ test "nested containers - leaf walks up two levels to a grandparent dependency" 
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(1, ctx.deps.base.v);
     try std.testing.expectEqual(.only, activeTag(ctx.deps.outer));
     try std.testing.expectEqual(.x, activeTag(ctx.deps.outer.only.inner));
@@ -1129,7 +1133,7 @@ test "nested containers - leaf resolves dependencies from two different ancestor
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.a, activeTag(ctx.deps.outer));
     try std.testing.expectEqual(.x, activeTag(ctx.deps.outer.a.inner));
     try std.testing.expectEqual(2, ctx.deps.outer.a.mid.v);
@@ -1166,7 +1170,7 @@ test "nested containers - inner union falls through then walks up" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.second, activeTag(ctx.deps.outer.a.inner));
 }
 
@@ -1195,7 +1199,7 @@ test "nested containers - deep bare variant walks up to a grandparent dependency
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(.only, activeTag(ctx.deps.outer.a.inner));
 }
 
@@ -1225,7 +1229,7 @@ test "optional - a failed optional middleware is tolerated and dependents see nu
         .req = undefined,
     };
     // `execute` succeeds even though Flaky failed, because the field is optional.
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.flaky);
     try std.testing.expect(ctx.deps.dep.saw_null);
 }
@@ -1254,7 +1258,7 @@ test "optional - an optional middleware whose required dependency is null is ski
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.auth);
     try std.testing.expectEqual(null, ctx.deps.role);
 }
@@ -1283,7 +1287,7 @@ test "optional union - leaves the field null when no variant succeeds" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expectEqual(null, ctx.deps.auth);
 }
 
@@ -1312,7 +1316,7 @@ test "optional union - commits the first variant that succeeds" {
         .server = undefined,
         .req = undefined,
     };
-    try std.testing.expect(try execute(C, &ctx));
+    try std.testing.expectEqual(null, try execute(C, &ctx));
     try std.testing.expect(ctx.deps.auth != null);
     try std.testing.expectEqual(.b, activeTag(ctx.deps.auth.?));
 }
@@ -1334,7 +1338,7 @@ test "error response - a failed guaranteed middleware surfaces its own status, n
         .req = undefined,
     };
 
-    const err = try run(C, &ctx, .{});
+    const err = try execute(C, &ctx);
     try std.testing.expect(err != null);
     try std.testing.expectEqual(.forbidden, err.?.status);
     try std.testing.expectEqualStrings("denied", err.?.msg);
@@ -1364,7 +1368,7 @@ test "error response - a fully failed union surfaces the last variant's response
         .server = undefined,
         .req = undefined,
     };
-    const err = try run(C, &ctx, .{});
+    const err = try execute(C, &ctx);
     try std.testing.expect(err != null);
     try std.testing.expectEqual(.forbidden, err.?.status);
     try std.testing.expectEqualStrings("b", err.?.msg);
