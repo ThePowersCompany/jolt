@@ -243,9 +243,9 @@ pub fn PatchQuery(P: type, ConnType: type) type {
                         const param = f[2];
                         if (comptime hasPlaceholders(expr)) {
                             if (comptime isOptional(@TypeOf(param))) {
-                                if (param == .value) try stmt.bind(param.value);
+                                if (param == .value) try bind(&stmt, param.value);
                             } else {
-                                try stmt.bind(param);
+                                try bind(&stmt, param);
                             }
                         }
                     }
@@ -258,6 +258,23 @@ pub fn PatchQuery(P: type, ConnType: type) type {
                     return &self._conn.result;
                 },
                 else => return error.UnsupportedConnectionType,
+            }
+        }
+
+        /// Bind a value to the PG statement.
+        /// Supports `null` and custom types with a `bind(self, *pg.Stmt)` function.
+        fn bind(stmt: *pg.Stmt, val: anytype) !void {
+            const T = @TypeOf(val);
+            if (@typeInfo(T) == .optional) {
+                if (val) |v| {
+                    try bind(stmt, v);
+                } else {
+                    try stmt.bind(null);
+                }
+            } else if (std.meta.hasFn(T, "bind")) {
+                try val.bind(stmt);
+            } else {
+                try stmt.bind(val);
             }
         }
     };

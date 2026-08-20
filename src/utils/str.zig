@@ -1,6 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const pg = @import("pg");
+
 pub fn Str(comptime T: type) type {
     return struct {
         str: []const u8,
@@ -26,6 +28,10 @@ pub fn Str(comptime T: type) type {
                 },
                 else => return error.UnexpectedToken,
             }
+        }
+
+        pub fn bind(self: *const Self, stmt: *pg.Stmt) !void {
+            try stmt.bind(self.str);
         }
     };
 }
