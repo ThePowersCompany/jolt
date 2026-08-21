@@ -29,6 +29,10 @@ const containers_mod = @import("../utils/containers.zig");
 const hasParamParse = containers_mod.hasParamParse;
 const getRequiredKeyCount = containers_mod.getRequiredKeyCount;
 
+const Str = @import("../utils/str.zig").Str;
+const Date = @import("../utils/datetime.zig").Date;
+const DateTime = @import("../utils/datetime.zig").DateTime;
+
 const unions_mod = @import("../utils/unions.zig");
 const isLiftableUnion = unions_mod.isLiftableUnion;
 
@@ -128,7 +132,9 @@ pub const TypeGenerator = struct {
                     .type => {
                         switch (@typeInfo(@field(EndpointType, decl.name))) {
                             .@"struct" => {
-                                try self.declareTopLevelType(decl.name);
+                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
+                                    try self.declareTopLevelType(decl.name);
+                                }
                             },
                             .@"enum" => |e| {
                                 try self.setTopLevelType(
@@ -162,15 +168,17 @@ pub const TypeGenerator = struct {
                         const t_info = @typeInfo(@field(EndpointType, decl.name));
                         switch (t_info) {
                             .@"struct" => |s| {
-                                const res = self.parseStruct(decl.name, s) catch |err| {
-                                    std.log.info(
-                                        "Endpoint: {s} - Type: {s}",
-                                        .{ endpoint_path, decl.name },
-                                    );
+                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
+                                    const res = self.parseStruct(decl.name, s) catch |err| {
+                                        std.log.info(
+                                            "Endpoint: {s} - Type: {s}",
+                                            .{ endpoint_path, decl.name },
+                                        );
 
-                                    return err;
-                                };
-                                try self.setTopLevelType(decl.name, res);
+                                        return err;
+                                    };
+                                    try self.setTopLevelType(decl.name, res);
+                                }
                             },
                             else => {},
                         }
@@ -703,7 +711,10 @@ pub const TypeGenerator = struct {
 
         if (s) |_| {
             const type_name = shortTypeName(@typeName(ResponseType));
-            if (!self.top_level_types.contains(type_name) and !isInlinedStruct(type_name)) {
+            if (requiresPublicTypeDeclaration(ResponseType) and
+                !self.top_level_types.contains(type_name) and
+                !isInlinedStruct(type_name))
+            {
                 std.log.err("{s} must be pub", .{type_name});
                 return error.ResponseTypeIsPrivate;
             }
@@ -1015,11 +1026,12 @@ pub const TypeGenerator = struct {
     }
 
     fn extractIdentifier(self: *Self, T: type) !ParseResult {
-        const type_info = @typeInfo(T);
+        const R = comptime resolveJsonType(T);
+        const type_info = @typeInfo(R);
         switch (type_info) {
             .int, .float => return .{ .parsed = "number" },
             .bool => return .{ .parsed = "boolean" },
-            .type, .void => return .{ .parsed = @typeName(T) },
+            .type, .void => return .{ .parsed = @typeName(R) },
             .pointer => {
                 if (type_info.pointer.child == u8) {
                     return .{ .parsed = "string" };
@@ -1030,7 +1042,7 @@ pub const TypeGenerator = struct {
                 }
             },
             .@"struct" => {
-                const type_name = comptime shortTypeName(@typeName(T));
+                const type_name = comptime shortTypeName(@typeName(R));
 
                 const res: ParseResult = if (self.getTopLevelType(type_name)) |gen|
                     .{ .parsed = type_name, .optional = gen.optional }
@@ -1039,20 +1051,20 @@ pub const TypeGenerator = struct {
 
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
-                if (@hasDecl(T, "constraints")) {
-                    return try self.applyConstraints(T.constraints, res);
+                if (@hasDecl(R, "constraints")) {
+                    return try self.applyConstraints(R.constraints, res);
                 }
                 return res;
             },
             .@"enum" => {
-                const type_name = shortTypeName(@typeName(T));
+                const type_name = shortTypeName(@typeName(R));
                 if (self.getTopLevelType(type_name)) |gen| {
                     return .{ .parsed = type_name, .optional = gen.optional };
                 }
                 return .{ .parsed = try self.parseEnum(type_info.@"enum") };
             },
             .@"union" => {
-                return .{ .parsed = try self.parseUnion(type_info.@"union", T) };
+                return .{ .parsed = try self.parseUnion(type_info.@"union", R) };
             },
             .optional => {
                 return .{
@@ -1065,7 +1077,7 @@ pub const TypeGenerator = struct {
                 };
             },
             .@"opaque" => {
-                return .{ .parsed = @typeName(T) };
+                return .{ .parsed = @typeName(R) };
             },
             else => {
                 std.log.err("Unhandled identifier: {s}", .{@tagName(type_info)});
@@ -1079,6 +1091,130 @@ pub const TypeGenerator = struct {
         return std.mem.containsAtLeast(u8, struct_name, 1, "__struct_");
     }
 };
+
+/// Resolves custom JSON types to their JSON type.
+fn resolveJsonType(comptime T: type) type {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "JsonType")) {
+        if (comptime @TypeOf(T.JsonType) != type) {
+            @compileError("JsonType on " ++ @typeName(T) ++ " must be a type");
+        }
+        if (comptime T.JsonType == T) {
+            @compileError("JsonType on " ++ @typeName(T) ++ " cannot refer to itself");
+        }
+        return T.JsonType;
+    }
+    return T;
+}
+
+fn shouldDeclareTopLevel(comptime T: type) bool {
+    return resolveJsonType(T) == T;
+}
+
+fn requiresPublicTypeDeclaration(comptime T: type) bool {
+    return @typeInfo(resolveJsonType(T)) == .@"struct";
+}
+
+const JsonEpochMillis = struct {
+    value: DateTime,
+
+    pub const JsonType = i64;
+
+    pub fn jsonParse(
+        allocator: Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !@This() {
+        const timestamp = try std.json.innerParse(i64, allocator, source, options);
+        return .{ .value = DateTime.fromUnix(timestamp, .milliseconds) };
+    }
+};
+
+const JsonTypeEndpoint = struct {
+    pub const Body = struct {
+        timestamp: JsonEpochMillis,
+    };
+
+    const Context = struct { body: Body };
+    const Response = struct { body: ?JsonEpochMillis = null };
+
+    pub fn post(_: *Context) Response {
+        return .{};
+    }
+};
+
+const DateStrBodyEndpoint = struct {
+    const DateStr = Str(Date);
+
+    const Context = struct {
+        body: struct {
+            date: DateStr,
+        },
+    };
+    const Response = struct { body: ?bool = null };
+
+    pub fn post(_: *Context) Response {
+        return .{};
+    }
+};
+
+test "custom JsonType structs generate their numeric wire type" {
+    const alloc = std.testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/custom-json-type", JsonTypeEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Body = {
+        \\  timestamp: number
+        \\}
+        \\export type Spec = {
+        \\  GET: {},
+        \\  POST: {
+        \\    "/custom-json-type": {
+        \\      body: Body
+        \\      response: number,
+        \\    }
+        \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+test "Str types generate as strings in request bodies" {
+    const alloc = std.testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/date", DateStrBodyEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {},
+        \\  POST: {
+        \\    "/date": {
+        \\      body: {
+        \\        date: string
+        \\      }
+        \\      response: boolean,
+        \\    }
+        \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
 
 test "required nullable fields" {
     const alloc = std.testing.allocator;

@@ -8,6 +8,8 @@ pub fn Str(comptime T: type) type {
         str: []const u8,
         data: T,
 
+        pub const JsonType = []const u8;
+
         const Self = @This();
 
         pub fn paramParse(alloc: Allocator, param: []const u8) !Self {
