@@ -18,16 +18,10 @@ pub fn Str(comptime T: type) type {
         }
 
         pub fn jsonParse(alloc: Allocator, source: anytype, options: anytype) !Self {
-            _ = options;
-
             const peek: std.json.TokenType = try source.peekNextTokenType();
             switch (peek) {
                 inline .string => {
-                    const token: std.json.Token = try source.nextAlloc(alloc, .alloc_if_needed);
-                    const str: []const u8 = switch (token) {
-                        .string, .allocated_string => |str| str,
-                        else => return error.UnexpectedToken,
-                    };
+                    const str = try std.json.innerParse([]const u8, alloc, source, options);
                     const data = T.paramParse(alloc, str) catch return error.InvalidCharacter;
                     return .{
                         .str = str,
