@@ -237,7 +237,7 @@ pub fn PatchQuery(P: type, ConnType: type) type {
                     errdefer stmt.deinit();
 
                     try stmt.prepare(self.sql.items, null);
-                    inline for (fixed_params) |p| try stmt.bind(p);
+                    inline for (fixed_params) |p| try bind(&stmt, p);
                     inline for (self.params) |f| {
                         const expr = f[1];
                         const param = f[2];
