@@ -4,10 +4,6 @@ pub fn strEqls(s1: []const u8, s2: []const u8) bool {
     return std.mem.eql(u8, s1, s2);
 }
 
-pub fn startsWith(haystack: []const u8, needle: []const u8) bool {
-    return std.mem.startsWith(u8, haystack, needle);
-}
-
 pub const Method = enum {
     get,
     post,

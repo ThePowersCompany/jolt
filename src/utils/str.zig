@@ -8,7 +8,7 @@ pub fn Str(comptime T: type) type {
         str: []const u8,
         data: T,
 
-        pub const JsonType = []const u8;
+        pub const _repr: type = []const u8;
 
         const Self = @This();
 
