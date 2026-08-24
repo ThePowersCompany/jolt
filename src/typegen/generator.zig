@@ -673,7 +673,7 @@ pub const TypeGenerator = struct {
 
         // Determine return type
         const return_type_info = @typeInfo(F.return_type.?);
-        comptime var ResponseType: type = blk: {
+        const ResponseType: type = blk: {
             switch (return_type_info) {
                 .error_union => {
                     const inner_info = @typeInfo(return_type_info.error_union.payload);
@@ -687,33 +687,6 @@ pub const TypeGenerator = struct {
         var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
         const ts = (try self.extractIdentifier(ResponseType)).parsed;
         res.value_ptr.response = ts;
-
-        const type_info = @typeInfo(ResponseType);
-        comptime var s: ?Type.Struct = null;
-        if (type_info == .pointer) {
-            const child_info = @typeInfo(type_info.pointer.child);
-            if (child_info == .@"struct") {
-                s = child_info.@"struct";
-                ResponseType = type_info.pointer.child;
-            }
-        }
-
-        if (s == null and type_info == .@"struct") s = type_info.@"struct";
-
-        if (s) |_| {
-            const type_name = shortTypeName(@typeName(ResponseType));
-            const requiresPublicTypeDeclaration =
-                comptime typescriptRepr(ResponseType) == null and
-                @typeInfo(ResponseType) == .@"struct";
-
-            if (requiresPublicTypeDeclaration and
-                !self.top_level_types.contains(type_name) and
-                !isInlinedStruct(type_name))
-            {
-                std.log.err("{s} must be pub", .{type_name});
-                return error.ResponseTypeIsPrivate;
-            }
-        }
     }
 
     fn getResponseInnerType(s: Type.Struct) type {
