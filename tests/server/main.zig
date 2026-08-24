@@ -20,6 +20,7 @@ pub const endpoints = [_]EndpointDef{
     .{ "/nullable", @import("endpoints/nullable.zig") },
     .{ "/arrays", @import("endpoints/arrays.zig") },
     .{ "/param-parse", @import("endpoints/param-parse.zig") },
+    .{ "/repr", @import("endpoints/repr.zig") },
 };
 
 const tasks = [_]type{};
