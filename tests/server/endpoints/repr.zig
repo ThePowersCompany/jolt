@@ -54,12 +54,6 @@ pub const ReprPatchBody = struct {
             }
             return .{ .baz = val };
         }
-
-        pub fn jsonStringify(self: @This(), out: anytype) !void {
-            switch (self) {
-                else => |v| try out.write(v),
-            }
-        }
     },
 };
 
