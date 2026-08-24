@@ -357,6 +357,7 @@ pub const TypeGenerator = struct {
                 inline for (info.@"union".decls) |decl| {
                     if (comptime strEqls(decl.name, "_repr")) {
                         const repr = @field(field.type, decl.name);
+                        if (@TypeOf(repr) != UnionRepr) break;
                         if (repr == .adjacently) {
                             union_repr = repr;
                             break;

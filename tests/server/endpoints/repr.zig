@@ -25,14 +25,48 @@ const EpochMillis = struct {
     }
 };
 
-pub const ReprBody = struct {
+pub const ReprPostBody = struct {
     epoch_millis: EpochMillis,
 };
 
 const PostContext = struct {
-    body: ReprBody,
+    body: ReprPostBody,
 };
 
-pub fn post(ctx: *PostContext, _: Allocator) !Response(ReprBody) {
+pub fn post(ctx: *PostContext, _: Allocator) !Response(ReprPostBody) {
+    return .{ .body = ctx.body };
+}
+
+pub const ReprPatchBody = struct {
+    foo: union(enum) {
+        pub const _repr = f64;
+        bar: i64,
+        baz: f64,
+
+        pub fn jsonParse(
+            allocator: Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !@This() {
+            const val = try std.json.innerParse(f64, allocator, source, options);
+            if (@trunc(val) == val) {
+                return .{ .bar = @intFromFloat(val) };
+            }
+            return .{ .baz = val };
+        }
+
+        pub fn jsonStringify(self: @This(), out: anytype) !void {
+            switch (self) {
+                else => |v| try out.write(v),
+            }
+        }
+    },
+};
+
+const PatchContext = struct {
+    body: ReprPatchBody,
+};
+
+pub fn patch(ctx: *PatchContext, _: Allocator) !Response(ReprPatchBody) {
     return .{ .body = ctx.body };
 }
