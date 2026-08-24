@@ -348,3 +348,12 @@ test "findReprUnionInQuery: detects a _repr union inside a liftable union varian
     const msg = comptime findReprUnionInQuery(Q, "root");
     try expect(msg != null);
 }
+
+test "findReprUnionInQuery: treats _repr: type as untagged" {
+    const Q = union(enum) {
+        pub const _repr: type = i64;
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(null, comptime findReprUnionInQuery(Q, "root"));
+}

@@ -18,7 +18,6 @@ const JsonArray = types.JsonArray;
 
 const common = @import("./common.zig");
 const strEqls = common.strEqls;
-const startsWith = common.startsWith;
 const Method = common.Method;
 const EndpointData = common.EndpointData;
 const ParseResult = common.ParseResult;
@@ -28,6 +27,10 @@ const FlatLeaf = common.FlatLeaf;
 const containers_mod = @import("../utils/containers.zig");
 const hasParamParse = containers_mod.hasParamParse;
 const getRequiredKeyCount = containers_mod.getRequiredKeyCount;
+
+const Str = @import("../utils/str.zig").Str;
+const Date = @import("../utils/datetime.zig").Date;
+const DateTime = @import("../utils/datetime.zig").DateTime;
 
 const unions_mod = @import("../utils/unions.zig");
 const isLiftableUnion = unions_mod.isLiftableUnion;
@@ -128,7 +131,9 @@ pub const TypeGenerator = struct {
                     .type => {
                         switch (@typeInfo(@field(EndpointType, decl.name))) {
                             .@"struct" => {
-                                try self.declareTopLevelType(decl.name);
+                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
+                                    try self.declareTopLevelType(decl.name);
+                                }
                             },
                             .@"enum" => |e| {
                                 try self.setTopLevelType(
@@ -162,15 +167,17 @@ pub const TypeGenerator = struct {
                         const t_info = @typeInfo(@field(EndpointType, decl.name));
                         switch (t_info) {
                             .@"struct" => |s| {
-                                const res = self.parseStruct(decl.name, s) catch |err| {
-                                    std.log.info(
-                                        "Endpoint: {s} - Type: {s}",
-                                        .{ endpoint_path, decl.name },
-                                    );
+                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
+                                    const res = self.parseStruct(decl.name, s) catch |err| {
+                                        std.log.info(
+                                            "Endpoint: {s} - Type: {s}",
+                                            .{ endpoint_path, decl.name },
+                                        );
 
-                                    return err;
-                                };
-                                try self.setTopLevelType(decl.name, res);
+                                        return err;
+                                    };
+                                    try self.setTopLevelType(decl.name, res);
+                                }
                             },
                             else => {},
                         }
@@ -347,13 +354,10 @@ pub const TypeGenerator = struct {
                 if (info != .@"union") continue;
 
                 var union_repr: ?UnionRepr = null;
-                inline for (info.@"union".decls) |decl| {
-                    if (comptime strEqls(decl.name, "_repr")) {
-                        const repr = @field(field.type, decl.name);
-                        if (repr == .adjacently) {
-                            union_repr = repr;
-                            break;
-                        }
+                if (comptime @hasDecl(field.type, "_repr")) {
+                    const repr = @field(field.type, "_repr");
+                    if (@TypeOf(repr) == UnionRepr and repr == .adjacently) {
+                        union_repr = repr;
                     }
                 }
 
@@ -412,11 +416,6 @@ pub const TypeGenerator = struct {
         inline for (S.fields) |field| {
             try res.appendSlice(self.arena_alloc, field.name);
 
-            comptime var T: type = field.type;
-            if (comptime startsWith(@typeName(T), "utils.types.JsonArray(")) {
-                T = @FieldType(@FieldType(T, "list"), "items");
-            }
-
             // Ensure Optionals have default values
             if (comptime isOptional(field.type) and field.defaultValue() == null) {
                 std.log.info(
@@ -426,7 +425,7 @@ pub const TypeGenerator = struct {
                 return error.OptionalMissingDefault;
             }
 
-            const parse_result = try self.extractIdentifier(T);
+            const parse_result = try self.extractIdentifier(field.type);
 
             // TODO: This is a weird bug in defaultValue I had to work around...
             if (comptime strEqls(field.name, "_is_finished")) continue;
@@ -674,7 +673,7 @@ pub const TypeGenerator = struct {
 
         // Determine return type
         const return_type_info = @typeInfo(F.return_type.?);
-        comptime var ResponseType: type = blk: {
+        const ResponseType: type = blk: {
             switch (return_type_info) {
                 .error_union => {
                     const inner_info = @typeInfo(return_type_info.error_union.payload);
@@ -688,26 +687,6 @@ pub const TypeGenerator = struct {
         var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
         const ts = (try self.extractIdentifier(ResponseType)).parsed;
         res.value_ptr.response = ts;
-
-        const type_info = @typeInfo(ResponseType);
-        comptime var s: ?Type.Struct = null;
-        if (type_info == .pointer) {
-            const child_info = @typeInfo(type_info.pointer.child);
-            if (child_info == .@"struct") {
-                s = child_info.@"struct";
-                ResponseType = type_info.pointer.child;
-            }
-        }
-
-        if (s == null and type_info == .@"struct") s = type_info.@"struct";
-
-        if (s) |_| {
-            const type_name = shortTypeName(@typeName(ResponseType));
-            if (!self.top_level_types.contains(type_name) and !isInlinedStruct(type_name)) {
-                std.log.err("{s} must be pub", .{type_name});
-                return error.ResponseTypeIsPrivate;
-            }
-        }
     }
 
     fn getResponseInnerType(s: Type.Struct) type {
@@ -1015,6 +994,10 @@ pub const TypeGenerator = struct {
     }
 
     fn extractIdentifier(self: *Self, T: type) !ParseResult {
+        if (comptime typescriptRepr(T)) |repr_type| {
+            return self.extractIdentifier(repr_type);
+        }
+
         const type_info = @typeInfo(T);
         switch (type_info) {
             .int, .float => return .{ .parsed = "number" },
@@ -1079,6 +1062,194 @@ pub const TypeGenerator = struct {
         return std.mem.containsAtLeast(u8, struct_name, 1, "__struct_");
     }
 };
+
+/// Returns the TypeScript wire type declared by `T._repr`, or `null` when `T` does not have a `_repr` decl.
+///
+/// A `_repr` must be either a `type` or a `UnionRepr` (unions).
+fn typescriptRepr(comptime T: type) ?type {
+    switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => {},
+        else => return null,
+    }
+    if (!@hasDecl(T, "_repr")) return null;
+
+    const Repr = @TypeOf(T._repr);
+    if (Repr == UnionRepr) {
+        if (@typeInfo(T) == .@"union") return null;
+        @compileError("_repr on " ++ @typeName(T) ++ " must be a type, not UnionRepr");
+    }
+    if (Repr != type)
+        @compileError("_repr on " ++ @typeName(T) ++ " must be a type or UnionRepr");
+
+    return T._repr;
+}
+
+fn shouldDeclareTopLevel(comptime T: type) bool {
+    return comptime typescriptRepr(T) == null;
+}
+
+const TypeScriptOpaqueId = struct {
+    bytes: [16]u8,
+
+    pub const _repr: type = []const u8;
+};
+
+test "extractIdentifier: a type _repr overrides structural type generation" {
+    const alloc = std.testing.allocator;
+
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const result = try type_generator.extractIdentifier(TypeScriptOpaqueId);
+    try expectContent("string", result.parsed);
+}
+
+test "generateTypes: _repr types generate their declared TypeScript wire type" {
+    const TypeScriptOpaqueIdEndpoint = struct {
+        const Context = struct {
+            body: struct {
+                id: TypeScriptOpaqueId,
+            },
+        };
+        const Response = struct { body: ?TypeScriptOpaqueId = null };
+
+        pub fn post(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/opaque-id", TypeScriptOpaqueIdEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {},
+        \\  POST: {
+        \\    "/opaque-id": {
+        \\      body: {
+        \\        id: string
+        \\      }
+        \\      response: string,
+        \\    }
+        \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+const DateStrBodyEndpoint = struct {
+    const DateStr = Str(Date);
+
+    const Context = struct {
+        body: struct {
+            date: DateStr,
+        },
+    };
+    const Response = struct { body: ?bool = null };
+
+    pub fn post(_: *Context) Response {
+        return .{};
+    }
+};
+
+const ReprEpochMillis = struct {
+    value: DateTime,
+
+    pub const _repr: type = i64;
+
+    pub fn jsonParse(
+        allocator: Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !@This() {
+        const timestamp = try std.json.innerParse(i64, allocator, source, options);
+        return .{ .value = DateTime.fromUnix(timestamp, .milliseconds) };
+    }
+};
+
+const ReprEpochMillisEndpoint = struct {
+    pub const Body = struct {
+        timestamp: ReprEpochMillis,
+    };
+
+    const Context = struct { body: Body };
+    const Response = struct { body: ?ReprEpochMillis = null };
+
+    pub fn post(_: *Context) Response {
+        return .{};
+    }
+};
+
+test "custom _repr structs generate their numeric wire type" {
+    const alloc = std.testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/custom-json-type", ReprEpochMillisEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Body = {
+        \\  timestamp: number
+        \\}
+        \\export type Spec = {
+        \\  GET: {},
+        \\  POST: {
+        \\    "/custom-json-type": {
+        \\      body: Body
+        \\      response: number,
+        \\    }
+        \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+test "Str types generate as strings in request bodies" {
+    const alloc = std.testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/date", DateStrBodyEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {},
+        \\  POST: {
+        \\    "/date": {
+        \\      body: {
+        \\        date: string
+        \\      }
+        \\      response: boolean,
+        \\    }
+        \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
 
 test "required nullable fields" {
     const alloc = std.testing.allocator;

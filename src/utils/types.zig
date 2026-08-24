@@ -395,6 +395,8 @@ pub fn JsonArray(comptime T: type) type {
 
         list: std.ArrayList(T) = .empty,
 
+        pub const _repr: type = []T;
+
         pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
             self.list.deinit(alloc);
         }

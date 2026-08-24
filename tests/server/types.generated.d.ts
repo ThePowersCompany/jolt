@@ -54,6 +54,14 @@ export type ParamParseQpDetails = {
   millis: number | null;
 };
 
+export type ReprPatchBody = {
+  foo: number;
+};
+
+export type ReprPostBody = {
+  epoch_millis: number;
+};
+
 export type UnionVariantQpDetails = {
   variant: string;
   id?: number | null;
@@ -137,8 +145,18 @@ export type Spec = {
       response: ParamParseQpDetails;
     };
   };
-  POST: {};
+  POST: {
+    "/repr": {
+      body: ReprPostBody;
+      response: ReprPostBody;
+    };
+  };
   PUT: {};
-  PATCH: {};
+  PATCH: {
+    "/repr": {
+      body: ReprPatchBody;
+      response: ReprPatchBody;
+    };
+  };
   DELETE: {};
 };

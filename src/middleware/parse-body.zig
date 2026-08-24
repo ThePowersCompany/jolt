@@ -9,7 +9,6 @@ const HttpError = zap.HttpError;
 const StatusCode = zap.StatusCode;
 
 const types = @import("../utils/types.zig");
-const UnionRepr = types.UnionRepr;
 
 /// Parses the body of the request and attaches it to the given Context.
 /// Context must have a member named "body" which resolves to the type meant to be parsed into an object.
