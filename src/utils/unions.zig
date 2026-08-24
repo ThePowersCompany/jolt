@@ -14,6 +14,11 @@ const containers_module = @import("./containers.zig");
 const hasParamParse = containers_module.hasParamParse;
 const getRequiredKeyCount = containers_module.getRequiredKeyCount;
 
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
+
 /// Various ways to represent tagged unions in JSON
 /// Reference (Rust): https://serde.rs/enum-representations.html
 pub const UnionRepr = union(enum) {
@@ -395,11 +400,54 @@ fn parseInit(
 /// Such unions cannot be used in query params, which have no structure for a discriminator.
 /// Untagged unions (`.untagged` mode) are allowed since they infer the variant from the value.
 pub fn hasTaggedRepr(comptime T: type) bool {
-    comptime {
-        if (@typeInfo(T) != .@"union" or !@hasDecl(T, "_repr")) return false;
-        const repr = T._repr;
-        return repr != .untagged;
-    }
+    if (@typeInfo(T) != .@"union" or !@hasDecl(T, "_repr")) return false;
+    if (@TypeOf(T._repr) != UnionRepr) return false;
+    return T._repr != .untagged;
+}
+
+test "hasTaggedRepr: .external" {
+    const Q = union(enum) {
+        pub const _repr: UnionRepr = .external;
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(true, hasTaggedRepr(Q));
+}
+
+test "hasTaggedRepr: .internal" {
+    const Q = union(enum) {
+        pub const _repr: UnionRepr = .{ .internal = .{ .discriminator = "a" } };
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(true, hasTaggedRepr(Q));
+}
+
+test "hasTaggedRepr: .adjacently" {
+    const Q = union(enum) {
+        const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "b" } };
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(true, hasTaggedRepr(Q));
+}
+
+test "hasTaggedRepr: .untagged" {
+    const Q = union(enum) {
+        pub const _repr: type = i64;
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(false, hasTaggedRepr(Q));
+}
+
+test "hasTaggedRepr: _repr: type" {
+    const Q = union(enum) {
+        pub const _repr: type = i64;
+        foo: i32,
+        bar: []const u8,
+    };
+    try expectEqual(false, hasTaggedRepr(Q));
 }
 
 /// Returns if `T` is a tagged union that should be lifted into the flat query key space.
@@ -438,9 +486,9 @@ test "external: struct payload" {
     ,
         .{},
     );
-    try testing.expect(v == .point);
-    try testing.expectEqual(1, v.point.x);
-    try testing.expectEqual(2, v.point.y);
+    try expect(v == .point);
+    try expectEqual(1, v.point.x);
+    try expectEqual(2, v.point.y);
 }
 
 test "external: string payload" {
@@ -453,8 +501,8 @@ test "external: string payload" {
     ,
         .{},
     );
-    try testing.expect(v == .text);
-    try testing.expectEqualStrings("hi", v.text);
+    try expect(v == .text);
+    try expectEqualStrings("hi", v.text);
 }
 
 test "external: void payload" {
@@ -467,11 +515,11 @@ test "external: void payload" {
     ,
         .{},
     );
-    try testing.expect(v == .ping);
+    try expect(v == .ping);
 }
 
 test "external: unknown variant errors" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             External,
@@ -486,7 +534,7 @@ test "external: unknown variant errors" {
 }
 
 test "external: non-object input errors" {
-    try testing.expectError(
+    try expectError(
         error.UnexpectedToken,
         std.json.parseFromSliceLeaky(External, testing.allocator, "42", .{}),
     );
@@ -494,7 +542,7 @@ test "external: non-object input errors" {
 
 test "external: object with multiple keys errors" {
     // More than one key is ambiguous about which variant is meant, so it is rejected.
-    try testing.expectError(
+    try expectError(
         error.UnexpectedToken,
         std.json.parseFromSlice(
             External,
@@ -534,9 +582,9 @@ test "internal: request variant" {
     ,
         .{},
     );
-    try testing.expect(v == .request);
-    try testing.expectEqualStrings("abc123", v.request.id);
-    try testing.expectEqualStrings("GET", v.request.method);
+    try expect(v == .request);
+    try expectEqualStrings("abc123", v.request.id);
+    try expectEqualStrings("GET", v.request.method);
 }
 
 test "internal: response variant" {
@@ -553,8 +601,8 @@ test "internal: response variant" {
     ,
         .{},
     );
-    try testing.expect(v == .response);
-    try testing.expectEqual(32, v.response.result);
+    try expect(v == .response);
+    try expectEqual(32, v.response.result);
 }
 
 test "internal: void variant" {
@@ -569,13 +617,13 @@ test "internal: void variant" {
     ,
         .{},
     );
-    try testing.expect(v == .ping);
+    try expect(v == .ping);
 }
 
 test "internal: missing discriminator errors" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(
+    try expectError(
         error.MissingField,
         std.json.parseFromSliceLeaky(
             Internal,
@@ -593,7 +641,7 @@ test "internal: missing discriminator errors" {
 test "internal: unknown discriminator value errors" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             Internal,
@@ -608,7 +656,7 @@ test "internal: unknown discriminator value errors" {
 test "internal: non-string discriminator errors" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(
+    try expectError(
         error.UnexpectedToken,
         std.json.parseFromSliceLeaky(
             Internal,
@@ -623,7 +671,7 @@ test "internal: non-string discriminator errors" {
 test "internal: void variant rejects extra fields" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             Internal,
@@ -645,7 +693,7 @@ test "internal: void variant tolerates extra fields when ignore_unknown_fields" 
     ,
         .{ .ignore_unknown_fields = true },
     );
-    try testing.expect(v == .ping);
+    try expect(v == .ping);
 }
 
 // Adjacently
@@ -680,11 +728,11 @@ test "adjacently: payload inferred from downtime" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alert = try std.json.parseFromSliceLeaky(Alert, arena.allocator(), json, .{});
-    try testing.expectEqual(1, alert.id);
-    try testing.expectEqual(AlertTopic.downtime, alert.topic);
-    try testing.expect(alert.payload == .downtime);
-    try testing.expectEqualStrings("A", alert.payload.downtime.line);
-    try testing.expectEqual(5.0, alert.payload.downtime.minutes);
+    try expectEqual(1, alert.id);
+    try expectEqual(AlertTopic.downtime, alert.topic);
+    try expect(alert.payload == .downtime);
+    try expectEqualStrings("A", alert.payload.downtime.line);
+    try expectEqual(5.0, alert.payload.downtime.minutes);
 }
 
 test "adjacently: payload inferred from lost_production" {
@@ -698,10 +746,10 @@ test "adjacently: payload inferred from lost_production" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alert = try std.json.parseFromSliceLeaky(Alert, arena.allocator(), json, .{});
-    try testing.expectEqual(2, alert.id);
-    try testing.expect(alert.payload == .lost_production);
-    try testing.expectEqualStrings("B", alert.payload.lost_production.line);
-    try testing.expectEqual(12.5, alert.payload.lost_production.units);
+    try expectEqual(2, alert.id);
+    try expect(alert.payload == .lost_production);
+    try expectEqualStrings("B", alert.payload.lost_production.line);
+    try expectEqual(12.5, alert.payload.lost_production.units);
 }
 
 // Untagged
@@ -722,8 +770,8 @@ test "untagged: scalar variant" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const v = try std.json.parseFromSliceLeaky(Untagged, arena.allocator(), "7", .{});
-    try testing.expect(v == .number);
-    try testing.expectEqual(7, v.number);
+    try expect(v == .number);
+    try expectEqual(7, v.number);
 }
 
 test "untagged: pair struct variant inferred by shape" {
@@ -739,8 +787,8 @@ test "untagged: pair struct variant inferred by shape" {
     ,
         .{},
     );
-    try testing.expect(v == .pair);
-    try testing.expectEqual(2, v.pair.b);
+    try expect(v == .pair);
+    try expectEqual(2, v.pair.b);
 }
 
 test "untagged: named struct variant inferred by shape" {
@@ -755,14 +803,14 @@ test "untagged: named struct variant inferred by shape" {
     ,
         .{},
     );
-    try testing.expect(v == .named);
-    try testing.expectEqualStrings("zig", v.named.name);
+    try expect(v == .named);
+    try expectEqualStrings("zig", v.named.name);
 }
 
 test "untagged: no matching variant errors" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(
             Untagged,
@@ -808,9 +856,9 @@ test "untagged: optional-only first variant does not swallow a later variant" {
     ,
         .{},
     );
-    try testing.expect(v == .coords);
-    try testing.expectEqual(1, v.coords.x);
-    try testing.expectEqual(2, v.coords.y);
+    try expect(v == .coords);
+    try expectEqual(1, v.coords.x);
+    try expectEqual(2, v.coords.y);
 }
 
 test "untagged: optional-only first variant still matches its own shape" {
@@ -825,9 +873,9 @@ test "untagged: optional-only first variant still matches its own shape" {
     ,
         .{},
     );
-    try testing.expect(v == .maybe);
-    try testing.expect(v.maybe.note != null);
-    try testing.expectEqualStrings("hello", v.maybe.note.?);
+    try expect(v == .maybe);
+    try expect(v.maybe.note != null);
+    try expectEqualStrings("hello", v.maybe.note.?);
 }
 
 /// Simple, mutually-exclusive, scalar type
@@ -845,31 +893,31 @@ const IdOrAuto = union(enum) {
 
 test "untagged: IdOrAuto - should not allocate memory for i32" {
     const v = try std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "123", .{});
-    try testing.expect(v == .id);
-    try testing.expectEqual(123, v.id);
+    try expect(v == .id);
+    try expectEqual(123, v.id);
 }
 
 test "untagged: IdOrAuto - should not allocate memory for 'auto'" {
     const v = try std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "\"auto\"", .{});
-    try testing.expect(v == .auto);
+    try expect(v == .auto);
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid number" {
-    try testing.expectError(
+    try expectError(
         error.Overflow,
         std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "123456789000", .{}),
     );
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid string" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "\"abc\"", .{}),
     );
 }
 
 test "untagged: IdOrAuto - should not allocate memory for invalid type" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(IdOrAuto, no_alloc, "{}", .{}),
     );
@@ -891,18 +939,18 @@ const TestAction = union(enum) {
 
 test "untagged: TestAction - should not allocate memory for 'replace" {
     const v = try std.json.parseFromSliceLeaky(TestAction, no_alloc, "\"replace\"", .{});
-    try testing.expect(v == .replace);
+    try expect(v == .replace);
 }
 
 test "untagged: TestAction - should not allocate memory for invalid string" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(TestAction, no_alloc, "\"auto\"", .{}),
     );
 }
 
 test "untagged: TestAction - should fail for number" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(TestAction, no_alloc, "123", .{}),
     );
@@ -927,44 +975,44 @@ const Val = union(enum) {
 
 test "untagged: Val - should not allocate for a number token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "42", .{});
-    try testing.expect(v == .count);
-    try testing.expectEqual(42, v.count);
+    try expect(v == .count);
+    try expectEqual(42, v.count);
 }
 
 test "untagged: Val - should not allocate for a null token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "null", .{});
-    try testing.expect(v == .enabled);
-    try testing.expectEqual(null, v.enabled);
+    try expect(v == .enabled);
+    try expectEqual(null, v.enabled);
 }
 
 test "untagged: Val - should not allocate for a bool token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "true", .{});
-    try testing.expect(v == .enabled);
-    try testing.expectEqual(true, v.enabled);
+    try expect(v == .enabled);
+    try expectEqual(true, v.enabled);
 }
 
 test "untagged: Val - should not allocate for a 'auto' string token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "\"auto\"", .{});
-    try testing.expect(v == .auto);
+    try expect(v == .auto);
 }
 
 test "untagged: Val - should not allocate for a fallback string token" {
     const v = try std.json.parseFromSliceLeaky(Val, no_alloc, "\"fallback\"", .{});
-    try testing.expect(v == .fallback);
-    try testing.expectEqualStrings("fallback", v.fallback);
+    try expect(v == .fallback);
+    try expectEqualStrings("fallback", v.fallback);
 }
 
 test "untagged: Val - obj token" {
     const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "{ \"x\": 1, \"y\": 2 }", .{});
-    try testing.expect(v == .obj);
-    try testing.expectEqual(1, v.obj.x);
-    try testing.expectEqual(2, v.obj.y);
+    try expect(v == .obj);
+    try expectEqual(1, v.obj.x);
+    try expectEqual(2, v.obj.y);
 }
 
 test "untagged: Val - arr token" {
     const v = try std.json.parseFromSliceLeaky(Val, testing.allocator, "[1,2,3]", .{});
-    try testing.expect(v == .arr);
-    try testing.expectEqual(3, v.arr.len);
+    try expect(v == .arr);
+    try expectEqual(3, v.arr.len);
     testing.allocator.free(v.arr);
 }
 
@@ -1013,9 +1061,9 @@ test "nested: internal-tagged union nested inside an inferred union honors its r
     ,
         .{},
     );
-    try testing.expect(v == .wrap);
-    try testing.expect(v.wrap.inner == .b);
-    try testing.expectEqual(9, v.wrap.inner.b.y);
+    try expect(v == .wrap);
+    try expect(v.wrap.inner == .b);
+    try expectEqual(9, v.wrap.inner.b.y);
 }
 
 // Untagged union mixing a void variant with a struct variant,
@@ -1033,7 +1081,7 @@ const AutoOrPoint = union(enum) {
 
 test "untagged: void variant matched by name string" {
     const v = try std.json.parseFromSliceLeaky(AutoOrPoint, no_alloc, "\"auto\"", .{});
-    try testing.expect(v == .auto);
+    try expect(v == .auto);
 }
 
 test "untagged: struct variant inferred by shape" {
@@ -1044,20 +1092,20 @@ test "untagged: struct variant inferred by shape" {
     ,
         .{},
     );
-    try testing.expect(v == .point);
-    try testing.expectEqual(1, v.point.x);
-    try testing.expectEqual(2, v.point.y);
+    try expect(v == .point);
+    try expectEqual(1, v.point.x);
+    try expectEqual(2, v.point.y);
 }
 
 test "untagged: empty object does not match the void variant" {
-    try testing.expectError(
+    try expectError(
         error.MissingField,
         std.json.parseFromSliceLeaky(AutoOrPoint, testing.allocator, "{}", .{}),
     );
 }
 
 test "untagged: wrong string does not match the void variant" {
-    try testing.expectError(
+    try expectError(
         error.UnknownField,
         std.json.parseFromSliceLeaky(AutoOrPoint, no_alloc, "\"nope\"", .{}),
     );
