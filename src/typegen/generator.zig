@@ -702,7 +702,11 @@ pub const TypeGenerator = struct {
 
         if (s) |_| {
             const type_name = shortTypeName(@typeName(ResponseType));
-            if (requiresPublicTypeDeclaration(ResponseType) and
+            const requiresPublicTypeDeclaration =
+                comptime typescriptRepr(ResponseType) == null and
+                @typeInfo(ResponseType) == .@"struct";
+
+            if (requiresPublicTypeDeclaration and
                 !self.top_level_types.contains(type_name) and
                 !isInlinedStruct(type_name))
             {
@@ -1109,10 +1113,6 @@ fn typescriptRepr(comptime T: type) ?type {
 
 fn shouldDeclareTopLevel(comptime T: type) bool {
     return comptime typescriptRepr(T) == null;
-}
-
-fn requiresPublicTypeDeclaration(comptime T: type) bool {
-    return comptime typescriptRepr(T) == null and @typeInfo(T) == .@"struct";
 }
 
 const TypeScriptOpaqueId = struct {
