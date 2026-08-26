@@ -1,4 +1,5 @@
 const std = @import("std");
+const TypeExpr = @import("typescript.zig").TypeExpr;
 
 pub fn strEqls(s1: []const u8, s2: []const u8) bool {
     return std.mem.eql(u8, s1, s2);
@@ -18,13 +19,6 @@ pub const EndpointData = struct {
     response: ?[]const u8 = null,
 };
 
-pub const ParseResult = struct {
-    // If empty, parsing hasn't completed yet.
-    parsed: []const u8,
-    // Whether all the fields of the parsed type are optional.
-    optional: bool = false,
-};
-
 pub const AdjacentUnion = struct {
     /// The discriminator of an adjacently tagged union.
     /// Only one field in a struct may be this type of union.
@@ -36,6 +30,6 @@ pub const AdjacentUnion = struct {
 /// A single flattened query-param leaf key.
 pub const FlatLeaf = struct {
     name: []const u8,
-    ts_type: []const u8,
+    expr: *const TypeExpr,
     optional: bool,
 };

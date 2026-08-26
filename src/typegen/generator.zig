@@ -3,7 +3,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const StringArrayHashMap = std.StringArrayHashMap;
 const ArrayList = std.ArrayList;
-const StringHashMap = std.StringHashMap;
 const Type = std.builtin.Type;
 const allocPrint = std.fmt.allocPrint;
 const stringToEnum = std.meta.stringToEnum;
@@ -20,9 +19,16 @@ const common = @import("./common.zig");
 const strEqls = common.strEqls;
 const Method = common.Method;
 const EndpointData = common.EndpointData;
-const ParseResult = common.ParseResult;
 const AdjacentUnion = common.AdjacentUnion;
 const FlatLeaf = common.FlatLeaf;
+
+const typescript = @import("./typescript.zig");
+const BuiltType = typescript.BuiltType;
+const TypeExpr = typescript.TypeExpr;
+
+const declarations = @import("./declarations.zig");
+const Registry = declarations.Registry;
+const TypeUsage = declarations.TypeUsage;
 
 const containers_mod = @import("../utils/containers.zig");
 const hasParamParse = containers_mod.hasParamParse;
@@ -38,17 +44,15 @@ const isLiftableUnion = unions_mod.isLiftableUnion;
 const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
 
-const ParseContext = enum { body, query_params };
+const TypeGenerationContext = struct {
+    usage: TypeUsage,
+};
 
 pub const TypeGenerator = struct {
     const Self = @This();
 
     arena_alloc: Allocator,
-
-    parse_context: ParseContext = .body,
-
-    /// short type name => ParseResult
-    top_level_types: StringHashMap(?ParseResult),
+    registry: Registry,
 
     get_endpoints: StringArrayHashMap(EndpointData),
     post_endpoints: StringArrayHashMap(EndpointData),
@@ -59,8 +63,7 @@ pub const TypeGenerator = struct {
     pub fn init(arena_alloc: Allocator) !Self {
         return .{
             .arena_alloc = arena_alloc,
-            .parse_context = .body,
-            .top_level_types = StringHashMap(?ParseResult).init(arena_alloc),
+            .registry = Registry.init(arena_alloc),
             .get_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
             .post_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
             .put_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
@@ -70,7 +73,7 @@ pub const TypeGenerator = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.top_level_types.deinit();
+        self.registry.deinit();
         self.get_endpoints.deinit();
         self.post_endpoints.deinit();
         self.put_endpoints.deinit();
@@ -78,122 +81,17 @@ pub const TypeGenerator = struct {
         self.delete_endpoints.deinit();
     }
 
-    fn endpointsData(self: *Self, method: Method) *StringArrayHashMap(EndpointData) {
-        return switch (method) {
-            .get => &self.get_endpoints,
-            .post => &self.post_endpoints,
-            .put => &self.put_endpoints,
-            .patch => &self.patch_endpoints,
-            .delete => &self.delete_endpoints,
-        };
-    }
-
-    fn getTopLevelType(self: *Self, name: []const u8) ?ParseResult {
-        const entry = self.top_level_types.get(name) orelse return null;
-        return entry orelse ParseResult{ .parsed = name, .optional = false };
-    }
-
-    /// "Registers" a top level type name before the full type has been generated.
-    fn declareTopLevelType(self: *Self, comptime name: []const u8) !void {
-        if (self.top_level_types.contains(name)) {
-            std.log.err("Tried to redeclare top level type: {s}", .{name});
-            return error.DuplicateDeclaration;
-        }
-        try self.top_level_types.put(name, null);
-    }
-
-    fn setTopLevelType(self: *Self, name: []const u8, result: ParseResult) !void {
-        if (self.top_level_types.get(name)) |entry| if (entry != null) {
-            std.log.err("Duplicate type name {s}", .{name});
-            return error.DuplicateTypeName;
-        };
-        try self.top_level_types.put(name, result);
-    }
-
-    fn shortTypeName(type_name: []const u8) []const u8 {
-        var generic_iter = std.mem.splitScalar(u8, type_name, '(');
-        const pre_generic = generic_iter.first();
-
-        var iter = std.mem.splitBackwardsScalar(u8, pre_generic, '.');
-        return iter.first();
-    }
-
     pub fn generateTypes(self: *Self, comptime endpoints: []const EndpointDef) ![]const u8 {
         @setEvalBranchQuota(endpoints.len * 2000);
 
-        // First pass: Find all pub top-level types across all endpoint files
-        inline for (endpoints) |endpoint| {
-            _, const EndpointType = endpoint;
-            const type_info = @typeInfo(EndpointType);
-            inline for (type_info.@"struct".decls) |decl| {
-                const T = @TypeOf(@field(EndpointType, decl.name));
-                switch (@typeInfo(T)) {
-                    .type => {
-                        switch (@typeInfo(@field(EndpointType, decl.name))) {
-                            .@"struct" => {
-                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
-                                    try self.declareTopLevelType(decl.name);
-                                }
-                            },
-                            .@"enum" => |e| {
-                                try self.setTopLevelType(
-                                    decl.name,
-                                    .{ .parsed = try self.parseEnum(e), .optional = false },
-                                );
-                            },
-                            .@"union" => |u| {
-                                const parsed = if (isLiftableUnion(@field(EndpointType, decl.name)))
-                                    try self.parseFlatUnion(u)
-                                else
-                                    try self._parseUnionAsStruct(u);
-                                try self.setTopLevelType(decl.name, parsed);
-                            },
-                            else => {},
-                        }
-                    },
-                    else => {},
-                }
-            }
-        }
-
-        // Second pass: Generate typings for all top-level types across all endpoint files
-        inline for (endpoints) |endpoint| {
-            const endpoint_path, const EndpointType = endpoint;
-            const type_info = @typeInfo(EndpointType);
-            inline for (type_info.@"struct".decls) |decl| {
-                const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
-                switch (decl_info) {
-                    .type => {
-                        const t_info = @typeInfo(@field(EndpointType, decl.name));
-                        switch (t_info) {
-                            .@"struct" => |s| {
-                                if (comptime shouldDeclareTopLevel(@field(EndpointType, decl.name))) {
-                                    const res = self.parseStruct(decl.name, s) catch |err| {
-                                        std.log.info(
-                                            "Endpoint: {s} - Type: {s}",
-                                            .{ endpoint_path, decl.name },
-                                        );
-
-                                        return err;
-                                    };
-                                    try self.setTopLevelType(decl.name, res);
-                                }
-                            },
-                            else => {},
-                        }
-                    },
-                    else => {},
-                }
-            }
-        }
-
-        // Third pass: Generate endpoint types
-        inline for (endpoints) |endpoint| try self.genTypescript(endpoint);
+        try self.collectTopLevelDeclarations(endpoints);
+        try self.collectAllEndpointUses(endpoints);
+        try self.renderTopLevelDeclarations(endpoints);
+        try self.buildAllMethodEntries(endpoints);
 
         var res: ArrayList(u8) = .empty;
 
         {
-            // Print top-level types
             const Entry = struct {
                 const E = @This();
 
@@ -207,33 +105,30 @@ pub const TypeGenerator = struct {
             var entries: ArrayList(Entry) = .empty;
             defer entries.deinit(self.arena_alloc);
 
-            var iter = self.top_level_types.iterator();
-            while (iter.next()) |top| {
-                const result = top.value_ptr.* orelse continue;
+            var iter = self.registry.declarations.iterator();
+            while (iter.next()) |entry| {
+                const result = entry.value_ptr.rendered orelse continue;
                 try entries.append(self.arena_alloc, .{
-                    .type_name = top.key_ptr.*,
+                    .type_name = Registry.shortName(entry.key_ptr.*),
                     .ts = try allocPrint(
                         self.arena_alloc,
                         "export type {s} =\n{s}\n\n",
-                        .{ top.key_ptr.*, result.parsed },
+                        .{ Registry.shortName(entry.key_ptr.*), try self.render(result) },
                     ),
                 });
             }
 
-            // Sort alphabetically
             std.mem.sort(Entry, entries.items, {}, Entry.sort);
             for (entries.items) |entry| {
                 try res.appendSlice(self.arena_alloc, entry.ts);
             }
         }
 
-        // Print http method endpoint typings
-
         try res.appendSlice(self.arena_alloc, "export type Spec = {");
 
         inline for (@typeInfo(Method).@"enum".fields) |m| {
             const method: Method = @enumFromInt(m.value);
-            var endpoints_data = self.endpointsData(method);
+            var endpoints_data = self.endpointDataForMethod(method);
 
             try res.appendSlice(
                 self.arena_alloc,
@@ -277,75 +172,292 @@ pub const TypeGenerator = struct {
         return res.toOwnedSlice(self.arena_alloc);
     }
 
-    fn genTypescript(self: *Self, endpoint: EndpointDef) !void {
-        const endpoint_path, const EndpointType = endpoint;
-        const type_info = @typeInfo(EndpointType);
-        inline for (type_info.@"struct".decls) |decl| {
-            const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
-            switch (decl_info) {
-                // Find get/post/put/patch/delete functions
-                .@"fn" => self.populateFnTypescript(decl, decl_info.@"fn", endpoint_path) catch |err| {
-                    std.log.info(
-                        "Endpoint: {s} - Type: {s}",
-                        .{ endpoint_path, decl.name },
-                    );
-                    return err;
-                },
-                else => {},
+    /// Registers named declarations before choosing their endpoint usage.
+    fn collectTopLevelDeclarations(self: *Self, comptime endpoints: []const EndpointDef) !void {
+        inline for (endpoints) |endpoint| {
+            _, const EndpointType = endpoint;
+            inline for (@typeInfo(EndpointType).@"struct".decls) |decl| {
+                const field = @field(EndpointType, decl.name);
+                if (comptime shouldDeclareTopLevel(field)) {
+                    try self.registry.declare(field);
+                }
             }
         }
     }
 
-    fn populateStructTypescript(
+    fn collectAllEndpointUses(self: *Self, comptime endpoints: []const EndpointDef) !void {
+        inline for (endpoints) |endpoint| {
+            try self.collectEndpointUses(endpoint);
+        }
+    }
+
+    /// Renders declarations once after endpoint collection establishes their usage.
+    fn renderTopLevelDeclarations(self: *Self, comptime endpoints: []const EndpointDef) !void {
+        inline for (endpoints) |endpoint| {
+            const endpoint_path, const EndpointType = endpoint;
+            inline for (@typeInfo(EndpointType).@"struct".decls) |decl| {
+                const D = @field(EndpointType, decl.name);
+                comptime if (!shouldDeclareTopLevel(D)) continue;
+
+                const type_id = @typeName(D);
+                if (self.registry.isReferenced(type_id)) {
+                    const usage: TypeUsage = switch (@typeInfo(D)) {
+                        // Enums render identically in both contexts.
+                        .@"enum" => .body,
+                        .@"struct", .@"union" => self.registry.usageFor(type_id) orelse return error.MissingTypeUsage,
+                        else => unreachable,
+                    };
+                    const result = self.buildTopLevelType(D, usage) catch |err| {
+                        std.log.info("Endpoint: {s} - Type: {s}", .{ endpoint_path, decl.name });
+                        return err;
+                    };
+                    try self.registry.setRendered(type_id, result);
+                }
+            }
+        }
+    }
+
+    fn buildAllMethodEntries(self: *Self, comptime endpoints: []const EndpointDef) !void {
+        inline for (endpoints) |endpoint| {
+            try self.buildMethodEntries(endpoint);
+        }
+    }
+
+    fn endpointDataForMethod(self: *Self, method: Method) *StringArrayHashMap(EndpointData) {
+        return switch (method) {
+            .get => &self.get_endpoints,
+            .post => &self.post_endpoints,
+            .put => &self.put_endpoints,
+            .patch => &self.patch_endpoints,
+            .delete => &self.delete_endpoints,
+        };
+    }
+
+    fn render(self: *Self, result: BuiltType) ![]const u8 {
+        return result.render(self.arena_alloc);
+    }
+
+    fn allocateExpr(self: *Self, expr: TypeExpr) !*const TypeExpr {
+        return TypeExpr.allocate(self.arena_alloc, expr);
+    }
+
+    fn appendExpr(self: *Self, expressions: *ArrayList(*const TypeExpr), expr: TypeExpr) !void {
+        try expressions.append(self.arena_alloc, try self.allocateExpr(expr));
+    }
+
+    fn appendRef(self: *Self, expressions: *ArrayList(*const TypeExpr), expr: *const TypeExpr) !void {
+        try expressions.append(self.arena_alloc, expr);
+    }
+
+    fn parenthesize(self: *Self, expr: *const TypeExpr) !*const TypeExpr {
+        return self.allocateExpr(.{ .parens = expr });
+    }
+
+    fn exclusiveOr(self: *Self, left: *const TypeExpr, right: *const TypeExpr) !*const TypeExpr {
+        return self.allocateExpr(try TypeExpr.makeGeneric(
+            self.arena_alloc,
+            "XOR",
+            &.{ left, right },
+        ));
+    }
+
+    fn anyOf(self: *Self, expr: TypeExpr) !TypeExpr {
+        return TypeExpr.makeGeneric(
+            self.arena_alloc,
+            "AnyOf",
+            &.{try self.allocateExpr(expr)},
+        );
+    }
+
+    fn buildTopLevelType(self: *Self, comptime T: type, usage: TypeUsage) !BuiltType {
+        const context: TypeGenerationContext = .{ .usage = usage };
+        return switch (@typeInfo(T)) {
+            .@"struct" => |s| if (usage == .query_params)
+                self.buildQueryStructType(T, s, context)
+            else
+                self.buildStructType(@typeName(T), s, context),
+            .@"enum" => |e| .{ .expr = .{ .verbatim = try self.buildEnumType(e) } },
+            .@"union" => |u| if (usage == .query_params or isLiftableUnion(T))
+                self.buildFlatUnionType(u, context)
+            else
+                self.buildUnionObjectType(u, context),
+            else => error.InvalidTopLevelType,
+        };
+    }
+
+    fn buildMethodEntries(self: *Self, endpoint: EndpointDef) !void {
+        const endpoint_path, const EndpointType = endpoint;
+        inline for (@typeInfo(EndpointType).@"struct".decls) |decl| {
+            const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
+            if (decl_info != .@"fn") continue;
+            // Find get/post/put/patch/delete functions
+            self.buildMethodEntry(decl, decl_info.@"fn", endpoint_path) catch |err| {
+                std.log.info(
+                    "Endpoint: {s} - Type: {s}",
+                    .{ endpoint_path, decl.name },
+                );
+                return err;
+            };
+        }
+    }
+
+    fn collectEndpointUses(self: *Self, endpoint: EndpointDef) !void {
+        const endpoint_path, const EndpointType = endpoint;
+        inline for (@typeInfo(EndpointType).@"struct".decls) |decl| {
+            const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
+            if (decl_info != .@"fn") continue;
+            self.collectFunctionUses(decl, decl_info.@"fn") catch |err| {
+                std.log.info(
+                    "Endpoint: {s} - Type: {s}",
+                    .{ endpoint_path, decl.name },
+                );
+                return err;
+            };
+        }
+    }
+
+    /// Builds `query_params` and `body`, if present.
+    fn buildRequestContextFields(
         self: *Self,
         method: Method,
-        S: Type.Struct,
+        comptime Context: type,
         endpoint_path: []const u8,
     ) !void {
-        var endpoints_data = self.endpointsData(method);
-
+        var endpoints_data = self.endpointDataForMethod(method);
         var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
-        inline for (S.fields) |field| {
-            if (comptime strEqls(field.name, "body")) {
-                const body_info = @typeInfo(field.type);
-                if (body_info == .pointer and body_info.pointer.child == u8) {
-                    res.value_ptr.body = "body: BodyInit\n";
-                } else {
-                    const body_res = try self.extractIdentifier(field.type);
-                    if (body_res.optional) {
-                        res.value_ptr.body = try allocPrint(
-                            self.arena_alloc,
-                            "body?: {s}\n",
-                            .{body_res.parsed},
-                        );
-                    } else {
-                        res.value_ptr.body = try allocPrint(
-                            self.arena_alloc,
-                            "body: {s}\n",
-                            .{body_res.parsed},
-                        );
-                    }
-                }
-            } else if (comptime strEqls(field.name, "query_params")) {
-                const param_res = try self.extractQueryParams(field.type);
-                if (param_res.optional) {
-                    res.value_ptr.query_params = try allocPrint(
-                        self.arena_alloc,
-                        "queryParams?: {s}\n",
-                        .{param_res.parsed},
-                    );
-                } else {
-                    res.value_ptr.query_params = try allocPrint(
-                        self.arena_alloc,
-                        "queryParams: {s}\n",
-                        .{param_res.parsed},
-                    );
-                }
+
+        if (comptime @hasField(Context, "body")) {
+            const Body = @FieldType(Context, "body");
+            const body_info = @typeInfo(Body);
+            if (body_info == .pointer and body_info.pointer.child == u8) {
+                res.value_ptr.body = "body: BodyInit\n";
+            } else {
+                res.value_ptr.body = try self.renderRequestContextField(
+                    "body",
+                    try self.buildTypeForUsage(Body, .body),
+                );
             }
+        }
+
+        if (comptime @hasField(Context, "query_params")) {
+            res.value_ptr.query_params = try self.renderRequestContextField(
+                "queryParams",
+                try self.buildQueryParamsType(@FieldType(Context, "query_params")),
+            );
         }
     }
 
-    fn parseStruct(self: *Self, struct_name: []const u8, S: Type.Struct) !ParseResult {
+    fn renderRequestContextField(self: *Self, name: []const u8, built_type: BuiltType) ![]const u8 {
+        return allocPrint(
+            self.arena_alloc,
+            "{s}{s}: {s}\n",
+            .{ name, if (built_type.optional) "?" else "", try self.render(built_type) },
+        );
+    }
+
+    fn buildMethodEntry(
+        self: *Self,
+        comptime decl: Type.Declaration,
+        comptime F: Type.Fn,
+        comptime endpoint_path: []const u8,
+    ) !void {
+        const method = (comptime stringToEnum(Method, decl.name)) orelse return;
+        var endpoints_data = self.endpointDataForMethod(method);
+
+        const first_param = F.params[0].type orelse unreachable;
+        const Context = @typeInfo(first_param).pointer.child;
+        try self.buildRequestContextFields(method, Context, endpoint_path);
+
+        const response = responseType(F);
+        var entry = try endpoints_data.getOrPutValue(endpoint_path, .{});
+        entry.value_ptr.response = try self.render(try self.buildTypeForUsage(response, .body));
+    }
+
+    fn collectFunctionUses(self: *Self, comptime decl: Type.Declaration, comptime F: Type.Fn) !void {
+        _ = (comptime stringToEnum(Method, decl.name)) orelse return;
+
+        const first_param = F.params[0].type orelse unreachable;
+        const Context = @typeInfo(first_param).pointer.child;
+
+        if (comptime @hasField(Context, "body")) {
+            try self.recordTypeUses(@FieldType(Context, "body"), .body);
+        }
+
+        if (comptime @hasField(Context, "query_params")) {
+            try self.recordTypeUses(@FieldType(Context, "query_params"), .query_params);
+        }
+
+        try self.recordTypeUses(responseType(F), .body);
+    }
+
+    fn recordTypeUses(self: *Self, comptime T: type, usage: TypeUsage) !void {
+        if (comptime typescriptRepr(T)) |repr_type| {
+            return self.recordTypeUses(repr_type, usage);
+        }
+
+        const type_id = @typeName(T);
+        switch (@typeInfo(T)) {
+            .@"struct", .@"union" => {
+                if (self.registry.isDeclared(type_id)) {
+                    const was_referenced = self.registry.isReferenced(type_id);
+                    try self.registry.recordUsage(type_id, usage);
+
+                    // A declaration may refer to other top-level declarations.
+                    // Walk it the first time it is reached so those dependencies are emitted too.
+                    // The guard also prevents infinite recursion.
+                    if (was_referenced) return;
+                }
+            },
+            .@"enum" => {
+                self.registry.recordReference(type_id);
+                return;
+            },
+            .pointer => |pointer| return self.recordTypeUses(pointer.child, usage),
+            .optional => |optional| return self.recordTypeUses(optional.child, usage),
+            else => return,
+        }
+
+        _ = try self.buildType(T, .{ .usage = usage });
+
+        switch (@typeInfo(T)) {
+            .@"struct" => |s| {
+                inline for (s.fields) |field| {
+                    const skips_query_recursion = comptime hasParamParse(field.type);
+                    if (usage != .query_params or !skips_query_recursion) {
+                        try self.recordTypeUses(field.type, usage);
+                    }
+                }
+            },
+            .@"union" => |u| {
+                inline for (u.fields) |field| {
+                    try self.recordTypeUses(field.type, usage);
+                }
+            },
+            else => unreachable,
+        }
+    }
+
+    fn responseBodyType(comptime Response: type) type {
+        if (@hasField(Response, "body")) {
+            return @typeInfo(@FieldType(Response, "body")).optional.child;
+        }
+        @compileError("Return type of endpoint fns must be Response(T)");
+    }
+
+    fn responseType(comptime F: Type.Fn) type {
+        return switch (@typeInfo(F.return_type.?)) {
+            .error_union => |error_union| responseBodyType(error_union.payload),
+            .@"struct" => responseBodyType(F.return_type.?),
+            else => @compileError("Invalid fn return type"),
+        };
+    }
+
+    fn buildStructType(
+        self: *Self,
+        struct_name: []const u8,
+        S: Type.Struct,
+        context: TypeGenerationContext,
+    ) !BuiltType {
         // Find adjacent union ahead of time
         var adjacent_union: ?AdjacentUnion = null;
         {
@@ -396,26 +508,23 @@ pub const TypeGenerator = struct {
             }
 
             // Extract out to top level type
-            const short_struct_name = shortTypeName(struct_name);
-            try self.setTopLevelType(short_struct_name, try self.parseStructWithAdjacentUnion(S, au));
+            const short_struct_name = Registry.shortName(struct_name);
+            try self.registry.setRendered(struct_name, try self.buildAdjacentUnionStructType(S, au, context));
 
-            return ParseResult{
+            return BuiltType{
                 .optional = false,
-                .parsed = short_struct_name,
+                .expr = .{ .named = short_struct_name },
             };
         }
 
         // Default struct parsing if there's no adjacent union present as a field
-        return self._parseStruct(S);
+        return self.buildObjectType(S, context);
     }
 
-    fn _parseStruct(self: *Self, S: Type.Struct) !ParseResult {
+    fn buildObjectType(self: *Self, S: Type.Struct, context: TypeGenerationContext) !BuiltType {
         var all_optional = true;
-        var res: ArrayList(u8) = .empty;
-        try res.appendSlice(self.arena_alloc, "{\n");
+        var fields: ArrayList(TypeExpr.Field) = .empty;
         inline for (S.fields) |field| {
-            try res.appendSlice(self.arena_alloc, field.name);
-
             // Ensure Optionals have default values
             if (comptime isOptional(field.type) and field.defaultValue() == null) {
                 std.log.info(
@@ -425,62 +534,54 @@ pub const TypeGenerator = struct {
                 return error.OptionalMissingDefault;
             }
 
-            const parse_result = try self.extractIdentifier(field.type);
+            const built_type = try self.buildType(field.type, context);
 
             // TODO: This is a weird bug in defaultValue I had to work around...
             if (comptime strEqls(field.name, "_is_finished")) continue;
 
-            const optional = if (field.defaultValue()) |_| true else parse_result.optional;
+            const optional = if (field.defaultValue()) |_| true else built_type.optional;
 
             all_optional = all_optional and optional;
-            if (optional) {
-                try res.appendSlice(self.arena_alloc, "?: ");
-            } else {
-                try res.appendSlice(self.arena_alloc, ": ");
-            }
-
-            try res.appendSlice(self.arena_alloc, parse_result.parsed);
-            try res.appendSlice(self.arena_alloc, "\n");
+            try fields.append(self.arena_alloc, .{
+                .name = field.name,
+                .expr = try self.allocateExpr(built_type.expr),
+                .optional = optional,
+            });
         }
-
-        try res.appendSlice(self.arena_alloc, "}");
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .expr = .{ .object = try fields.toOwnedSlice(self.arena_alloc) },
         };
     }
 
     /// Helper function for adjacent unions
-    fn _parseUnionAsStruct(self: *Self, U: Type.Union) !ParseResult {
+    fn buildUnionObjectType(self: *Self, U: Type.Union, context: TypeGenerationContext) !BuiltType {
         var all_optional = true;
-        var res: ArrayList(u8) = .empty;
-        try res.appendSlice(self.arena_alloc, "{\n");
+        var fields: ArrayList(TypeExpr.Field) = .empty;
         inline for (U.fields) |field| {
-            try res.appendSlice(self.arena_alloc, field.name);
-
-            const parse_result = try self.extractIdentifier(field.type);
-            all_optional = all_optional and parse_result.optional;
-            if (parse_result.optional) {
-                try res.appendSlice(self.arena_alloc, "?: ");
-            } else {
-                try res.appendSlice(self.arena_alloc, ": ");
-            }
-
-            try res.appendSlice(self.arena_alloc, parse_result.parsed);
-            try res.appendSlice(self.arena_alloc, "\n");
+            const built_type = try self.buildType(field.type, context);
+            all_optional = all_optional and built_type.optional;
+            try fields.append(self.arena_alloc, .{
+                .name = field.name,
+                .expr = try self.allocateExpr(built_type.expr),
+                .optional = built_type.optional,
+            });
         }
-
-        try res.appendSlice(self.arena_alloc, "}");
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .expr = .{ .object = try fields.toOwnedSlice(self.arena_alloc) },
         };
     }
 
-    fn parseStructWithAdjacentUnion(self: *Self, S: Type.Struct, adjacent_union: AdjacentUnion) !ParseResult {
-        const union_short_name = shortTypeName(adjacent_union.name);
+    fn buildAdjacentUnionStructType(
+        self: *Self,
+        S: Type.Struct,
+        adjacent_union: AdjacentUnion,
+        context: TypeGenerationContext,
+    ) !BuiltType {
+        const union_short_name = Registry.shortName(adjacent_union.name);
 
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
@@ -500,10 +601,10 @@ pub const TypeGenerator = struct {
                     return error.InvalidAdjacentUnionType;
                 }
 
-                if (self.getTopLevelType(union_short_name) == null) {
-                    try self.setTopLevelType(
-                        union_short_name,
-                        try self._parseUnionAsStruct(field_info.@"union"),
+                if (self.registry.reference(adjacent_union.name) == null) {
+                    try self.registry.setRendered(
+                        adjacent_union.name,
+                        try self.buildUnionObjectType(field_info.@"union", context),
                     );
                 }
                 try res.appendSlice(
@@ -512,13 +613,13 @@ pub const TypeGenerator = struct {
                 );
             } else {
                 try res.appendSlice(self.arena_alloc, f.name);
-                const parse_result = try self.extractIdentifier(f.type);
-                if (parse_result.optional) {
+                const built_type = try self.buildType(f.type, context);
+                if (built_type.optional) {
                     try res.appendSlice(self.arena_alloc, "?: ");
                 } else {
                     try res.appendSlice(self.arena_alloc, ": ");
                 }
-                try res.appendSlice(self.arena_alloc, parse_result.parsed);
+                try res.appendSlice(self.arena_alloc, try self.render(built_type));
                 try res.appendSlice(self.arena_alloc, "\n");
             }
         }
@@ -529,10 +630,10 @@ pub const TypeGenerator = struct {
             .{union_short_name},
         ));
 
-        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+        return .{ .expr = .{ .verbatim = try res.toOwnedSlice(self.arena_alloc) } };
     }
 
-    fn parseEnum(self: *Self, E: Type.Enum) ![]const u8 {
+    fn buildEnumType(self: *Self, E: Type.Enum) ![]const u8 {
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, " | (\n");
         inline for (E.fields) |field| {
@@ -546,18 +647,18 @@ pub const TypeGenerator = struct {
         return res.toOwnedSlice(self.arena_alloc);
     }
 
-    fn parseUnion(self: *Self, U: Type.Union, T: type) ![]const u8 {
+    fn buildUnionType(self: *Self, U: Type.Union, T: type, context: TypeGenerationContext) ![]const u8 {
         var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
         if (comptime isOptional(T)) {
-            const parsed_res = try self.extractIdentifier(@FieldType(T, "value"));
-            try res.appendSlice(self.arena_alloc, parsed_res.parsed);
+            const built_type = try self.buildType(@FieldType(T, "value"), context);
+            try res.appendSlice(self.arena_alloc, try self.render(built_type));
             return res.toOwnedSlice(self.arena_alloc);
         }
 
         const union_repr: ?UnionRepr = blk: {
-            if (self.parse_context == .query_params) break :blk .untagged;
+            if (context.usage == .query_params) break :blk .untagged;
             inline for (U.decls) |decl| {
                 if (comptime strEqls(decl.name, "_repr")) {
                     break :blk @field(T, decl.name);
@@ -584,14 +685,14 @@ pub const TypeGenerator = struct {
                         if (field_info != .@"struct") return error.InvalidUnionRepr;
 
                         inline for (field_info.@"struct".fields) |f| {
-                            const parsed_res = try self.extractIdentifier(f.type);
+                            const built_type = try self.buildType(f.type, context);
                             try res.appendSlice(self.arena_alloc, try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
                                 .{
                                     f.name,
-                                    if (parsed_res.optional or f.defaultValue() != null) "?" else "",
-                                    parsed_res.parsed,
+                                    if (built_type.optional or f.defaultValue() != null) "?" else "",
+                                    try self.render(built_type),
                                 },
                             ));
                         }
@@ -602,7 +703,7 @@ pub const TypeGenerator = struct {
                     try res.appendSlice(self.arena_alloc, try allocPrint(
                         self.arena_alloc,
                         "{{\n [K in keyof {s}]: {{\n",
-                        .{shortTypeName(@typeName(T))},
+                        .{Registry.shortName(@typeName(T))},
                     ));
                     const disc: []const u8 = repr.adjacently.discriminator;
                     inline for (U.fields) |field| {
@@ -616,14 +717,14 @@ pub const TypeGenerator = struct {
                         if (field_info != .@"struct") return error.InvalidUnionRepr;
 
                         inline for (field_info.@"struct".fields) |f| {
-                            const parsed_res = try self.extractIdentifier(f.type);
+                            const built_type = try self.buildType(f.type, context);
                             try res.appendSlice(self.arena_alloc, try allocPrint(
                                 self.arena_alloc,
                                 "{s}{s}: {s}; ",
                                 .{
                                     f.name,
-                                    if (parsed_res.optional or f.defaultValue() != null) "?" else "",
-                                    parsed_res.parsed,
+                                    if (built_type.optional or f.defaultValue() != null) "?" else "",
+                                    try self.render(built_type),
                                 },
                             ));
                         }
@@ -643,7 +744,7 @@ pub const TypeGenerator = struct {
                         if (@typeInfo(field.type) == .void) {
                             try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
                         } else {
-                            const ident = (try self.extractIdentifier(field.type)).parsed;
+                            const ident = try self.render(try self.buildType(field.type, context));
                             try res.appendSlice(self.arena_alloc, ident);
                         }
                     }
@@ -657,99 +758,57 @@ pub const TypeGenerator = struct {
         return res.toOwnedSlice(self.arena_alloc);
     }
 
-    fn populateFnTypescript(
-        self: *Self,
-        comptime decl: Type.Declaration,
-        comptime F: Type.Fn,
-        comptime endpoint_path: []const u8,
-    ) !void {
-        const method = (comptime stringToEnum(Method, decl.name)) orelse return;
-        var endpoints_data = self.endpointsData(method);
-
-        // Find context object (first parameter)
-        const first_param = F.params[0].type orelse unreachable;
-        const ctx_struct = @typeInfo(@typeInfo(first_param).pointer.child).@"struct";
-        try self.populateStructTypescript(method, ctx_struct, endpoint_path);
-
-        // Determine return type
-        const return_type_info = @typeInfo(F.return_type.?);
-        const ResponseType: type = blk: {
-            switch (return_type_info) {
-                .error_union => {
-                    const inner_info = @typeInfo(return_type_info.error_union.payload);
-                    break :blk getResponseInnerType(inner_info.@"struct");
-                },
-                .@"struct" => break :blk getResponseInnerType(return_type_info.@"struct"),
-                else => @compileError("Invalid fn return type"),
-            }
-        };
-
-        var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
-        const ts = (try self.extractIdentifier(ResponseType)).parsed;
-        res.value_ptr.response = ts;
-    }
-
-    fn getResponseInnerType(s: Type.Struct) type {
-        inline for (s.fields) |field| {
-            if (comptime strEqls(field.name, "body")) {
-                return @typeInfo(field.type).optional.child;
-            }
-        }
-        @compileError("Return type of endpoint fns must be Response(T)");
-    }
-
-    /// Combines an already-emitted struct object (`res`)
-    /// with the TS utility types implied by its `constraints` decl.
-    /// The `any_of` rule additionally forces the field to be required.
-    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: ParseResult) !ParseResult {
+    /// Wraps a type in the utility required by its constraints.
+    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: BuiltType) !BuiltType {
         if (comptime constraints.any_of) {
             return .{
-                .parsed = try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{res.parsed}),
+                .expr = try self.anyOf(res.expr),
                 .optional = false,
             };
         }
         return res;
     }
 
-    /// Emits the TS type for a single query param leaf.
-    /// A `paramParse` custom type always receives a string at runtime,
-    /// so its typegen'd type should be `string`.
-    /// `extractIdentifier` parses its struct fields, which is incorrect for query_params.
-    /// Everything else delegates to `extractIdentifier`.
-    fn getQueryLeafType(self: *Self, comptime T: type) !ParseResult {
-        if (comptime hasParamParse(T)) return .{ .parsed = "string" };
-        return self.extractIdentifier(T);
+    /// A `paramParse` query value is always a string on the wire.
+    fn buildQueryLeafType(self: *Self, comptime T: type, context: TypeGenerationContext) !BuiltType {
+        if (comptime hasParamParse(T)) return .{ .expr = .{ .named = "string" } };
+        return self.buildType(T, context);
     }
 
-    /// Query params are a flat key/value store, so a tagged union maps to a flattened TS union.
-    /// The active variant is inferred at runtime from which keys are present.
-    /// Anything else falls back to the normal struct handling.
-    fn extractQueryParams(self: *Self, comptime T: type) !ParseResult {
-        const prev_context = self.parse_context;
-        self.parse_context = .query_params;
-        defer self.parse_context = prev_context;
+    /// Query params flatten structs and tagged unions into their wire keys.
+    fn buildQueryParamsType(self: *Self, comptime T: type) !BuiltType {
+        return self.buildQueryType(T, .{ .usage = .query_params });
+    }
 
-        const type_name = comptime shortTypeName(@typeName(T));
-        const is_top_level = self.top_level_types.contains(type_name);
+    fn buildQueryType(self: *Self, comptime T: type, context: TypeGenerationContext) !BuiltType {
+        const type_id = @typeName(T);
+        const ts_name = Registry.shortName(type_id);
+        const is_top_level = self.registry.isDeclared(type_id);
         const info = @typeInfo(T);
         if (comptime info == .@"struct") {
-            const res = try self.parseFlatQueryStruct(T, info.@"struct");
             if (is_top_level) {
-                try self.top_level_types.put(type_name, res);
-                return .{ .parsed = type_name, .optional = res.optional };
+                return .{ .expr = .{ .named = ts_name }, .optional = comptime queryParamsOptional(T) };
             }
-            return res;
+            return self.buildQueryStructType(T, info.@"struct", context);
+        }
+
+        // Enums have the same string-literal union representation in a body and
+        // in query params, so they do not need a usage-specific rendering path.
+        if (comptime info == .@"enum") {
+            if (is_top_level) {
+                return .{ .expr = .{ .named = ts_name }, .optional = comptime queryParamsOptional(T) };
+            }
         }
 
         if (is_top_level) {
-            return .{ .parsed = type_name, .optional = comptime queryParamsOptional(T) };
+            return .{ .expr = .{ .named = ts_name }, .optional = comptime queryParamsOptional(T) };
         }
 
         if (comptime info == .@"union" and !isOptional(T)) {
-            const res = try self.parseFlatUnion(info.@"union");
-            return .{ .parsed = res.parsed, .optional = comptime queryParamsOptional(T) };
+            const res = try self.buildFlatUnionType(info.@"union", context);
+            return .{ .expr = res.expr, .optional = comptime queryParamsOptional(T) };
         }
-        return self.extractIdentifier(T);
+        return self.buildType(T, context);
     }
 
     /// Whether a `query_params` type may be omitted entirely.
@@ -770,51 +829,55 @@ pub const TypeGenerator = struct {
     /// Parses a union into a flat TS union.
     /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
     /// and a plain struct variant is flattened into its leaf keys.
-    fn parseFlatUnion(self: *Self, U: Type.Union) !ParseResult {
-        var variants: ArrayList([]const u8) = .empty;
+    fn buildFlatUnionType(self: *Self, U: Type.Union, context: TypeGenerationContext) !BuiltType {
+        var variants: ArrayList(*const TypeExpr) = .empty;
         inline for (U.fields) |field| {
             const info = @typeInfo(field.type);
             if (field.type == void) {
-                try variants.append(self.arena_alloc, try allocPrint(
+                const variant = try TypeExpr.singleField(
                     self.arena_alloc,
-                    "{{ {s}: \"\" }}",
-                    .{field.name},
-                ));
+                    field.name,
+                    .{ .verbatim = "\"\"" },
+                );
+                try self.appendExpr(&variants, variant);
             } else if (info == .@"struct" and !hasParamParse(field.type)) {
-                const variant = (try self.buildFlatStruct(field.type, info.@"struct")) orelse "{}";
-                try variants.append(self.arena_alloc, variant);
+                const variant: TypeExpr =
+                    (try self.buildQueryObjectType(field.type, info.@"struct", context)) orelse .{ .object = &.{} };
+
+                try self.appendExpr(&variants, inlineSingleFieldObject(variant));
             } else {
                 // Scalar / array / enum / paramParse struct: variant name is key.
-                const ident = try self.getQueryLeafType(field.type);
-                try variants.append(self.arena_alloc, try allocPrint(
-                    self.arena_alloc,
-                    "{{ {s}: {s} }}",
-                    .{ field.name, ident.parsed },
-                ));
+                const ident = try self.buildQueryLeafType(field.type, context);
+                const variant = try TypeExpr.singleField(self.arena_alloc, field.name, ident.expr);
+                try self.appendExpr(&variants, variant);
             }
         }
         // A union always needs at least one matching key, so it is required.
-        return .{ .parsed = try self.renderExclusiveUnion(variants.items), .optional = false };
+        return .{ .expr = try self.renderExclusiveUnion(variants.items) };
     }
 
     /// Combines variants so exactly one may be present.
-    fn renderExclusiveUnion(self: *Self, variants: []const []const u8) ![]const u8 {
-        if (variants.len == 0) return "{}";
+    fn renderExclusiveUnion(self: *Self, variants: []const *const TypeExpr) !TypeExpr {
+        if (variants.len == 0) return .{ .object = &.{} };
 
-        // Emit the chain of XORs from left to right.
-        // Each leading variant opens an `XOR<(variant), `,
-        // the last variant sits in the middle,
-        // then the openers are closed with a run of `>`.
-        var res: ArrayList(u8) = .empty;
-        for (variants, 0..) |variant, i| {
-            const last = i == variants.len - 1;
-            try res.appendSlice(self.arena_alloc, if (last)
-                try allocPrint(self.arena_alloc, "({s})", .{variant})
-            else
-                try allocPrint(self.arena_alloc, "XOR<({s}), ", .{variant}));
+        var result = try self.parenthesize(variants[variants.len - 1]);
+        var index = variants.len - 1;
+        while (index > 0) {
+            index -= 1;
+            const left = try self.parenthesize(variants[index]);
+            result = try self.exclusiveOr(left, result);
         }
-        try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
-        return res.toOwnedSlice(self.arena_alloc);
+        return result.*;
+    }
+
+    fn inlineSingleFieldObject(expr: TypeExpr) TypeExpr {
+        return switch (expr) {
+            .object => |fields| if (fields.len == 1 and !fields[0].optional)
+                .{ .inline_object = fields }
+            else
+                expr,
+            else => expr,
+        };
     }
 
     /// A `query_params` struct represented as a flat structure.
@@ -831,9 +894,14 @@ pub const TypeGenerator = struct {
     /// so it can be omitted from the generated types.
     ///
     /// Union fields are skipped here (see `collectFlatLeaves`) and handled by the caller.
-    fn buildFlatStruct(self: *Self, comptime T: type, S: Type.Struct) !?[]const u8 {
+    fn buildQueryObjectType(
+        self: *Self,
+        comptime T: type,
+        S: Type.Struct,
+        context: TypeGenerationContext,
+    ) !?TypeExpr {
         var flat_struct: FlatStruct = .{};
-        try self.collectFlatLeaves(&flat_struct, S, false, null);
+        try self.collectFlatLeaves(&flat_struct, S, false, null, context);
 
         const any_of = comptime blk: {
             if (@hasDecl(T, "constraints")) break :blk T.constraints.any_of;
@@ -852,74 +920,69 @@ pub const TypeGenerator = struct {
         if (flat_struct.groups.items.len == 0) {
             const full = try self.renderLeafObject(all.items);
             if (any_of) {
-                return try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{full});
+                return try self.anyOf(full);
             }
             return full;
         }
 
         // One `XOR<present, {}>` per group, the independent keys as a plain object,
         // and AnyOf over everything if the constraint is set.
-        var components: ArrayList([]const u8) = .empty;
+        var components: ArrayList(*const TypeExpr) = .empty;
 
         // A group always has >= 1 required key (all-optional groups flatten inline)
         for (flat_struct.groups.items) |group| {
-            try components.append(self.arena_alloc, try allocPrint(
-                self.arena_alloc,
-                "XOR<{s}, {{}}>",
-                .{try self.renderLeafObject(group.items)},
-            ));
+            const present = try self.allocateExpr(try self.renderLeafObject(group.items));
+            const absent = try self.allocateExpr(.{ .object = &.{} });
+            try self.appendRef(&components, try self.exclusiveOr(present, absent));
         }
 
         if (flat_struct.independent.items.len > 0) {
-            try components.append(self.arena_alloc, try self.renderLeafObject(flat_struct.independent.items));
+            try self.appendExpr(
+                &components,
+                try self.renderLeafObject(flat_struct.independent.items),
+            );
         }
 
         if (any_of) {
-            try components.append(self.arena_alloc, try allocPrint(
-                self.arena_alloc,
-                "AnyOf<{s}>",
-                .{try self.renderLeafObject(all.items)},
-            ));
+            const full = try self.allocateExpr(try self.renderLeafObject(all.items));
+            try self.appendExpr(&components, try self.anyOf(full.*));
         }
 
-        var res: ArrayList(u8) = .empty;
-        for (components.items, 0..) |component, i| {
-            if (i != 0) try res.appendSlice(self.arena_alloc, " & ");
-            try res.appendSlice(self.arena_alloc, component);
-        }
-        return try res.toOwnedSlice(self.arena_alloc);
+        if (components.items.len == 1) return components.items[0].*;
+        return .{ .intersection = try components.toOwnedSlice(self.arena_alloc) };
     }
 
     /// Emits the flat TS shape for a query param struct which contains lifted union fields.
     /// Each union field's variant alternatives live directly in the flat key space,
     /// so the result is the intersection of every union's flat shape,
     /// with the base object built from the remaining fields.
-    fn parseFlatQueryStruct(self: *Self, comptime T: type, S: Type.Struct) !ParseResult {
-        var components: ArrayList([]const u8) = .empty;
+    fn buildQueryStructType(
+        self: *Self,
+        comptime T: type,
+        S: Type.Struct,
+        context: TypeGenerationContext,
+    ) !BuiltType {
+        var components: ArrayList(*const TypeExpr) = .empty;
 
         inline for (S.fields) |field| {
             if (comptime isLiftableUnion(field.type)) {
-                const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
-                try components.append(
-                    self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "({s})", .{shape.parsed}),
-                );
+                const shape = try self.buildFlatUnionType(@typeInfo(field.type).@"union", context);
+                try self.appendRef(&components, try self.parenthesize(
+                    try self.allocateExpr(shape.expr),
+                ));
             }
         }
 
         // Base object from the non-union fields (collectFlatLeaves skips unions).
-        if (try self.buildFlatStruct(T, S)) |base| {
-            try components.append(self.arena_alloc, base);
-        }
-
-        var res: ArrayList(u8) = .empty;
-        for (components.items, 0..) |component, i| {
-            if (i != 0) try res.appendSlice(self.arena_alloc, " & ");
-            try res.appendSlice(self.arena_alloc, component);
+        if (try self.buildQueryObjectType(T, S, context)) |base| {
+            try self.appendExpr(&components, base);
         }
 
         return .{
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .expr = if (components.items.len == 1)
+                components.items[0].*
+            else
+                .{ .intersection = try components.toOwnedSlice(self.arena_alloc) },
             .optional = comptime queryParamsOptional(T),
         };
     }
@@ -935,6 +998,7 @@ pub const TypeGenerator = struct {
         S: Type.Struct,
         parent_optional: bool,
         current_group: ?*ArrayList(FlatLeaf),
+        context: TypeGenerationContext,
     ) !void {
         inline for (S.fields) |field| {
             // Non-Optional tagged unions are lifted into the flat key space by the caller.
@@ -958,18 +1022,18 @@ pub const TypeGenerator = struct {
                 // not by marking every key optional.
                 if (introduces_optional and current_group == null and comptime getRequiredKeyCount(T) > 0) {
                     var group: ArrayList(FlatLeaf) = .empty;
-                    try self.collectFlatLeaves(flat_struct, info.@"struct", false, &group);
+                    try self.collectFlatLeaves(flat_struct, info.@"struct", false, &group, context);
                     try flat_struct.groups.append(self.arena_alloc, group);
                 } else {
                     // Required nested struct, an all-optional nested struct,
                     // or one already inside a group: flatten in declaration order.
-                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group);
+                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group, context);
                 }
             } else {
-                const ident = try self.getQueryLeafType(T);
+                const ident = try self.buildQueryLeafType(T, context);
                 const leaf: FlatLeaf = .{
                     .name = field.name,
-                    .ts_type = ident.parsed,
+                    .expr = try self.allocateExpr(ident.expr),
                     .optional = wrapper_optional or ident.optional,
                 };
 
@@ -979,46 +1043,46 @@ pub const TypeGenerator = struct {
         }
     }
 
-    /// Renders a TS object literal from the given leaves.
-    fn renderLeafObject(self: *Self, leaves: []const FlatLeaf) ![]const u8 {
-        var res: ArrayList(u8) = .empty;
-        try res.appendSlice(self.arena_alloc, "{\n");
+    fn renderLeafObject(self: *Self, leaves: []const FlatLeaf) !TypeExpr {
+        var fields: ArrayList(TypeExpr.Field) = .empty;
         for (leaves) |leaf| {
-            try res.appendSlice(self.arena_alloc, leaf.name);
-            try res.appendSlice(self.arena_alloc, if (leaf.optional) "?: " else ": ");
-            try res.appendSlice(self.arena_alloc, leaf.ts_type);
-            try res.appendSlice(self.arena_alloc, "\n");
+            try fields.append(self.arena_alloc, .{
+                .name = leaf.name,
+                .expr = leaf.expr,
+                .optional = leaf.optional,
+            });
         }
-        try res.appendSlice(self.arena_alloc, "}");
-        return res.toOwnedSlice(self.arena_alloc);
+        return .{ .object = try fields.toOwnedSlice(self.arena_alloc) };
     }
 
-    fn extractIdentifier(self: *Self, T: type) !ParseResult {
+    fn buildTypeForUsage(self: *Self, T: type, usage: TypeUsage) !BuiltType {
+        return self.buildType(T, .{ .usage = usage });
+    }
+
+    fn buildType(self: *Self, T: type, context: TypeGenerationContext) !BuiltType {
         if (comptime typescriptRepr(T)) |repr_type| {
-            return self.extractIdentifier(repr_type);
+            return self.buildType(repr_type, context);
         }
 
         const type_info = @typeInfo(T);
         switch (type_info) {
-            .int, .float => return .{ .parsed = "number" },
-            .bool => return .{ .parsed = "boolean" },
-            .type, .void => return .{ .parsed = @typeName(T) },
+            .int, .float => return .{ .expr = .{ .named = "number" } },
+            .bool => return .{ .expr = .{ .named = "boolean" } },
+            .type, .void => return .{ .expr = .{ .named = @typeName(T) } },
             .pointer => {
                 if (type_info.pointer.child == u8) {
-                    return .{ .parsed = "string" };
+                    return .{ .expr = .{ .named = "string" } };
                 } else {
-                    return .{ .parsed = try allocPrint(self.arena_alloc, "{s}[]", .{
-                        (try self.extractIdentifier(type_info.pointer.child)).parsed,
-                    }) };
+                    const child = try self.buildType(type_info.pointer.child, context);
+                    return .{ .expr = .{ .array = try self.allocateExpr(child.expr) } };
                 }
             },
             .@"struct" => {
-                const type_name = comptime shortTypeName(@typeName(T));
+                const type_id = @typeName(T);
 
-                const res: ParseResult = if (self.getTopLevelType(type_name)) |gen|
-                    .{ .parsed = type_name, .optional = gen.optional }
-                else
-                    try self.parseStruct(type_name, type_info.@"struct");
+                const res: BuiltType = if (self.registry.reference(type_id)) |gen| blk: {
+                    break :blk .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
+                } else try self.buildStructType(type_id, type_info.@"struct", context);
 
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
@@ -1028,27 +1092,31 @@ pub const TypeGenerator = struct {
                 return res;
             },
             .@"enum" => {
-                const type_name = shortTypeName(@typeName(T));
-                if (self.getTopLevelType(type_name)) |gen| {
-                    return .{ .parsed = type_name, .optional = gen.optional };
+                const type_id = @typeName(T);
+                if (self.registry.reference(type_id)) |gen| {
+                    return .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
                 }
-                return .{ .parsed = try self.parseEnum(type_info.@"enum") };
+                return .{ .expr = .{ .verbatim = try self.buildEnumType(type_info.@"enum") } };
             },
             .@"union" => {
-                return .{ .parsed = try self.parseUnion(type_info.@"union", T) };
+                const type_id = @typeName(T);
+                if (self.registry.reference(type_id)) |gen| {
+                    return .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
+                }
+                return .{ .expr = .{ .verbatim = try self.buildUnionType(type_info.@"union", T, context) } };
             },
             .optional => {
                 return .{
                     // "optional" in zig means nullable, not actually optional.
                     // This means the value could still be required, but could be set to null.
                     .optional = false,
-                    .parsed = try allocPrint(self.arena_alloc, "{s}|null", .{
-                        (try self.extractIdentifier(type_info.optional.child)).parsed,
-                    }),
+                    .expr = .{ .nullable = try self.allocateExpr(
+                        (try self.buildType(type_info.optional.child, context)).expr,
+                    ) },
                 };
             },
             .@"opaque" => {
-                return .{ .parsed = @typeName(T) };
+                return .{ .expr = .{ .named = @typeName(T) } };
             },
             else => {
                 std.log.err("Unhandled identifier: {s}", .{@tagName(type_info)});
@@ -1084,8 +1152,12 @@ fn typescriptRepr(comptime T: type) ?type {
     return T._repr;
 }
 
-fn shouldDeclareTopLevel(comptime T: type) bool {
-    return comptime typescriptRepr(T) == null;
+fn shouldDeclareTopLevel(comptime value: anytype) bool {
+    if (@TypeOf(value) != type) return false;
+    return switch (@typeInfo(value)) {
+        .@"struct", .@"enum", .@"union" => typescriptRepr(value) == null,
+        else => false,
+    };
 }
 
 const TypeScriptOpaqueId = struct {
@@ -1094,7 +1166,7 @@ const TypeScriptOpaqueId = struct {
     pub const _repr: type = []const u8;
 };
 
-test "extractIdentifier: a type _repr overrides structural type generation" {
+test "buildTypeForUsage: a type _repr overrides structural type generation" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1103,8 +1175,8 @@ test "extractIdentifier: a type _repr overrides structural type generation" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const result = try type_generator.extractIdentifier(TypeScriptOpaqueId);
-    try expectContent("string", result.parsed);
+    const result = try type_generator.buildTypeForUsage(TypeScriptOpaqueId, .body);
+    try expectContent("string", try result.render(arena.allocator()));
 }
 
 test "generateTypes: _repr types generate their declared TypeScript wire type" {
@@ -1142,6 +1214,133 @@ test "generateTypes: _repr types generate their declared TypeScript wire type" {
         \\      response: string,
         \\    }
         \\  },
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+test "generateTypes: ignores top-level aliases to primitive types" {
+    const AliasEndpoint = struct {
+        pub const Timestamp = i64;
+        const Ctx = struct {};
+        const Res = struct { body: ?Timestamp = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/timestamp", AliasEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "export type Timestamp") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "response: number") != null);
+}
+
+test "generateTypes: omits unused public declarations" {
+    const Endpoint = struct {
+        pub const UnusedStruct = struct { id: i32 };
+        pub const UnusedEnum = enum { enabled, disabled };
+        pub const UnusedUnion = union(enum) { by_id: i32 };
+
+        const Ctx = struct {};
+        const Res = struct { body: ?bool = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/unused-declarations", Endpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    inline for (.{ "UnusedStruct", "UnusedEnum", "UnusedUnion" }) |name| {
+        try std.testing.expect(std.mem.indexOf(u8, output, "export type " ++ name) == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, output, "response: boolean") != null);
+}
+
+test "generateTypes: unused declarations do not reserve a TypeScript name" {
+    const UnusedEndpoint = struct {
+        pub const Shared = struct { ignored: bool };
+    };
+    const UsedEndpoint = struct {
+        pub const Shared = struct { id: i32 };
+        const Ctx = struct {};
+        const Res = struct { body: ?Shared = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{
+        .{ "/unused-shared", UnusedEndpoint },
+        .{ "/used-shared", UsedEndpoint },
+    };
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "export type Shared =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "ignored:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "response: Shared") != null);
+}
+
+test "generateTypes: exports declarations referenced by an exported endpoint type" {
+    const Endpoint = struct {
+        pub const Child = struct { id: i32 };
+        pub const Parent = struct { child: Child };
+
+        const Ctx = struct {};
+        const Res = struct { body: ?Parent = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/nested-declaration", Endpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Child = {
+        \\  id: number
+        \\}
+        \\export type Parent = {
+        \\  child: Child
+        \\}
+        \\export type Spec = {
+        \\  GET: {
+        \\    "/nested-declaration": {
+        \\      response: Parent,
+        \\    }
+        \\  },
+        \\  POST: {},
         \\  PUT: {},
         \\  PATCH: {},
         \\  DELETE: {},
@@ -1268,7 +1467,7 @@ test "required nullable fields" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractIdentifier(Foo);
+    const parse_result = try type_generator.buildTypeForUsage(Foo, .body);
     try expectContent(
         \\ {
         \\   foo?: number|null
@@ -1276,7 +1475,7 @@ test "required nullable fields" {
         \\   baz?: number
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
@@ -1297,8 +1496,8 @@ test "Nested Optionals" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractIdentifier(Foo);
-    try expectContent(parse_result.parsed,
+    const parse_result = try type_generator.buildTypeForUsage(Foo, .body);
+    try expectContent(try parse_result.render(arena.allocator()),
         \\ {
         \\   enabled?: boolean
         \\   email?: {
@@ -1323,7 +1522,7 @@ test "Optionals require default values" {
     defer type_generator.deinit();
 
     // This should throw an error
-    _ = type_generator.extractIdentifier(Foo) catch |err| {
+    _ = type_generator.buildTypeForUsage(Foo, .body) catch |err| {
         try std.testing.expectEqual(err, error.OptionalMissingDefault);
         return;
     };
@@ -1345,8 +1544,8 @@ test "JsonArray(T)" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractIdentifier(Foo);
-    try expectContent(parse_result.parsed,
+    const parse_result = try type_generator.buildTypeForUsage(Foo, .body);
+    try expectContent(try parse_result.render(arena.allocator()),
         \\ {
         \\   list: {
         \\     abc: number
@@ -1365,7 +1564,7 @@ const Filter = union(enum) {
     detailed: struct { start_date: []const u8, end_date: []const u8 },
 };
 
-test "extractQueryParams: union with subset variants" {
+test "buildQueryParamsType: union with subset variants" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1374,7 +1573,7 @@ test "extractQueryParams: union with subset variants" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(Filter);
+    const built_type = try type_generator.buildQueryParamsType(Filter);
     try expectContent(
         \\ XOR<({
         \\   start_date: string
@@ -1383,7 +1582,7 @@ test "extractQueryParams: union with subset variants" {
         \\   end_date: string
         \\ })>
     ,
-        parse_result.parsed,
+        try built_type.render(arena.allocator()),
     );
 }
 
@@ -1402,7 +1601,7 @@ const LostProductionFilter = union(enum) {
     },
 };
 
-test "extractQueryParams: LostProductionFilter (scalar + struct variants + shared optionals)" {
+test "buildQueryParamsType: LostProductionFilter (scalar + struct variants + shared optionals)" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1411,7 +1610,7 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
+    const parse_result = try type_generator.buildQueryParamsType(LostProductionFilter);
     try expectContent(
         \\ XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
         \\   start_date: string
@@ -1423,7 +1622,7 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
         \\   shift?: number|null
         \\ })>>>
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
@@ -1435,7 +1634,7 @@ const Query = struct {
     },
 };
 
-test "extractQueryParams: base keys + union variant keys" {
+test "buildQueryParamsType: base keys + union variant keys" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1444,7 +1643,7 @@ test "extractQueryParams: base keys + union variant keys" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(Query);
+    const parse_result = try type_generator.buildQueryParamsType(Query);
     try expectContent(
         \\ (XOR<({ by_id: number }), ({
         \\   start_date: string
@@ -1452,7 +1651,7 @@ test "extractQueryParams: base keys + union variant keys" {
         \\  page: number
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
@@ -1468,7 +1667,7 @@ const WorkerQuery = struct {
     worker: Optional(WorkerFilter) = .not_provided,
 };
 
-test "extractQueryParams: Optional union leaf renders as an untagged TS union" {
+test "buildQueryParamsType: Optional union leaf renders as an untagged TS union" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1477,13 +1676,13 @@ test "extractQueryParams: Optional union leaf renders as an untagged TS union" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(WorkerQuery);
+    const parse_result = try type_generator.buildQueryParamsType(WorkerQuery);
     try expectContent(
         \\ {
         \\   worker?: number | "unassigned"
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
@@ -1492,7 +1691,7 @@ const WorkerFilterNoRepr = union(enum) {
     unassigned,
 };
 
-test "extractQueryParams: query param union needs no _repr declaration" {
+test "buildQueryParamsType: query param union needs no _repr declaration" {
     const WorkerQueryNoRepr = struct {
         worker: Optional(WorkerFilterNoRepr) = .not_provided,
     };
@@ -1505,17 +1704,17 @@ test "extractQueryParams: query param union needs no _repr declaration" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(WorkerQueryNoRepr);
+    const parse_result = try type_generator.buildQueryParamsType(WorkerQueryNoRepr);
     try expectContent(
         \\ {
         \\   worker?: number | "unassigned"
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
-test "extractQueryParams: Optional(?Union) leaf is optional and nullable" {
+test "buildQueryParamsType: Optional(?Union) leaf is optional and nullable" {
     const WorkerQueryNestedOptional = struct {
         worker: Optional(?WorkerFilterNoRepr) = .not_provided,
     };
@@ -1528,17 +1727,17 @@ test "extractQueryParams: Optional(?Union) leaf is optional and nullable" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(WorkerQueryNestedOptional);
+    const parse_result = try type_generator.buildQueryParamsType(WorkerQueryNestedOptional);
     try expectContent(
         \\ {
         \\   worker?: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
-test "extractQueryParams: ?Union leaf is optional and nullable" {
+test "buildQueryParamsType: ?Union leaf is optional and nullable" {
     const WorkerQueryNativeOptional = struct {
         worker: ?WorkerFilterNoRepr = null,
     };
@@ -1551,13 +1750,13 @@ test "extractQueryParams: ?Union leaf is optional and nullable" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(WorkerQueryNativeOptional);
+    const parse_result = try type_generator.buildQueryParamsType(WorkerQueryNativeOptional);
     try expectContent(
         \\ {
         \\   worker?: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
 }
 
@@ -1565,7 +1764,7 @@ const WorkerQueryRequiredNative = struct {
     worker: ?WorkerFilterNoRepr,
 };
 
-test "extractQueryParams: required native ?Union leaf is required and nullable" {
+test "buildQueryParamsType: required native ?Union leaf is required and nullable" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1574,13 +1773,13 @@ test "extractQueryParams: required native ?Union leaf is required and nullable" 
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(WorkerQueryRequiredNative);
+    const parse_result = try type_generator.buildQueryParamsType(WorkerQueryRequiredNative);
     try expectContent(
         \\ {
         \\   worker: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        try parse_result.render(arena.allocator()),
     );
     try expectEqual(false, parse_result.optional);
 }
@@ -1599,7 +1798,7 @@ const PlainDateQuery = struct {
     line: i32,
 };
 
-test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
+test "buildQueryParamsType: plain struct coerces a paramParse leaf to string" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1608,13 +1807,13 @@ test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(PlainDateQuery);
+    const parse_result = try type_generator.buildQueryParamsType(PlainDateQuery);
     try expectContent(
         \\{
         \\  start_date: string
         \\  line: number
         \\}
-    , parse_result.parsed);
+    , try parse_result.render(arena.allocator()));
 }
 
 const AllOptionalQuery = struct {
@@ -1622,7 +1821,7 @@ const AllOptionalQuery = struct {
     shift: ?i32 = null,
 };
 
-test "extractQueryParams: optionality follows the minimum required key count" {
+test "buildQueryParamsType: optionality follows the minimum required key count" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1632,19 +1831,19 @@ test "extractQueryParams: optionality follows the minimum required key count" {
     defer type_generator.deinit();
 
     // A struct with a required field is required
-    try expectEqual(false, (try type_generator.extractQueryParams(PlainDateQuery)).optional);
+    try expectEqual(false, (try type_generator.buildQueryParamsType(PlainDateQuery)).optional);
 
     // A struct with only optional fields is optional
-    try expectEqual(true, (try type_generator.extractQueryParams(AllOptionalQuery)).optional);
+    try expectEqual(true, (try type_generator.buildQueryParamsType(AllOptionalQuery)).optional);
 
     // Every variant has required keys, so at least one key is always needed
-    try expectEqual(false, (try type_generator.extractQueryParams(Filter)).optional);
+    try expectEqual(false, (try type_generator.buildQueryParamsType(Filter)).optional);
 
     // The `all` variant needs zero keys (all-optional fallback), so it can be omitted
-    try expectEqual(true, (try type_generator.extractQueryParams(LostProductionFilter)).optional);
+    try expectEqual(true, (try type_generator.buildQueryParamsType(LostProductionFilter)).optional);
 
     // Base key `page` is required
-    try expectEqual(false, (try type_generator.extractQueryParams(Query)).optional);
+    try expectEqual(false, (try type_generator.buildQueryParamsType(Query)).optional);
 }
 
 // An optional nested struct with a single required leaf and an optional sibling.
@@ -1659,7 +1858,7 @@ const CursorQuery = struct {
     limit: u32 = 10,
 };
 
-test "extractQueryParams: optional nested struct with a required key renders as a gated XOR group" {
+test "buildQueryParamsType: optional nested struct with a required key renders as a gated XOR group" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1668,7 +1867,7 @@ test "extractQueryParams: optional nested struct with a required key renders as 
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(CursorQuery);
+    const parse_result = try type_generator.buildQueryParamsType(CursorQuery);
     try expectContent(
         \\XOR<{
         \\  cursor: number
@@ -1677,7 +1876,7 @@ test "extractQueryParams: optional nested struct with a required key renders as 
         \\  room: number
         \\  limit?: number
         \\}
-    , parse_result.parsed);
+    , try parse_result.render(arena.allocator()));
 }
 
 const RangeQuery = struct {
@@ -1689,7 +1888,7 @@ const RangeQuery = struct {
     }) = .not_provided,
 };
 
-test "extractQueryParams: handles gated group optionality" {
+test "buildQueryParamsType: handles gated group optionality" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1698,7 +1897,7 @@ test "extractQueryParams: handles gated group optionality" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(RangeQuery);
+    const parse_result = try type_generator.buildQueryParamsType(RangeQuery);
     try expectContent(
         \\XOR<{
         \\  start: string
@@ -1707,7 +1906,7 @@ test "extractQueryParams: handles gated group optionality" {
         \\}, {}> & {
         \\  page?: number
         \\}
-    , parse_result.parsed);
+    , try parse_result.render(arena.allocator()));
 }
 
 const RangeQueryOneRequired = struct {
@@ -1719,7 +1918,7 @@ const RangeQueryOneRequired = struct {
     }) = .not_provided,
 };
 
-test "extractQueryParams: gated group with a single required key" {
+test "buildQueryParamsType: gated group with a single required key" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1728,7 +1927,7 @@ test "extractQueryParams: gated group with a single required key" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(RangeQueryOneRequired);
+    const parse_result = try type_generator.buildQueryParamsType(RangeQueryOneRequired);
     try expectContent(
         \\XOR<{
         \\  start: string
@@ -1737,7 +1936,7 @@ test "extractQueryParams: gated group with a single required key" {
         \\}, {}> & {
         \\  page?: number
         \\}
-    , parse_result.parsed);
+    , try parse_result.render(arena.allocator()));
 }
 
 const AnyOfQuery = struct {
@@ -1747,7 +1946,7 @@ const AnyOfQuery = struct {
     pub const constraints: types.Constraints = .{ .any_of = true };
 };
 
-test "extractQueryParams: any_of constraint wraps the object in AnyOf" {
+test "buildQueryParamsType: any_of constraint wraps the object in AnyOf" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -1756,13 +1955,13 @@ test "extractQueryParams: any_of constraint wraps the object in AnyOf" {
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    const parse_result = try type_generator.extractQueryParams(AnyOfQuery);
+    const parse_result = try type_generator.buildQueryParamsType(AnyOfQuery);
     try expectContent(
         \\AnyOf<{
         \\  a?: number
         \\  b?: string
         \\}>
-    , parse_result.parsed);
+    , try parse_result.render(arena.allocator()));
     try expectEqual(false, parse_result.optional);
 }
 
@@ -1922,6 +2121,31 @@ test "generateTypes: public struct query param coerces paramParse leaves into st
         \\   DELETE: {},
         \\ };
     , output);
+}
+
+test "generateTypes: public enum may be shared by query params and a response" {
+    const Endpoint = struct {
+        pub const Metric = enum { capacity, units };
+        const Ctx = struct { query_params: Metric };
+        const Res = struct { body: ?Metric = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/metric", Endpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "export type Metric =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "queryParams: Metric") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "response: Metric") != null);
 }
 
 const AlertTopic = enum { downtime, lost_production };
@@ -2135,9 +2359,11 @@ test "generateTypes: a type declared in another endpoint is referenced by name, 
     var type_generator = try TypeGenerator.init(arena.allocator());
     defer type_generator.deinit();
 
-    // Order matters: the referencing endpoint (/report) comes first, so `ReportRow` is still an
-    // unrendered pass-1 placeholder when `Report`'s `rows` field is generated in pass 2. This is
-    // the exact condition that previously caused the child to be inlined instead of referenced.
+    // Order matters:
+    // the referencing endpoint (/report) comes first,
+    // so `ReportRow` is still an unrendered pass-1 placeholder
+    // when `Report`'s `rows` field is generated in pass 2.
+    // This is the exact condition that previously caused the child to be inlined instead of referenced.
     const endpoints = [_]EndpointDef{
         .{ "/report", ReportEndpoint },
         .{ "/report/row", ReportRowEndpoint },
