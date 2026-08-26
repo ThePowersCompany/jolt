@@ -23,7 +23,7 @@ const AdjacentUnion = common.AdjacentUnion;
 const FlatLeaf = common.FlatLeaf;
 
 const typescript = @import("./typescript.zig");
-const BuiltType = typescript.BuiltType;
+const TypeDescriptor = typescript.TypeDescriptor;
 const TypeExpr = typescript.TypeExpr;
 
 const declarations = @import("./declarations.zig");
@@ -233,7 +233,7 @@ pub const TypeGenerator = struct {
         };
     }
 
-    fn render(self: *Self, result: BuiltType) ![]const u8 {
+    fn render(self: *Self, result: TypeDescriptor) ![]const u8 {
         return result.render(self.arena_alloc);
     }
 
@@ -269,7 +269,7 @@ pub const TypeGenerator = struct {
         );
     }
 
-    fn buildTopLevelType(self: *Self, comptime T: type, usage: TypeUsage) !BuiltType {
+    fn buildTopLevelType(self: *Self, comptime T: type, usage: TypeUsage) !TypeDescriptor {
         const context: TypeGenerationContext = .{ .usage = usage };
         return switch (@typeInfo(T)) {
             .@"struct" => |s| if (usage == .query_params)
@@ -347,7 +347,7 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn renderRequestContextField(self: *Self, name: []const u8, built_type: BuiltType) ![]const u8 {
+    fn renderRequestContextField(self: *Self, name: []const u8, built_type: TypeDescriptor) ![]const u8 {
         return allocPrint(
             self.arena_alloc,
             "{s}{s}: {s}\n",
@@ -457,7 +457,7 @@ pub const TypeGenerator = struct {
         struct_name: []const u8,
         S: Type.Struct,
         context: TypeGenerationContext,
-    ) !BuiltType {
+    ) !TypeDescriptor {
         // Find adjacent union ahead of time
         var adjacent_union: ?AdjacentUnion = null;
         {
@@ -511,7 +511,7 @@ pub const TypeGenerator = struct {
             const short_struct_name = Registry.shortName(struct_name);
             try self.registry.setRendered(struct_name, try self.buildAdjacentUnionStructType(S, au, context));
 
-            return BuiltType{
+            return TypeDescriptor{
                 .optional = false,
                 .expr = .{ .named = short_struct_name },
             };
@@ -521,7 +521,7 @@ pub const TypeGenerator = struct {
         return self.buildObjectType(S, context);
     }
 
-    fn buildObjectType(self: *Self, S: Type.Struct, context: TypeGenerationContext) !BuiltType {
+    fn buildObjectType(self: *Self, S: Type.Struct, context: TypeGenerationContext) !TypeDescriptor {
         var all_optional = true;
         var fields: ArrayList(TypeExpr.Field) = .empty;
         inline for (S.fields) |field| {
@@ -556,7 +556,7 @@ pub const TypeGenerator = struct {
     }
 
     /// Helper function for adjacent unions
-    fn buildUnionObjectType(self: *Self, U: Type.Union, context: TypeGenerationContext) !BuiltType {
+    fn buildUnionObjectType(self: *Self, U: Type.Union, context: TypeGenerationContext) !TypeDescriptor {
         var all_optional = true;
         var fields: ArrayList(TypeExpr.Field) = .empty;
         inline for (U.fields) |field| {
@@ -580,7 +580,7 @@ pub const TypeGenerator = struct {
         S: Type.Struct,
         adjacent_union: AdjacentUnion,
         context: TypeGenerationContext,
-    ) !BuiltType {
+    ) !TypeDescriptor {
         const union_short_name = Registry.shortName(adjacent_union.name);
 
         var res: ArrayList(u8) = .empty;
@@ -759,7 +759,7 @@ pub const TypeGenerator = struct {
     }
 
     /// Wraps a type in the utility required by its constraints.
-    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: BuiltType) !BuiltType {
+    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: TypeDescriptor) !TypeDescriptor {
         if (comptime constraints.any_of) {
             return .{
                 .expr = try self.anyOf(res.expr),
@@ -770,17 +770,17 @@ pub const TypeGenerator = struct {
     }
 
     /// A `paramParse` query value is always a string on the wire.
-    fn buildQueryLeafType(self: *Self, comptime T: type, context: TypeGenerationContext) !BuiltType {
+    fn buildQueryLeafType(self: *Self, comptime T: type, context: TypeGenerationContext) !TypeDescriptor {
         if (comptime hasParamParse(T)) return .{ .expr = .{ .named = "string" } };
         return self.buildType(T, context);
     }
 
     /// Query params flatten structs and tagged unions into their wire keys.
-    fn buildQueryParamsType(self: *Self, comptime T: type) !BuiltType {
+    fn buildQueryParamsType(self: *Self, comptime T: type) !TypeDescriptor {
         return self.buildQueryType(T, .{ .usage = .query_params });
     }
 
-    fn buildQueryType(self: *Self, comptime T: type, context: TypeGenerationContext) !BuiltType {
+    fn buildQueryType(self: *Self, comptime T: type, context: TypeGenerationContext) !TypeDescriptor {
         const type_id = @typeName(T);
         const ts_name = Registry.shortName(type_id);
         const is_top_level = self.registry.isDeclared(type_id);
@@ -829,7 +829,7 @@ pub const TypeGenerator = struct {
     /// Parses a union into a flat TS union.
     /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
     /// and a plain struct variant is flattened into its leaf keys.
-    fn buildFlatUnionType(self: *Self, U: Type.Union, context: TypeGenerationContext) !BuiltType {
+    fn buildFlatUnionType(self: *Self, U: Type.Union, context: TypeGenerationContext) !TypeDescriptor {
         var variants: ArrayList(*const TypeExpr) = .empty;
         inline for (U.fields) |field| {
             const info = @typeInfo(field.type);
@@ -961,7 +961,7 @@ pub const TypeGenerator = struct {
         comptime T: type,
         S: Type.Struct,
         context: TypeGenerationContext,
-    ) !BuiltType {
+    ) !TypeDescriptor {
         var components: ArrayList(*const TypeExpr) = .empty;
 
         inline for (S.fields) |field| {
@@ -1055,11 +1055,11 @@ pub const TypeGenerator = struct {
         return .{ .object = try fields.toOwnedSlice(self.arena_alloc) };
     }
 
-    fn buildTypeForUsage(self: *Self, T: type, usage: TypeUsage) !BuiltType {
+    fn buildTypeForUsage(self: *Self, T: type, usage: TypeUsage) !TypeDescriptor {
         return self.buildType(T, .{ .usage = usage });
     }
 
-    fn buildType(self: *Self, T: type, context: TypeGenerationContext) !BuiltType {
+    fn buildType(self: *Self, T: type, context: TypeGenerationContext) !TypeDescriptor {
         if (comptime typescriptRepr(T)) |repr_type| {
             return self.buildType(repr_type, context);
         }
@@ -1080,7 +1080,7 @@ pub const TypeGenerator = struct {
             .@"struct" => {
                 const type_id = @typeName(T);
 
-                const res: BuiltType = if (self.registry.reference(type_id)) |gen| blk: {
+                const res: TypeDescriptor = if (self.registry.reference(type_id)) |gen| blk: {
                     break :blk .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
                 } else try self.buildStructType(type_id, type_info.@"struct", context);
 

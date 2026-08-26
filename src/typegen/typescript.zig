@@ -105,11 +105,17 @@ pub const TypeExpr = union(enum) {
     }
 };
 
-pub const BuiltType = struct {
+/// A generated TypeScript type expression together with metadata about its use.
+///
+/// `expr` - Description of the TypeScript type itself.
+/// `optional` - describes whether a property using that expression may be omitted (`property?: Type`)
+/// and is kept separate because it is not part of the type expression:
+/// a nullable type, for example, is still a required property unless it is explicitly omittable.
+pub const TypeDescriptor = struct {
     expr: TypeExpr,
     optional: bool = false,
 
-    pub fn render(self: BuiltType, allocator: Allocator) ![]const u8 {
+    pub fn render(self: TypeDescriptor, allocator: Allocator) ![]const u8 {
         return self.expr.render(allocator);
     }
 };

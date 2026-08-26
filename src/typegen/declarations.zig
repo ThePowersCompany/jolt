@@ -1,12 +1,12 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-const BuiltType = @import("typescript.zig").BuiltType;
+const TypeDescriptor = @import("typescript.zig").TypeDescriptor;
 
 pub const TypeUsage = enum { body, query_params };
 
 const Declaration = struct {
-    rendered: ?BuiltType = null,
+    rendered: ?TypeDescriptor = null,
     referenced: bool = false,
     usage: ?TypeUsage = null,
 };
@@ -31,7 +31,7 @@ pub const Registry = struct {
         return self.declarations.contains(type_id);
     }
 
-    pub fn reference(self: *const Registry, type_id: []const u8) ?BuiltType {
+    pub fn reference(self: *const Registry, type_id: []const u8) ?TypeDescriptor {
         const decl = self.declarations.get(type_id) orelse return null;
         return decl.rendered orelse .{ .expr = .{ .named = shortName(type_id) } };
     }
@@ -45,7 +45,7 @@ pub const Registry = struct {
         try self.declarations.put(type_id, .{});
     }
 
-    pub fn setRendered(self: *Registry, type_id: []const u8, built_type: BuiltType) !void {
+    pub fn setRendered(self: *Registry, type_id: []const u8, built_type: TypeDescriptor) !void {
         const existing = self.declarations.get(type_id);
         if (existing) |decl| {
             if (decl.rendered != null) {
