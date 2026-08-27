@@ -241,14 +241,6 @@ pub const TypeGenerator = struct {
         return TypeExpr.allocate(self.arena_alloc, expr);
     }
 
-    fn appendExpr(self: *Self, expressions: *ArrayList(*const TypeExpr), expr: TypeExpr) !void {
-        try expressions.append(self.arena_alloc, try self.allocateExpr(expr));
-    }
-
-    fn appendRef(self: *Self, expressions: *ArrayList(*const TypeExpr), expr: *const TypeExpr) !void {
-        try expressions.append(self.arena_alloc, expr);
-    }
-
     fn parenthesize(self: *Self, expr: *const TypeExpr) !*const TypeExpr {
         return self.allocateExpr(.{ .parens = expr });
     }
@@ -830,7 +822,7 @@ pub const TypeGenerator = struct {
     /// A scalar (or `paramParse`/void) variant uses the variant name as its single key,
     /// and a plain struct variant is flattened into its leaf keys.
     fn buildFlatUnionType(self: *Self, U: Type.Union, context: TypeGenerationContext) !TypeDescriptor {
-        var variants: ArrayList(*const TypeExpr) = .empty;
+        var variants = TypeExpr.Components.init(self.arena_alloc);
         inline for (U.fields) |field| {
             const info = @typeInfo(field.type);
             if (field.type == void) {
@@ -839,21 +831,21 @@ pub const TypeGenerator = struct {
                     field.name,
                     .{ .verbatim = "\"\"" },
                 );
-                try self.appendExpr(&variants, variant);
+                try variants.append(variant);
             } else if (info == .@"struct" and !hasParamParse(field.type)) {
                 const variant: TypeExpr =
                     (try self.buildQueryObjectType(field.type, info.@"struct", context)) orelse .{ .object = &.{} };
 
-                try self.appendExpr(&variants, inlineSingleFieldObject(variant));
+                try variants.append(inlineSingleFieldObject(variant));
             } else {
                 // Scalar / array / enum / paramParse struct: variant name is key.
                 const ident = try self.buildQueryLeafType(field.type, context);
                 const variant = try TypeExpr.singleField(self.arena_alloc, field.name, ident.expr);
-                try self.appendExpr(&variants, variant);
+                try variants.append(variant);
             }
         }
         // A union always needs at least one matching key, so it is required.
-        return .{ .expr = try self.renderExclusiveUnion(variants.items) };
+        return .{ .expr = try self.renderExclusiveUnion(variants.items.items) };
     }
 
     /// Combines variants so exactly one may be present.
@@ -927,29 +919,25 @@ pub const TypeGenerator = struct {
 
         // One `XOR<present, {}>` per group, the independent keys as a plain object,
         // and AnyOf over everything if the constraint is set.
-        var components: ArrayList(*const TypeExpr) = .empty;
+        var components = TypeExpr.Components.init(self.arena_alloc);
 
         // A group always has >= 1 required key (all-optional groups flatten inline)
         for (flat_struct.groups.items) |group| {
             const present = try self.allocateExpr(try self.renderLeafObject(group.items));
             const absent = try self.allocateExpr(.{ .object = &.{} });
-            try self.appendRef(&components, try self.exclusiveOr(present, absent));
+            try components.appendRef(try self.exclusiveOr(present, absent));
         }
 
         if (flat_struct.independent.items.len > 0) {
-            try self.appendExpr(
-                &components,
-                try self.renderLeafObject(flat_struct.independent.items),
-            );
+            try components.append(try self.renderLeafObject(flat_struct.independent.items));
         }
 
         if (any_of) {
             const full = try self.allocateExpr(try self.renderLeafObject(all.items));
-            try self.appendExpr(&components, try self.anyOf(full.*));
+            try components.append(try self.anyOf(full.*));
         }
 
-        if (components.items.len == 1) return components.items[0].*;
-        return .{ .intersection = try components.toOwnedSlice(self.arena_alloc) };
+        return try components.intoIntersection();
     }
 
     /// Emits the flat TS shape for a query param struct which contains lifted union fields.
@@ -962,12 +950,12 @@ pub const TypeGenerator = struct {
         S: Type.Struct,
         context: TypeGenerationContext,
     ) !TypeDescriptor {
-        var components: ArrayList(*const TypeExpr) = .empty;
+        var components = TypeExpr.Components.init(self.arena_alloc);
 
         inline for (S.fields) |field| {
             if (comptime isLiftableUnion(field.type)) {
                 const shape = try self.buildFlatUnionType(@typeInfo(field.type).@"union", context);
-                try self.appendRef(&components, try self.parenthesize(
+                try components.appendRef(try self.parenthesize(
                     try self.allocateExpr(shape.expr),
                 ));
             }
@@ -975,14 +963,11 @@ pub const TypeGenerator = struct {
 
         // Base object from the non-union fields (collectFlatLeaves skips unions).
         if (try self.buildQueryObjectType(T, S, context)) |base| {
-            try self.appendExpr(&components, base);
+            try components.append(base);
         }
 
         return .{
-            .expr = if (components.items.len == 1)
-                components.items[0].*
-            else
-                .{ .intersection = try components.toOwnedSlice(self.arena_alloc) },
+            .expr = try components.intoIntersection(),
             .optional = comptime queryParamsOptional(T),
         };
     }

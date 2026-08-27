@@ -27,6 +27,30 @@ pub const TypeExpr = union(enum) {
         arguments: []const *const TypeExpr,
     };
 
+    /// Builds a collection of expressions with arena-allocated nodes.
+    pub const Components = struct {
+        allocator: Allocator,
+        items: ArrayList(*const TypeExpr) = .empty,
+
+        pub fn init(allocator: Allocator) Components {
+            return .{ .allocator = allocator };
+        }
+
+        /// Allocates `expr` before adding it to the collection.
+        pub fn append(self: *Components, expr: TypeExpr) !void {
+            try self.appendRef(try allocate(self.allocator, expr));
+        }
+
+        /// Adds a reference to an expression that has already been allocated.
+        pub fn appendRef(self: *Components, expr: *const TypeExpr) !void {
+            try self.items.append(self.allocator, expr);
+        }
+
+        pub fn intoIntersection(self: *Components) !TypeExpr {
+            return .{ .intersection = try self.items.toOwnedSlice(self.allocator) };
+        }
+    };
+
     /// Allocates an expression so another expression can refer to it.
     pub fn allocate(allocator: Allocator, expr: TypeExpr) !*const TypeExpr {
         const result = try allocator.create(TypeExpr);
@@ -139,4 +163,17 @@ test "TypeExpr renders nested types" {
         \\  limit?: number|null
         \\}
     , try object.render(allocator));
+}
+
+test "TypeExpr.Components allocates values and preserves references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var components = TypeExpr.Components.init(allocator);
+    try components.append(.{ .named = "string" });
+    try components.appendRef(try TypeExpr.allocate(allocator, .{ .named = "number" }));
+
+    const expr = try components.intoIntersection();
+    try expectContent("string & number", try expr.render(allocator));
 }
