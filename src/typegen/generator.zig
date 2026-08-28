@@ -712,36 +712,18 @@ pub const TypeGenerator = struct {
                         try res.appendSlice(self.arena_alloc, " }");
                     }
                 },
-                .adjacently => {
+                .adjacently, .untagged => {
                     // The discriminator belongs to the enclosing struct, not the union value itself.
-                    // When the union is used directly, expose the possible payload shapes
-                    // and let callers narrow it by their enclosing discriminator.
+                    // Both representations are a union of payload shapes in TypeScript.
+                    // For adjacent unions, the enclosing struct provides the discriminator.
                     inline for (U.fields, 0..) |field, i| {
-                        if (i > 0) {
-                            try res.appendSlice(self.arena_alloc, " | ");
-                        }
+                        if (i > 0) try res.appendSlice(self.arena_alloc, " | ");
 
                         if (field.type == void) {
                             try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
                         } else {
-                            try res.appendSlice(self.arena_alloc, try self.render(
-                                try self.buildType(field.type, context),
-                            ));
-                        }
-                    }
-                },
-                .untagged => {
-                    // Get the type of each enum state, join them together
-                    inline for (U.fields, 0..) |field, i| {
-                        if (i > 0) {
-                            try res.appendSlice(self.arena_alloc, " | ");
-                        }
-
-                        if (@typeInfo(field.type) == .void) {
-                            try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
-                        } else {
-                            const ident = try self.render(try self.buildType(field.type, context));
-                            try res.appendSlice(self.arena_alloc, ident);
+                            const t = try self.buildType(field.type, context);
+                            try res.appendSlice(self.arena_alloc, try self.render(t));
                         }
                     }
                 },
