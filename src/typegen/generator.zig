@@ -717,14 +717,17 @@ pub const TypeGenerator = struct {
                     // When the union is used directly, expose the possible payload shapes
                     // and let callers narrow it by their enclosing discriminator.
                     inline for (U.fields, 0..) |field, i| {
-                        const field_info = @typeInfo(field.type);
-                        if (field_info != .@"struct") return error.InvalidUnionRepr;
-
                         if (i > 0) {
                             try res.appendSlice(self.arena_alloc, " | ");
                         }
-                        const obj = try self.buildObjectType(field_info.@"struct", context);
-                        try res.appendSlice(self.arena_alloc, try self.render(obj));
+
+                        if (field.type == void) {
+                            try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
+                        } else {
+                            try res.appendSlice(self.arena_alloc, try self.render(
+                                try self.buildType(field.type, context),
+                            ));
+                        }
                     }
                 },
                 .untagged => {
@@ -2255,6 +2258,46 @@ test "generateTypes: direct adjacently tagged union response renders its payload
         \\        line: string
         \\        units: number
         \\      },
+        \\    }
+        \\  },
+        \\  POST: {},
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+test "generateTypes: direct adjacently tagged union response supports scalar and void variants" {
+    const DirectScalarPayload = union(enum) {
+        disabled,
+        threshold: i32,
+
+        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "foo" } };
+    };
+    const DirectScalarEndpoint = struct {
+        const Ctx = struct {};
+        const Res = struct { body: ?DirectScalarPayload = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/scalar-payload", DirectScalarEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {
+        \\    "/scalar-payload": {
+        \\      response: "disabled" | number,
         \\    }
         \\  },
         \\  POST: {},
