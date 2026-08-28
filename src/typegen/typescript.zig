@@ -12,6 +12,10 @@ pub const TypeExpr = union(enum) {
     nullable: *const TypeExpr,
     object: []const Field,
     inline_object: []const Field,
+    /// An indexed-access type such as `AlertPayload[K]`.
+    indexed: Indexed,
+    /// A mapped type such as `{ [K in keyof AlertPayload]: ... }[keyof AlertPayload]`.
+    mapped: Mapped,
     parens: *const TypeExpr,
     intersection: []const *const TypeExpr,
     generic: Generic,
@@ -25,6 +29,19 @@ pub const TypeExpr = union(enum) {
     pub const Generic = struct {
         name: []const u8,
         arguments: []const *const TypeExpr,
+    };
+
+    /// A type written as `target[index]` (e.g. `AlertPayload[K]`).
+    pub const Indexed = struct {
+        target: []const u8,
+        index: []const u8,
+    };
+
+    /// The mapping key, target type, and object shape of a mapped type.
+    pub const Mapped = struct {
+        key: []const u8,
+        target: []const u8,
+        fields: []const Field,
     };
 
     /// Builds a collection of expressions with arena-allocated nodes.
@@ -64,6 +81,22 @@ pub const TypeExpr = union(enum) {
         }) };
     }
 
+    pub fn makeObject(fields: []const Field) TypeExpr {
+        return .{ .object = fields };
+    }
+
+    pub fn makeIndexed(target: []const u8, index: []const u8) TypeExpr {
+        return .{ .indexed = .{ .target = target, .index = index } };
+    }
+
+    pub fn makeMapped(key: []const u8, target: []const u8, fields: []const Field) TypeExpr {
+        return .{ .mapped = .{
+            .key = key,
+            .target = target,
+            .fields = fields,
+        } };
+    }
+
     pub fn makeGeneric(
         allocator: Allocator,
         name: []const u8,
@@ -75,10 +108,14 @@ pub const TypeExpr = union(enum) {
         } };
     }
 
-    pub fn render(self: TypeExpr, allocator: Allocator) ![]const u8 {
+    pub fn render(self: TypeExpr, allocator: Allocator) Allocator.Error![]const u8 {
+        return self.renderImpl(allocator);
+    }
+
+    fn renderImpl(self: TypeExpr, allocator: Allocator) Allocator.Error![]const u8 {
         return switch (self) {
             .verbatim, .named => |text| text,
-            .array => |element| std.fmt.allocPrint(allocator, "{s}[]", .{try element.render(allocator)}),
+            .array => |element| std.fmt.allocPrint(allocator, "{s}[]", .{try renderArrayElement(element, allocator)}),
             .nullable => |child| std.fmt.allocPrint(allocator, "{s}|null", .{try child.render(allocator)}),
             .object => |fields| {
                 var result: ArrayList(u8) = .empty;
@@ -105,12 +142,32 @@ pub const TypeExpr = union(enum) {
                 try result.appendSlice(allocator, " }");
                 return result.toOwnedSlice(allocator);
             },
+            .indexed => |indexed| std.fmt.allocPrint(allocator, "{s}[{s}]", .{ indexed.target, indexed.index }),
+            .mapped => |mapped| {
+                var result: ArrayList(u8) = .empty;
+                try result.appendSlice(allocator, "{\n  [");
+                try result.appendSlice(allocator, mapped.key);
+                try result.appendSlice(allocator, " in keyof ");
+                try result.appendSlice(allocator, mapped.target);
+                try result.appendSlice(allocator, "]: {\n");
+                for (mapped.fields) |field| {
+                    try result.appendSlice(allocator, "    ");
+                    try result.appendSlice(allocator, field.name);
+                    try result.appendSlice(allocator, if (field.optional) "?: " else ": ");
+                    try result.appendSlice(allocator, try field.expr.render(allocator));
+                    try result.append(allocator, '\n');
+                }
+                try result.appendSlice(allocator, "  };\n}[keyof ");
+                try result.appendSlice(allocator, mapped.target);
+                try result.appendSlice(allocator, "];");
+                return result.toOwnedSlice(allocator);
+            },
             .parens => |child| std.fmt.allocPrint(allocator, "({s})", .{try child.render(allocator)}),
             .intersection => |components| {
                 var result: ArrayList(u8) = .empty;
                 for (components, 0..) |component, index| {
                     if (index != 0) try result.appendSlice(allocator, " & ");
-                    try result.appendSlice(allocator, try component.render(allocator));
+                    try result.appendSlice(allocator, try renderIntersectionComponent(component, allocator));
                 }
                 return result.toOwnedSlice(allocator);
             },
@@ -127,6 +184,22 @@ pub const TypeExpr = union(enum) {
             },
         };
     }
+
+    fn renderArrayElement(element: *const TypeExpr, allocator: Allocator) Allocator.Error![]const u8 {
+        const rendered = try element.render(allocator);
+        return switch (element.*) {
+            .nullable, .intersection, .verbatim => std.fmt.allocPrint(allocator, "({s})", .{rendered}),
+            else => rendered,
+        };
+    }
+
+    fn renderIntersectionComponent(component: *const TypeExpr, allocator: Allocator) Allocator.Error![]const u8 {
+        const rendered = try component.render(allocator);
+        return switch (component.*) {
+            .nullable, .verbatim => std.fmt.allocPrint(allocator, "({s})", .{rendered}),
+            else => rendered,
+        };
+    }
 };
 
 /// A generated TypeScript type expression together with metadata about its use.
@@ -139,7 +212,7 @@ pub const TypeDescriptor = struct {
     expr: TypeExpr,
     optional: bool = false,
 
-    pub fn render(self: TypeDescriptor, allocator: Allocator) ![]const u8 {
+    pub fn render(self: TypeDescriptor, allocator: Allocator) Allocator.Error![]const u8 {
         return self.expr.render(allocator);
     }
 };
@@ -163,6 +236,45 @@ test "TypeExpr renders nested types" {
         \\  limit?: number|null
         \\}
     , try object.render(allocator));
+}
+
+test "TypeExpr preserves array element precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const number = try TypeExpr.allocate(allocator, .{ .named = "number" });
+    const nullable_number = try TypeExpr.allocate(allocator, .{ .nullable = number });
+    const array = TypeExpr{ .array = nullable_number };
+
+    try expectContent("(number|null)[]", try array.render(allocator));
+}
+
+test "TypeExpr renders mapped and indexed types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const fields = [_]TypeExpr.Field{
+        .{
+            .name = "topic",
+            .expr = try TypeExpr.allocate(allocator, .{ .named = "K" }),
+        },
+        .{
+            .name = "payload",
+            .expr = try TypeExpr.allocate(allocator, TypeExpr.makeIndexed("AlertPayload", "K")),
+        },
+    };
+    const mapped = TypeExpr.makeMapped("K", "AlertPayload", &fields);
+
+    try expectContent(
+        \\{
+        \\  [K in keyof AlertPayload]: {
+        \\    topic: K
+        \\    payload: AlertPayload[K]
+        \\  };
+        \\}[keyof AlertPayload];
+    , try mapped.render(allocator));
 }
 
 test "TypeExpr.Components allocates values and preserves references" {

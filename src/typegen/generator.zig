@@ -213,7 +213,9 @@ pub const TypeGenerator = struct {
                     const usage: TypeUsage = switch (@typeInfo(D)) {
                         // Enums render identically in both contexts.
                         .@"enum" => .body,
-                        .@"struct", .@"union" => self.registry.usageFor(type_id) orelse return error.MissingTypeUsage,
+                        .@"struct", .@"union" => {
+                            self.registry.usageFor(type_id) orelse return error.MissingTypeUsage;
+                        },
                         else => unreachable,
                     };
                     const result = self.buildTopLevelType(D, usage) catch |err| {
@@ -508,9 +510,15 @@ pub const TypeGenerator = struct {
                 return error.MissingRequiredField;
             }
 
-            // Extract out to top level type
+            const mapped_type = try self.buildAdjacentUnionStructType(S, au, context);
+
+            // Structs declared directly on an endpoint are rendered by the caller.
+            // An otherwise anonymous struct needs to register itself
+            // so other generated types can reference the mapped representation by name.
+            if (self.registry.isDeclared(struct_name)) return mapped_type;
+
             const short_struct_name = Registry.shortName(struct_name);
-            try self.registry.setRendered(struct_name, try self.buildAdjacentUnionStructType(S, au, context));
+            try self.registry.setRendered(struct_name, mapped_type);
 
             return TypeDescriptor{
                 .optional = false,
@@ -552,7 +560,7 @@ pub const TypeGenerator = struct {
 
         return .{
             .optional = all_optional,
-            .expr = .{ .object = try fields.toOwnedSlice(self.arena_alloc) },
+            .expr = TypeExpr.makeObject(try fields.toOwnedSlice(self.arena_alloc)),
         };
     }
 
@@ -572,7 +580,7 @@ pub const TypeGenerator = struct {
 
         return .{
             .optional = all_optional,
-            .expr = .{ .object = try fields.toOwnedSlice(self.arena_alloc) },
+            .expr = TypeExpr.makeObject(try fields.toOwnedSlice(self.arena_alloc)),
         };
     }
 
@@ -584,18 +592,14 @@ pub const TypeGenerator = struct {
     ) !TypeDescriptor {
         const union_short_name = Registry.shortName(adjacent_union.name);
 
-        var res: ArrayList(u8) = .empty;
-        try res.appendSlice(self.arena_alloc, "{\n");
-        try res.appendSlice(self.arena_alloc, try allocPrint(
-            self.arena_alloc,
-            "[K in keyof {s}]: {{\n",
-            .{union_short_name},
-        ));
+        var fields: ArrayList(TypeExpr.Field) = .empty;
 
         inline for (S.fields) |f| {
             if (strEqls(f.name, adjacent_union.discriminator)) {
-                try res.appendSlice(self.arena_alloc, f.name);
-                try res.appendSlice(self.arena_alloc, ": K\n");
+                try fields.append(self.arena_alloc, .{
+                    .name = f.name,
+                    .expr = try self.allocateExpr(.{ .named = "K" }),
+                });
             } else if (strEqls(@typeName(f.type), adjacent_union.name)) {
                 const field_info = @typeInfo(f.type);
                 if (field_info != .@"union") {
@@ -608,30 +612,25 @@ pub const TypeGenerator = struct {
                         try self.buildUnionObjectType(field_info.@"union", context),
                     );
                 }
-                try res.appendSlice(
-                    self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_short_name }),
-                );
+                try fields.append(self.arena_alloc, .{
+                    .name = f.name,
+                    .expr = try self.allocateExpr(TypeExpr.makeIndexed(union_short_name, "K")),
+                });
             } else {
-                try res.appendSlice(self.arena_alloc, f.name);
                 const built_type = try self.buildType(f.type, context);
-                if (built_type.optional) {
-                    try res.appendSlice(self.arena_alloc, "?: ");
-                } else {
-                    try res.appendSlice(self.arena_alloc, ": ");
-                }
-                try res.appendSlice(self.arena_alloc, try self.render(built_type));
-                try res.appendSlice(self.arena_alloc, "\n");
+                try fields.append(self.arena_alloc, .{
+                    .name = f.name,
+                    .expr = try self.allocateExpr(built_type.expr),
+                    .optional = built_type.optional,
+                });
             }
         }
 
-        try res.appendSlice(self.arena_alloc, try allocPrint(
-            self.arena_alloc,
-            "}};\n}}[keyof {s}];\n",
-            .{union_short_name},
-        ));
-
-        return .{ .expr = .{ .verbatim = try res.toOwnedSlice(self.arena_alloc) } };
+        return .{ .expr = TypeExpr.makeMapped(
+            "K",
+            union_short_name,
+            try fields.toOwnedSlice(self.arena_alloc),
+        ) };
     }
 
     fn buildEnumType(self: *Self, E: Type.Enum) ![]const u8 {
@@ -760,7 +759,11 @@ pub const TypeGenerator = struct {
     }
 
     /// Wraps a type in the utility required by its constraints.
-    fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: TypeDescriptor) !TypeDescriptor {
+    fn applyConstraints(
+        self: *Self,
+        comptime constraints: types.Constraints,
+        res: TypeDescriptor,
+    ) !TypeDescriptor {
         if (comptime constraints.any_of) {
             return .{
                 .expr = try self.anyOf(res.expr),
@@ -842,8 +845,14 @@ pub const TypeGenerator = struct {
                 );
                 try variants.append(variant);
             } else if (info == .@"struct" and !hasParamParse(field.type)) {
-                const variant: TypeExpr =
-                    (try self.buildQueryObjectType(field.type, info.@"struct", context)) orelse .{ .object = &.{} };
+                const variant: TypeExpr = blk: {
+                    const object_type = try self.buildQueryObjectType(
+                        field.type,
+                        info.@"struct",
+                        context,
+                    );
+                    break :blk object_type orelse .{ .object = &.{} };
+                };
 
                 try variants.append(inlineSingleFieldObject(variant));
             } else {
@@ -2258,7 +2267,8 @@ const NotifEndpoint = struct {
 
         pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
     };
-    const Notif = struct {
+    // Keep this public to exercise the top-level declaration rendering path.
+    pub const Notif = struct {
         id: i32,
         topic: NotifTopic,
         payload: NotifPayload,
