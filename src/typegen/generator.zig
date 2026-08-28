@@ -48,6 +48,15 @@ const TypeGenerationContext = struct {
     usage: TypeUsage,
 };
 
+/// Generates TypeScript API definitions from Jolt endpoint declarations.
+///
+/// It identifies named top-level types referenced by endpoint contexts and responses,
+/// records whether each is used as a body or query parameter,
+/// and renders the declarations required by the generated API.
+/// It then builds `Spec`, which maps HTTP methods and paths to their request and response types.
+///
+/// Query-parameter types use different semantics from JSON bodies:
+/// nested structs and unions may be flattened to reflect Jolt's query parsing behavior.
 pub const TypeGenerator = struct {
     const Self = @This();
 
