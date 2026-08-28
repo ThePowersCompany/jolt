@@ -251,11 +251,11 @@ pub const TypeGenerator = struct {
         return TypeExpr.allocate(self.arena_alloc, expr);
     }
 
-    fn parenthesize(self: *Self, expr: *const TypeExpr) !*const TypeExpr {
+    fn parenthesizeExpr(self: *Self, expr: *const TypeExpr) !*const TypeExpr {
         return self.allocateExpr(.{ .parens = expr });
     }
 
-    fn exclusiveOr(self: *Self, left: *const TypeExpr, right: *const TypeExpr) !*const TypeExpr {
+    fn buildExclusiveOrExpr(self: *Self, left: *const TypeExpr, right: *const TypeExpr) !*const TypeExpr {
         return self.allocateExpr(try TypeExpr.makeGeneric(
             self.arena_alloc,
             "XOR",
@@ -263,7 +263,7 @@ pub const TypeGenerator = struct {
         ));
     }
 
-    fn anyOf(self: *Self, expr: TypeExpr) !TypeExpr {
+    fn buildAnyOfExpr(self: *Self, expr: TypeExpr) !TypeExpr {
         return TypeExpr.makeGeneric(
             self.arena_alloc,
             "AnyOf",
@@ -278,7 +278,7 @@ pub const TypeGenerator = struct {
                 self.buildQueryStructType(T, s, context)
             else
                 self.buildStructType(@typeName(T), s, context),
-            .@"enum" => |e| .{ .expr = .{ .verbatim = try self.buildEnumType(e) } },
+            .@"enum" => |e| .{ .expr = .{ .verbatim = try self.renderEnumType(e) } },
             .@"union" => |u| if (usage == .query_params or isLiftableUnion(T))
                 self.buildFlatUnionType(u, context)
             else
@@ -632,7 +632,7 @@ pub const TypeGenerator = struct {
         ) };
     }
 
-    fn buildEnumType(self: *Self, E: Type.Enum) ![]const u8 {
+    fn renderEnumType(self: *Self, E: Type.Enum) ![]const u8 {
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, " | (\n");
         inline for (E.fields) |field| {
@@ -646,7 +646,7 @@ pub const TypeGenerator = struct {
         return res.toOwnedSlice(self.arena_alloc);
     }
 
-    fn buildUnionType(self: *Self, U: Type.Union, T: type, context: TypeGenerationContext) ![]const u8 {
+    fn renderUnionType(self: *Self, U: Type.Union, T: type, context: TypeGenerationContext) ![]const u8 {
         var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
@@ -669,7 +669,21 @@ pub const TypeGenerator = struct {
         if (union_repr) |repr| {
             switch (repr) {
                 .external => {
-                    return error.WeWerentUsingThisWhenIWroteTheTypegenLol;
+                    // External tagging wraps every payload in an object
+                    // keyed by the variant name: `{ "variant": payload }`.
+                    inline for (U.fields, 0..) |field, i| {
+                        if (i > 0) {
+                            try res.appendSlice(self.arena_alloc, " | ");
+                        }
+
+                        const payload: TypeExpr = if (field.type == void)
+                            .{ .object = &.{} }
+                        else
+                            (try self.buildType(field.type, context)).expr;
+
+                        const field_expr = try TypeExpr.singleField(self.arena_alloc, field.name, payload);
+                        try res.appendSlice(self.arena_alloc, try field_expr.render(self.arena_alloc));
+                    }
                 },
                 .internal => {
                     const disc: []const u8 = repr.internal.discriminator;
@@ -680,7 +694,7 @@ pub const TypeGenerator = struct {
                             .{ disc, field.name },
                         ));
 
-                        const field_info: Type = @typeInfo(field.type);
+                        const field_info = @typeInfo(field.type);
                         if (field_info != .@"struct") return error.InvalidUnionRepr;
 
                         inline for (field_info.@"struct".fields) |f| {
@@ -699,44 +713,24 @@ pub const TypeGenerator = struct {
                     }
                 },
                 .adjacently => {
-                    try res.appendSlice(self.arena_alloc, try allocPrint(
-                        self.arena_alloc,
-                        "{{\n [K in keyof {s}]: {{\n",
-                        .{Registry.shortName(@typeName(T))},
-                    ));
-                    const disc: []const u8 = repr.adjacently.discriminator;
-                    inline for (U.fields) |field| {
-                        try res.appendSlice(self.arena_alloc, try allocPrint(
-                            self.arena_alloc,
-                            "\n | {{{s}: \"{s}\"; ",
-                            .{ disc, field.name },
-                        ));
-
-                        const field_info: Type = @typeInfo(field.type);
+                    // The discriminator belongs to the enclosing struct, not the union value itself.
+                    // When the union is used directly, expose the possible payload shapes
+                    // and let callers narrow it by their enclosing discriminator.
+                    inline for (U.fields, 0..) |field, i| {
+                        const field_info = @typeInfo(field.type);
                         if (field_info != .@"struct") return error.InvalidUnionRepr;
 
-                        inline for (field_info.@"struct".fields) |f| {
-                            const built_type = try self.buildType(f.type, context);
-                            try res.appendSlice(self.arena_alloc, try allocPrint(
-                                self.arena_alloc,
-                                "{s}{s}: {s}; ",
-                                .{
-                                    f.name,
-                                    if (built_type.optional or f.defaultValue() != null) "?" else "",
-                                    try self.render(built_type),
-                                },
-                            ));
+                        if (i > 0) {
+                            try res.appendSlice(self.arena_alloc, " | ");
                         }
-                        try res.appendSlice(self.arena_alloc, " }");
+                        const obj = try self.buildObjectType(field_info.@"struct", context);
+                        try res.appendSlice(self.arena_alloc, try self.render(obj));
                     }
                 },
                 .untagged => {
                     // Get the type of each enum state, join them together
-                    var first = true;
-                    inline for (U.fields) |field| {
-                        if (first) {
-                            first = false;
-                        } else {
+                    inline for (U.fields, 0..) |field, i| {
+                        if (i > 0) {
                             try res.appendSlice(self.arena_alloc, " | ");
                         }
 
@@ -765,7 +759,7 @@ pub const TypeGenerator = struct {
     ) !TypeDescriptor {
         if (comptime constraints.any_of) {
             return .{
-                .expr = try self.anyOf(res.expr),
+                .expr = try self.buildAnyOfExpr(res.expr),
                 .optional = false,
             };
         }
@@ -845,7 +839,7 @@ pub const TypeGenerator = struct {
                 try variants.append(variant);
             } else if (info == .@"struct" and !hasParamParse(field.type)) {
                 const variant: TypeExpr = blk: {
-                    const object_type = try self.buildQueryObjectType(
+                    const object_type = try self.buildQueryObjectExpr(
                         field.type,
                         info.@"struct",
                         context,
@@ -853,7 +847,7 @@ pub const TypeGenerator = struct {
                     break :blk object_type orelse .{ .object = &.{} };
                 };
 
-                try variants.append(inlineSingleFieldObject(variant));
+                try variants.append(inlineSingleFieldObjectExpr(variant));
             } else {
                 // Scalar / array / enum / paramParse struct: variant name is key.
                 const ident = try self.buildQueryLeafType(field.type, context);
@@ -862,24 +856,24 @@ pub const TypeGenerator = struct {
             }
         }
         // A union always needs at least one matching key, so it is required.
-        return .{ .expr = try self.renderExclusiveUnion(variants.items.items) };
+        return .{ .expr = try self.buildExclusiveUnionExpr(variants.items.items) };
     }
 
     /// Combines variants so exactly one may be present.
-    fn renderExclusiveUnion(self: *Self, variants: []const *const TypeExpr) !TypeExpr {
+    fn buildExclusiveUnionExpr(self: *Self, variants: []const *const TypeExpr) !TypeExpr {
         if (variants.len == 0) return .{ .object = &.{} };
 
-        var result = try self.parenthesize(variants[variants.len - 1]);
+        var result = try self.parenthesizeExpr(variants[variants.len - 1]);
         var index = variants.len - 1;
         while (index > 0) {
             index -= 1;
-            const left = try self.parenthesize(variants[index]);
-            result = try self.exclusiveOr(left, result);
+            const left = try self.parenthesizeExpr(variants[index]);
+            result = try self.buildExclusiveOrExpr(left, result);
         }
         return result.*;
     }
 
-    fn inlineSingleFieldObject(expr: TypeExpr) TypeExpr {
+    fn inlineSingleFieldObjectExpr(expr: TypeExpr) TypeExpr {
         return switch (expr) {
             .object => |fields| if (fields.len == 1 and !fields[0].optional)
                 .{ .inline_object = fields }
@@ -903,7 +897,7 @@ pub const TypeGenerator = struct {
     /// so it can be omitted from the generated types.
     ///
     /// Union fields are skipped here (see `collectFlatLeaves`) and handled by the caller.
-    fn buildQueryObjectType(
+    fn buildQueryObjectExpr(
         self: *Self,
         comptime T: type,
         S: Type.Struct,
@@ -927,9 +921,9 @@ pub const TypeGenerator = struct {
 
         // No groups means the full object is the base, optionally wrapped in AnyOf
         if (flat_struct.groups.items.len == 0) {
-            const full = try self.renderLeafObject(all.items);
+            const full = try self.buildLeafObjectExpr(all.items);
             if (any_of) {
-                return try self.anyOf(full);
+                return try self.buildAnyOfExpr(full);
             }
             return full;
         }
@@ -940,18 +934,18 @@ pub const TypeGenerator = struct {
 
         // A group always has >= 1 required key (all-optional groups flatten inline)
         for (flat_struct.groups.items) |group| {
-            const present = try self.allocateExpr(try self.renderLeafObject(group.items));
+            const present = try self.allocateExpr(try self.buildLeafObjectExpr(group.items));
             const absent = try self.allocateExpr(.{ .object = &.{} });
-            try components.appendRef(try self.exclusiveOr(present, absent));
+            try components.appendRef(try self.buildExclusiveOrExpr(present, absent));
         }
 
         if (flat_struct.independent.items.len > 0) {
-            try components.append(try self.renderLeafObject(flat_struct.independent.items));
+            try components.append(try self.buildLeafObjectExpr(flat_struct.independent.items));
         }
 
         if (any_of) {
-            const full = try self.allocateExpr(try self.renderLeafObject(all.items));
-            try components.append(try self.anyOf(full.*));
+            const full = try self.allocateExpr(try self.buildLeafObjectExpr(all.items));
+            try components.append(try self.buildAnyOfExpr(full.*));
         }
 
         return try components.intoIntersection();
@@ -972,14 +966,14 @@ pub const TypeGenerator = struct {
         inline for (S.fields) |field| {
             if (comptime isLiftableUnion(field.type)) {
                 const shape = try self.buildFlatUnionType(@typeInfo(field.type).@"union", context);
-                try components.appendRef(try self.parenthesize(
+                try components.appendRef(try self.parenthesizeExpr(
                     try self.allocateExpr(shape.expr),
                 ));
             }
         }
 
         // Base object from the non-union fields (collectFlatLeaves skips unions).
-        if (try self.buildQueryObjectType(T, S, context)) |base| {
+        if (try self.buildQueryObjectExpr(T, S, context)) |base| {
             try components.append(base);
         }
 
@@ -1052,7 +1046,7 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn renderLeafObject(self: *Self, leaves: []const FlatLeaf) !TypeExpr {
+    fn buildLeafObjectExpr(self: *Self, leaves: []const FlatLeaf) !TypeExpr {
         var fields: ArrayList(TypeExpr.Field) = .empty;
         for (leaves) |leaf| {
             try fields.append(self.arena_alloc, .{
@@ -1105,14 +1099,14 @@ pub const TypeGenerator = struct {
                 if (self.registry.reference(type_id)) |gen| {
                     return .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
                 }
-                return .{ .expr = .{ .verbatim = try self.buildEnumType(type_info.@"enum") } };
+                return .{ .expr = .{ .verbatim = try self.renderEnumType(type_info.@"enum") } };
             },
             .@"union" => {
                 const type_id = @typeName(T);
                 if (self.registry.reference(type_id)) |gen| {
                     return .{ .expr = .{ .named = Registry.shortName(type_id) }, .optional = gen.optional };
                 }
-                return .{ .expr = .{ .verbatim = try self.buildUnionType(type_info.@"union", T, context) } };
+                return .{ .expr = .{ .verbatim = try self.renderUnionType(type_info.@"union", T, context) } };
             },
             .optional => {
                 return .{
@@ -2228,6 +2222,89 @@ test "generateTypes: tagged union used in a response is exported by name" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
+    , output);
+}
+
+test "generateTypes: direct adjacently tagged union response renders its payload union" {
+    const DirectPayloadEndpoint = struct {
+        const Ctx = struct {};
+        const Res = struct { body: ?AlertPayload = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/payload", DirectPayloadEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {
+        \\    "/payload": {
+        \\      response: {
+        \\        line: string
+        \\        minutes: number
+        \\      } | {
+        \\        line: string
+        \\        units: number
+        \\      },
+        \\    }
+        \\  },
+        \\  POST: {},
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
+    , output);
+}
+
+test "generateTypes: direct externally tagged union response wraps each payload by variant" {
+    const ExternalEvent = union(enum) {
+        started: struct { id: i32 },
+        cancelled,
+        count: i32,
+
+        pub const _repr: UnionRepr = .external;
+    };
+    const ExternalEventEndpoint = struct {
+        const Ctx = struct {};
+        const Res = struct { body: ?ExternalEvent = null };
+
+        pub fn get(_: *Ctx) Res {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var type_generator = try TypeGenerator.init(arena.allocator());
+    defer type_generator.deinit();
+
+    const endpoints = [_]EndpointDef{.{ "/external-event", ExternalEventEndpoint }};
+    const output = try type_generator.generateTypes(&endpoints);
+
+    try expectContent(
+        \\export type Spec = {
+        \\  GET: {
+        \\    "/external-event": {
+        \\      response: { started: { id: number } }
+        \\        | { cancelled: {} }
+        \\        | { count: number },
+        \\    }
+        \\  },
+        \\  POST: {},
+        \\  PUT: {},
+        \\  PATCH: {},
+        \\  DELETE: {},
+        \\};
     , output);
 }
 
