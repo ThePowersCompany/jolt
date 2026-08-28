@@ -213,9 +213,8 @@ pub const TypeGenerator = struct {
                     const usage: TypeUsage = switch (@typeInfo(D)) {
                         // Enums render identically in both contexts.
                         .@"enum" => .body,
-                        .@"struct", .@"union" => {
-                            self.registry.usageFor(type_id) orelse return error.MissingTypeUsage;
-                        },
+                        .@"struct", .@"union" => self.registry.usageFor(type_id) orelse
+                            return error.MissingTypeUsage,
                         else => unreachable,
                     };
                     const result = self.buildTopLevelType(D, usage) catch |err| {
@@ -994,7 +993,8 @@ pub const TypeGenerator = struct {
     /// `parent_optional` - Propagates optionality through Optional (or defaulted) wrappers.
     /// `current_group` - The open group that leaves will join.
     ///   It is opened by an Optional nested struct that has at least one required key.
-    ///   While a group is open, every key (required or optional) joins it so the whole struct is present-or-absent.
+    ///   While a group is open, every key (required or optional) joins it so the
+    ///   whole struct is present-or-absent.
     fn collectFlatLeaves(
         self: *Self,
         flat_struct: *FlatStruct,
@@ -1030,7 +1030,13 @@ pub const TypeGenerator = struct {
                 } else {
                     // Required nested struct, an all-optional nested struct,
                     // or one already inside a group: flatten in declaration order.
-                    try self.collectFlatLeaves(flat_struct, info.@"struct", wrapper_optional, current_group, context);
+                    try self.collectFlatLeaves(
+                        flat_struct,
+                        info.@"struct",
+                        wrapper_optional,
+                        current_group,
+                        context,
+                    );
                 }
             } else {
                 const ident = try self.buildQueryLeafType(T, context);
