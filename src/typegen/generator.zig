@@ -432,9 +432,6 @@ pub const TypeGenerator = struct {
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
         inline for (S.fields) |field| {
-            // TODO: This is a weird bug in defaultValue I had to work around...
-            if (comptime strEqls(field.name, "_is_finished")) continue;
-
             try res.appendSlice(self.arena_alloc, field.name);
 
             // Ensure Optionals have default values
