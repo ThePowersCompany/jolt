@@ -944,8 +944,7 @@ pub const TypeGenerator = struct {
             return self.extractIdentifier(repr_type);
         }
 
-        // TODO need to check if named type exists before resolving
-        // if (try self.resolveNamedType(T)) |result| return result;
+        if (try self.resolveNamedType(T)) |result| return result;
 
         const type_info = @typeInfo(T);
         switch (type_info) {
