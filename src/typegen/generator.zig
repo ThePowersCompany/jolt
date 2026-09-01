@@ -1,12 +1,9 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
-const StringArrayHashMap = std.StringArrayHashMap;
 const ArrayList = std.ArrayList;
-const StringHashMap = std.StringHashMap;
 const Type = std.builtin.Type;
 const allocPrint = std.fmt.allocPrint;
-const stringToEnum = std.meta.stringToEnum;
 
 const EndpointDef = @import("../main.zig").EndpointDef;
 const UnionRepr = @import("../utils/unions.zig").UnionRepr;
@@ -15,14 +12,6 @@ const types = @import("../utils/types.zig");
 const Optional = types.Optional;
 const isOptional = types.isOptional;
 const JsonArray = types.JsonArray;
-
-const common = @import("./common.zig");
-const strEqls = common.strEqls;
-const Method = common.Method;
-const EndpointData = common.EndpointData;
-const ParseResult = common.ParseResult;
-const AdjacentUnion = common.AdjacentUnion;
-const FlatLeaf = common.FlatLeaf;
 
 const containers_mod = @import("../utils/containers.zig");
 const hasParamParse = containers_mod.hasParamParse;
@@ -38,15 +27,30 @@ const isLiftableUnion = unions_mod.isLiftableUnion;
 const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
 
+const EndpointMethod = enum {
+    get,
+    post,
+    put,
+    patch,
+    delete,
+};
+
 const ParseContext = enum { body, query_params };
 
-const TopLevelType = struct {
+const ParseResult = struct {
+    /// Generated TypeScript code
+    codegen: []const u8,
+    // Whether all the fields of the parsed type are optional.
+    optional: bool = false,
+};
+
+const NamedType = struct {
     /// Name exported in the generated TypeScript.
     name: []const u8,
-    /// Generated TypeScript, once this reachable type has been rendered.
-    parsed: ?ParseResult = null,
     /// Parsing context chosen on its first use.
-    context: ?ParseContext = null,
+    context: ParseContext,
+    /// The result will be null while the parsing is in progress to support recursion.
+    parsed: ?ParseResult = null,
 };
 
 pub const TypeGenerator = struct {
@@ -56,101 +60,93 @@ pub const TypeGenerator = struct {
 
     parse_context: ParseContext = .body,
 
-    /// Fully-qualified Zig type name => TopLevelType
-    top_level_types: StringHashMap(TopLevelType),
-    get_endpoints: StringArrayHashMap(EndpointData),
-    post_endpoints: StringArrayHashMap(EndpointData),
-    put_endpoints: StringArrayHashMap(EndpointData),
-    patch_endpoints: StringArrayHashMap(EndpointData),
-    delete_endpoints: StringArrayHashMap(EndpointData),
+    /// Fully-qualified Zig type name => NamedType
+    named_types: std.StringHashMapUnmanaged(NamedType),
+
+    /// Method => Path => Codegen
+    endpoints: std.EnumMap(EndpointMethod, std.StringArrayHashMapUnmanaged(struct {
+        query_params: ?[]const u8 = null,
+        body: ?[]const u8 = null,
+        response: ?[]const u8 = null,
+    })),
 
     pub fn init(arena_alloc: Allocator) !Self {
         return .{
             .arena_alloc = arena_alloc,
             .parse_context = .body,
-            .top_level_types = StringHashMap(TopLevelType).init(arena_alloc),
-            .get_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .post_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .put_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .patch_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
-            .delete_endpoints = StringArrayHashMap(EndpointData).init(arena_alloc),
+            .named_types = .empty,
+            .endpoints = .initFull(.empty),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.top_level_types.deinit();
-        self.get_endpoints.deinit();
-        self.post_endpoints.deinit();
-        self.put_endpoints.deinit();
-        self.patch_endpoints.deinit();
-        self.delete_endpoints.deinit();
+        self.named_types.deinit(self.arena_alloc);
+        for (&self.endpoints.values) |*eps| {
+            eps.deinit(self.arena_alloc);
+        }
     }
 
-    fn endpointsData(self: *Self, method: Method) *StringArrayHashMap(EndpointData) {
-        return switch (method) {
-            .get => &self.get_endpoints,
-            .post => &self.post_endpoints,
-            .put => &self.put_endpoints,
-            .patch => &self.patch_endpoints,
-            .delete => &self.delete_endpoints,
-        };
-    }
-
-    fn addTopLevelType(self: *Self, comptime T: type, name: []const u8) !void {
-        if (self.hasTopLevelTypeName(name)) return error.DuplicateDeclaration;
-        try self.top_level_types.put(@typeName(T), .{ .name = name });
-    }
-
-    fn hasTopLevelTypeName(self: *Self, name: []const u8) bool {
-        var types_iter = self.top_level_types.valueIterator();
+    /// Registers a new top-level type and returns the public identifier name for the type.
+    fn addTopLevelType(self: *Self, comptime T: type, context: ParseContext) ![]const u8 {
+        const type_name = @typeName(T);
+        const name = shortTypeName(type_name);
+        // Check if public identifier name has already been added
+        var types_iter = self.named_types.valueIterator();
         while (types_iter.next()) |entry| {
-            if (strEqls(entry.name, name)) return true;
+            if (strEqls(entry.name, name)) return error.DuplicateDeclaration;
         }
-        return false;
-    }
-
-    /// Records a completed render through a fresh map lookup.
-    fn setTopLevelTypeParseResult(self: *Self, comptime T: type, result: ParseResult) !void {
-        const entry = self.top_level_types.getPtr(@typeName(T)) orelse return error.MissingDeclaration;
-        if (entry.parsed != null) return error.DuplicateTypeName;
-        entry.parsed = result;
-    }
-
-    fn setTopLevelTypeContext(self: *Self, comptime T: type, context: ParseContext) !void {
-        const entry = self.top_level_types.getPtr(@typeName(T)) orelse return error.MissingDeclaration;
-        if (entry.context) |previous| {
-            if (@typeInfo(T) != .@"enum" and previous != context) {
-                return error.TopLevelTypeUsedInMultipleContexts;
-            }
-            return;
-        }
-        entry.context = context;
+        // Otherwise, continue adding named type
+        const res = try self.named_types.getOrPut(self.arena_alloc, type_name);
+        if (res.found_existing) return error.DuplicateTypeName;
+        res.value_ptr.* = .{ .name = name, .context = context };
+        return name;
     }
 
     /// Returns a top-level reference when `T` is registered, rendering it on first use.
     /// An entry with a context but no parse result is currently rendering and breaks recursion.
-    fn resolveTopLevelType(self: *Self, comptime T: type, context: ParseContext) anyerror!?ParseResult {
-        const entry = self.top_level_types.getPtr(@typeName(T)) orelse return null;
-        const name = entry.name;
-        if (entry.context) |previous| {
-            if (@typeInfo(T) != .@"enum" and previous != context) {
-                return error.TopLevelTypeUsedInMultipleContexts;
-            }
-            return .{
-                .parsed = entry.name,
-                .optional = if (entry.parsed) |result| result.optional else false,
-            };
-        }
-        try self.setTopLevelTypeContext(T, context);
-
-        const result = self.parseTopLevelType(T, context) catch |err| {
-            const failed = self.top_level_types.getPtr(@typeName(T)) orelse
-                return error.MissingDeclaration;
-            failed.context = null;
-            return err;
+    fn resolveNamedType(self: *Self, comptime T: type) !?ParseResult {
+        // TODO return null if T isn't a named type
+        const entry = self.named_types.getPtr(@typeName(T)) orelse {
+            // TODO if not added yet, then start to parse the type
+            return null;
         };
-        try self.setTopLevelTypeParseResult(T, result);
-        return .{ .parsed = name, .optional = result.optional };
+        if (@typeInfo(T) != .@"enum" and entry.context != self.parse_context) {
+            return error.TopLevelTypeUsedInMultipleContexts;
+        }
+        return entry.parsed orelse {
+            // Parsing in-progress, handle recursion by returning public identifier name
+            return .{ .codegen = entry.name };
+        };
+
+        // const result = self.parseNamedType(T, context) catch |err| {
+        //     entry.context = null;
+        //     return err;
+        // };
+        // try self.setTopLevelTypeParseResult(T, result);
+        // return .{ .codegen = entry.name, .optional = result.optional };
+    }
+
+    fn parseNamedType(
+        self: *Self,
+        comptime T: type,
+        context: ParseContext,
+    ) !ParseResult {
+        const previous_context = self.parse_context;
+        self.parse_context = context;
+        defer self.parse_context = previous_context;
+
+        return switch (@typeInfo(T)) {
+            .@"struct" => |s| if (context == .query_params)
+                try self.parseFlatQueryStruct(T, s)
+            else
+                try self.parseStruct(s),
+            .@"enum" => .{ .codegen = try self.parseEnum(@typeInfo(T).@"enum") },
+            .@"union" => |u| if (context == .query_params or isLiftableUnion(T))
+                try self.parseFlatUnion(u)
+            else
+                try self.parseUnionObject(u),
+            else => return error.InvalidTopLevelType,
+        };
     }
 
     fn shortTypeName(type_name: []const u8) []const u8 {
@@ -163,9 +159,6 @@ pub const TypeGenerator = struct {
 
     pub fn generateTypes(self: *Self, comptime endpoints: []const EndpointDef) ![]const u8 {
         @setEvalBranchQuota(endpoints.len * 2000);
-
-        // Register every public top-level declaration before resolving endpoint usage.
-        inline for (endpoints) |endpoint| try self.registerEndpointTopLevelTypes(endpoint);
 
         // Populate endpoint metadata, rendering public types on first reference.
         inline for (endpoints) |endpoint| try self.populateEndpointTypescript(endpoint);
@@ -187,15 +180,16 @@ pub const TypeGenerator = struct {
             var entries: ArrayList(Entry) = .empty;
             defer entries.deinit(self.arena_alloc);
 
-            var iter = self.top_level_types.iterator();
+            var iter = self.named_types.iterator();
             while (iter.next()) |top| {
-                const result = top.value_ptr.parsed orelse continue;
+                const named_type = top.value_ptr;
+                const result = named_type.parsed orelse continue;
                 try entries.append(self.arena_alloc, .{
                     .type_name = top.value_ptr.name,
                     .ts = try allocPrint(
                         self.arena_alloc,
                         "export type {s} =\n{s}\n\n",
-                        .{ top.value_ptr.name, result.parsed },
+                        .{ named_type.name, result.codegen },
                     ),
                 });
             }
@@ -211,9 +205,9 @@ pub const TypeGenerator = struct {
 
         try res.appendSlice(self.arena_alloc, "export type Spec = {");
 
-        inline for (@typeInfo(Method).@"enum".fields) |m| {
-            const method: Method = @enumFromInt(m.value);
-            var endpoints_data = self.endpointsData(method);
+        inline for (@typeInfo(EndpointMethod).@"enum".fields) |m| {
+            const method: EndpointMethod = @enumFromInt(m.value);
+            var endpoints_data = self.endpoints.getPtrAssertContains(method);
 
             try res.appendSlice(
                 self.arena_alloc,
@@ -258,15 +252,15 @@ pub const TypeGenerator = struct {
     }
 
     /// Populates the endpoint request and response type metadata from its HTTP method declarations.
-    fn populateEndpointTypescript(self: *Self, endpoint: EndpointDef) !void {
+    fn populateEndpointTypescript(self: *Self, comptime endpoint: EndpointDef) !void {
         const endpoint_path, const EndpointType = endpoint;
-        const type_info = @typeInfo(EndpointType);
-        inline for (type_info.@"struct".decls) |decl| {
+        inline for (@typeInfo(EndpointType).@"struct".decls) |decl| {
             const decl_info = @typeInfo(@TypeOf(@field(EndpointType, decl.name)));
             switch (decl_info) {
                 // Find get/post/put/patch/delete functions
                 .@"fn" => {
-                    self.populateFnTypescript(decl, decl_info.@"fn", endpoint_path) catch |err| {
+                    const method = (comptime std.meta.stringToEnum(EndpointMethod, decl.name)) orelse continue;
+                    self.populateFnTypescript(method, decl_info.@"fn", endpoint_path) catch |err| {
                         std.log.info(
                             "Endpoint: {s} - Type: {s}",
                             .{ endpoint_path, decl.name },
@@ -279,93 +273,51 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn registerEndpointTopLevelTypes(self: *Self, endpoint: EndpointDef) !void {
-        _, const Endpoint = endpoint;
-        inline for (@typeInfo(Endpoint).@"struct".decls) |decl| {
-            const Decl = @TypeOf(@field(Endpoint, decl.name));
-            comptime if (@typeInfo(Decl) != .type) continue;
-
-            const T = @field(Endpoint, decl.name);
-            comptime switch (@typeInfo(T)) {
-                .@"struct", .@"enum", .@"union" => {},
-                else => continue,
-            };
-            comptime if (!shouldDeclareTopLevel(T)) continue;
-
-            if (!self.top_level_types.contains(@typeName(T))) {
-                try self.addTopLevelType(T, decl.name);
-            }
-        }
-    }
-
-    fn parseTopLevelType(
-        self: *Self,
-        comptime T: type,
-        context: ParseContext,
-    ) !ParseResult {
-        const previous_context = self.parse_context;
-        self.parse_context = context;
-        defer self.parse_context = previous_context;
-
-        return switch (@typeInfo(T)) {
-            .@"struct" => |s| if (context == .query_params)
-                try self.parseFlatQueryStruct(T, s)
-            else
-                try self.parseStruct(s),
-            .@"enum" => .{ .parsed = try self.parseEnum(@typeInfo(T).@"enum") },
-            .@"union" => |u| if (context == .query_params or isLiftableUnion(T))
-                try self.parseFlatUnion(u)
-            else
-                try self.parseUnionObject(u),
-            else => return error.InvalidTopLevelType,
-        };
-    }
-
     fn populateStructTypescript(
         self: *Self,
-        method: Method,
-        S: Type.Struct,
-        endpoint_path: []const u8,
+        comptime method: EndpointMethod,
+        comptime S: type,
+        comptime endpoint_path: []const u8,
     ) !void {
-        var endpoints_data = self.endpointsData(method);
-
-        var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
-        inline for (S.fields) |field| {
-            if (comptime strEqls(field.name, "body")) {
-                const body_info = @typeInfo(field.type);
-                if (body_info == .pointer and body_info.pointer.child == u8) {
-                    res.value_ptr.body = "body: BodyInit\n";
-                } else {
-                    const body_res = try self.extractIdentifier(field.type);
-                    if (body_res.optional) {
-                        res.value_ptr.body = try allocPrint(
-                            self.arena_alloc,
-                            "body?: {s}\n",
-                            .{body_res.parsed},
-                        );
-                    } else {
-                        res.value_ptr.body = try allocPrint(
-                            self.arena_alloc,
-                            "body: {s}\n",
-                            .{body_res.parsed},
-                        );
-                    }
-                }
-            } else if (comptime strEqls(field.name, "query_params")) {
-                const param_res = try self.extractQueryParams(field.type);
-                if (param_res.optional) {
-                    res.value_ptr.query_params = try allocPrint(
+        var endpoints_data = self.endpoints.getPtrAssertContains(method);
+        var res = try endpoints_data.getOrPutValue(self.arena_alloc, endpoint_path, .{});
+        if (@hasField(S, "body")) {
+            const body_type = @FieldType(S, "body");
+            const body_info = @typeInfo(body_type);
+            if (body_info == .pointer and body_info.pointer.child == u8) {
+                res.value_ptr.body = "body: BodyInit\n";
+            } else {
+                const body_res = try self.extractIdentifier(body_type);
+                if (body_res.optional) {
+                    res.value_ptr.body = try allocPrint(
                         self.arena_alloc,
-                        "queryParams?: {s}\n",
-                        .{param_res.parsed},
+                        "body?: {s}\n",
+                        .{body_res.codegen},
                     );
                 } else {
-                    res.value_ptr.query_params = try allocPrint(
+                    res.value_ptr.body = try allocPrint(
                         self.arena_alloc,
-                        "queryParams: {s}\n",
-                        .{param_res.parsed},
+                        "body: {s}\n",
+                        .{body_res.codegen},
                     );
                 }
+            }
+        }
+        if (@hasField(S, "query_params")) {
+            const params_type = @FieldType(S, "query_params");
+            const param_res = try self.extractQueryParams(params_type);
+            if (param_res.optional) {
+                res.value_ptr.query_params = try allocPrint(
+                    self.arena_alloc,
+                    "queryParams?: {s}\n",
+                    .{param_res.codegen},
+                );
+            } else {
+                res.value_ptr.query_params = try allocPrint(
+                    self.arena_alloc,
+                    "queryParams: {s}\n",
+                    .{param_res.codegen},
+                );
             }
         }
     }
@@ -454,7 +406,7 @@ pub const TypeGenerator = struct {
                 try res.appendSlice(self.arena_alloc, ": ");
             }
 
-            try res.appendSlice(self.arena_alloc, parse_result.parsed);
+            try res.appendSlice(self.arena_alloc, parse_result.codegen);
             try res.appendSlice(self.arena_alloc, "\n");
         }
 
@@ -462,7 +414,7 @@ pub const TypeGenerator = struct {
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .codegen = try res.toOwnedSlice(self.arena_alloc),
         };
     }
 
@@ -481,7 +433,7 @@ pub const TypeGenerator = struct {
                 try res.appendSlice(self.arena_alloc, ": ");
             }
 
-            try res.appendSlice(self.arena_alloc, parse_result.parsed);
+            try res.appendSlice(self.arena_alloc, parse_result.codegen);
             try res.appendSlice(self.arena_alloc, "\n");
         }
 
@@ -489,7 +441,7 @@ pub const TypeGenerator = struct {
 
         return .{
             .optional = all_optional,
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .codegen = try res.toOwnedSlice(self.arena_alloc),
         };
     }
 
@@ -513,19 +465,10 @@ pub const TypeGenerator = struct {
                 if (field_info != .@"union") {
                     return error.InvalidAdjacentUnionType;
                 }
-
-                if (try self.resolveTopLevelType(f.type, self.parse_context) == null) {
-                    if (self.hasTopLevelTypeName(union_short_name)) return error.DuplicateTypeName;
-                    try self.addTopLevelType(f.type, union_short_name);
-
-                    try self.setTopLevelTypeContext(f.type, self.parse_context);
-
-                    const parsed = try self.parseUnionObject(field_info.@"union");
-                    try self.setTopLevelTypeParseResult(f.type, parsed);
-                }
+                const result = try self.resolveNamedType(f.type) orelse return error.Unreachable; // TODO wat
                 try res.appendSlice(
                     self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_short_name }),
+                    try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, result.codegen }),
                 );
             } else {
                 try res.appendSlice(self.arena_alloc, f.name);
@@ -535,7 +478,7 @@ pub const TypeGenerator = struct {
                 } else {
                     try res.appendSlice(self.arena_alloc, ": ");
                 }
-                try res.appendSlice(self.arena_alloc, parse_result.parsed);
+                try res.appendSlice(self.arena_alloc, parse_result.codegen);
                 try res.appendSlice(self.arena_alloc, "\n");
             }
         }
@@ -546,7 +489,7 @@ pub const TypeGenerator = struct {
             .{union_short_name},
         ));
 
-        return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
+        return .{ .codegen = try res.toOwnedSlice(self.arena_alloc), .optional = false };
     }
 
     fn parseEnum(self: *Self, E: Type.Enum) ![]const u8 {
@@ -587,7 +530,7 @@ pub const TypeGenerator = struct {
                     .{
                         f.name,
                         if (parsed_res.optional or f.defaultValue() != null) "?" else "",
-                        parsed_res.parsed,
+                        parsed_res.codegen,
                     },
                 ));
             }
@@ -601,7 +544,7 @@ pub const TypeGenerator = struct {
         // Special case for Optional(T)
         if (comptime isOptional(T)) {
             const parsed_res = try self.extractIdentifier(@FieldType(T, "value"));
-            try res.appendSlice(self.arena_alloc, parsed_res.parsed);
+            try res.appendSlice(self.arena_alloc, parsed_res.codegen);
             return res.toOwnedSlice(self.arena_alloc);
         }
 
@@ -646,7 +589,7 @@ pub const TypeGenerator = struct {
                         if (@typeInfo(field.type) == .void) {
                             try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
                         } else {
-                            const ident = (try self.extractIdentifier(field.type)).parsed;
+                            const ident = (try self.extractIdentifier(field.type)).codegen;
                             try res.appendSlice(self.arena_alloc, ident);
                         }
                     }
@@ -662,21 +605,18 @@ pub const TypeGenerator = struct {
 
     fn populateFnTypescript(
         self: *Self,
-        comptime decl: Type.Declaration,
+        comptime method: EndpointMethod,
         comptime F: Type.Fn,
         comptime endpoint_path: []const u8,
     ) !void {
-        const method = (comptime stringToEnum(Method, decl.name)) orelse return;
-        var endpoints_data = self.endpointsData(method);
-
         // Find context object (first parameter)
-        const first_param = F.params[0].type orelse return error.MissingParameterType;
-        const ctx_struct = @typeInfo(@typeInfo(first_param).pointer.child).@"struct";
-        try self.populateStructTypescript(method, ctx_struct, endpoint_path);
+        const FirstParamType = F.params[0].type orelse return error.MissingParameterType;
+        const Context = @typeInfo(FirstParamType).pointer.child;
+        try self.populateStructTypescript(method, Context, endpoint_path);
 
         // Determine return type
-        const return_type = F.return_type orelse return error.MissingReturnType;
-        const return_type_info = @typeInfo(return_type);
+        const ReturnType = F.return_type orelse return error.MissingReturnType;
+        const return_type_info = @typeInfo(ReturnType);
         const ResponseType: type = blk: {
             switch (return_type_info) {
                 .error_union => {
@@ -688,8 +628,9 @@ pub const TypeGenerator = struct {
             }
         };
 
-        var res = try endpoints_data.getOrPutValue(endpoint_path, .{});
-        const ts = (try self.extractIdentifier(ResponseType)).parsed;
+        var endpoints_data = self.endpoints.getPtrAssertContains(method);
+        var res = try endpoints_data.getOrPutValue(self.arena_alloc, endpoint_path, .{});
+        const ts = (try self.extractIdentifier(ResponseType)).codegen;
         res.value_ptr.response = ts;
     }
 
@@ -708,7 +649,7 @@ pub const TypeGenerator = struct {
     fn applyConstraints(self: *Self, comptime constraints: types.Constraints, res: ParseResult) !ParseResult {
         if (comptime constraints.any_of) {
             return .{
-                .parsed = try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{res.parsed}),
+                .codegen = try allocPrint(self.arena_alloc, "AnyOf<{s}>", .{res.codegen}),
                 .optional = false,
             };
         }
@@ -721,7 +662,7 @@ pub const TypeGenerator = struct {
     /// `extractIdentifier` parses its struct fields, which is incorrect for query_params.
     /// Everything else delegates to `extractIdentifier`.
     fn getQueryLeafType(self: *Self, comptime T: type) !ParseResult {
-        if (comptime hasParamParse(T)) return .{ .parsed = "string" };
+        if (comptime hasParamParse(T)) return .{ .codegen = "string" };
         return self.extractIdentifier(T);
     }
 
@@ -733,7 +674,7 @@ pub const TypeGenerator = struct {
         self.parse_context = .query_params;
         defer self.parse_context = previous_context;
 
-        if (try self.resolveTopLevelType(T, .query_params)) |top_level| {
+        if (try self.resolveNamedType(T)) |top_level| {
             var result = top_level;
             result.optional = comptime queryParamsOptional(T);
             return result;
@@ -745,7 +686,7 @@ pub const TypeGenerator = struct {
 
         if (comptime info == .@"union" and !isOptional(T)) {
             const res = try self.parseFlatUnion(info.@"union");
-            return .{ .parsed = res.parsed, .optional = comptime queryParamsOptional(T) };
+            return .{ .codegen = res.codegen, .optional = comptime queryParamsOptional(T) };
         }
         return self.extractIdentifier(T);
     }
@@ -787,12 +728,12 @@ pub const TypeGenerator = struct {
                 try variants.append(self.arena_alloc, try allocPrint(
                     self.arena_alloc,
                     "{{ {s}: {s} }}",
-                    .{ field.name, ident.parsed },
+                    .{ field.name, ident.codegen },
                 ));
             }
         }
         // A union always needs at least one matching key, so it is required.
-        return .{ .parsed = try self.renderExclusiveUnion(variants.items), .optional = false };
+        return .{ .codegen = try self.renderExclusiveUnion(variants.items), .optional = false };
     }
 
     /// Combines variants so exactly one may be present.
@@ -814,6 +755,13 @@ pub const TypeGenerator = struct {
         try res.appendNTimes(self.arena_alloc, '>', variants.len - 1);
         return res.toOwnedSlice(self.arena_alloc);
     }
+
+    /// A single flattened query-param leaf key.
+    const FlatLeaf = struct {
+        name: []const u8,
+        ts_type: []const u8,
+        optional: bool,
+    };
 
     /// A `query_params` struct represented as a flat structure.
     /// `independent` - Leaves that are not in any kind of group.
@@ -900,7 +848,7 @@ pub const TypeGenerator = struct {
                 const shape = try self.parseFlatUnion(@typeInfo(field.type).@"union");
                 try components.append(
                     self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "({s})", .{shape.parsed}),
+                    try allocPrint(self.arena_alloc, "({s})", .{shape.codegen}),
                 );
             }
         }
@@ -917,7 +865,7 @@ pub const TypeGenerator = struct {
         }
 
         return .{
-            .parsed = try res.toOwnedSlice(self.arena_alloc),
+            .codegen = try res.toOwnedSlice(self.arena_alloc),
             .optional = comptime queryParamsOptional(T),
         };
     }
@@ -967,7 +915,7 @@ pub const TypeGenerator = struct {
                 const ident = try self.getQueryLeafType(T);
                 const leaf: FlatLeaf = .{
                     .name = field.name,
-                    .ts_type = ident.parsed,
+                    .ts_type = ident.codegen,
                     .optional = wrapper_optional or ident.optional,
                 };
 
@@ -996,66 +944,62 @@ pub const TypeGenerator = struct {
             return self.extractIdentifier(repr_type);
         }
 
-        if (try self.resolveTopLevelType(T, self.parse_context)) |result| return result;
+        // TODO need to check if named type exists before resolving
+        // if (try self.resolveNamedType(T)) |result| return result;
 
         const type_info = @typeInfo(T);
         switch (type_info) {
-            .int, .float => return .{ .parsed = "number" },
-            .bool => return .{ .parsed = "boolean" },
-            .type, .void => return .{ .parsed = @typeName(T) },
+            .int, .float => return .{ .codegen = "number" },
+            .bool => return .{ .codegen = "boolean" },
+            .type, .void => return .{ .codegen = @typeName(T) },
             .pointer => {
                 if (type_info.pointer.child == u8) {
-                    return .{ .parsed = "string" };
+                    return .{ .codegen = "string" };
                 }
 
                 return switch (type_info.pointer.size) {
                     .one => self.extractIdentifier(type_info.pointer.child),
-                    else => .{ .parsed = try allocPrint(self.arena_alloc, "{s}[]", .{
-                        (try self.extractIdentifier(type_info.pointer.child)).parsed,
-                    }) },
+                    else => .{
+                        .codegen = try allocPrint(self.arena_alloc, "{s}[]", .{
+                            (try self.extractIdentifier(type_info.pointer.child)).codegen,
+                        }),
+                    },
                 };
             },
-            .@"struct" => |s| {
-                const type_name = comptime shortTypeName(@typeName(T));
-
-                if (comptime hasAdjacentUnionField(s)) {
-                    const parsed = try self.parseStruct(type_info.@"struct");
-                    if (self.top_level_types.contains(@typeName(T)) or self.hasTopLevelTypeName(type_name)) {
-                        return error.DuplicateTypeName;
-                    }
-                    try self.addTopLevelType(T, type_name);
-                    try self.setTopLevelTypeContext(T, self.parse_context);
-                    try self.setTopLevelTypeParseResult(T, parsed);
-                    return .{ .parsed = type_name, .optional = parsed.optional };
-                }
-
-                const res = try self.parseStruct(type_info.@"struct");
+            .@"struct" => {
+                const parsed = try self.parseStruct(type_info.@"struct");
+                // if (comptime hasAdjacentUnionField(s)) {
+                //     // TODO why are we doing this?
+                //     const parsed_name = try self.addTopLevelType(T, self.parse_context);
+                //     try self.setTopLevelTypeParseResult(T, parsed);
+                //     return .{ .codegen = parsed_name, .optional = parsed.optional };
+                // }
 
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
                 if (@hasDecl(T, "constraints")) {
-                    return try self.applyConstraints(T.constraints, res);
+                    return try self.applyConstraints(T.constraints, parsed);
                 }
-                return res;
+                return parsed;
             },
             .@"enum" => {
-                return .{ .parsed = try self.parseEnum(type_info.@"enum") };
+                return .{ .codegen = try self.parseEnum(type_info.@"enum") };
             },
             .@"union" => {
-                return .{ .parsed = try self.parseUnion(type_info.@"union", T) };
+                return .{ .codegen = try self.parseUnion(type_info.@"union", T) };
             },
             .optional => {
                 return .{
                     // "optional" in zig means nullable, not actually optional.
                     // This means the value could still be required, but could be set to null.
                     .optional = false,
-                    .parsed = try allocPrint(self.arena_alloc, "{s}|null", .{
-                        (try self.extractIdentifier(type_info.optional.child)).parsed,
+                    .codegen = try allocPrint(self.arena_alloc, "{s}|null", .{
+                        (try self.extractIdentifier(type_info.optional.child)).codegen,
                     }),
                 };
             },
             .@"opaque" => {
-                return .{ .parsed = @typeName(T) };
+                return .{ .codegen = @typeName(T) };
             },
             else => {
                 std.log.err("Unhandled identifier: {s}", .{@tagName(type_info)});
@@ -1090,6 +1034,14 @@ fn shouldDeclareTopLevel(comptime T: type) bool {
     return comptime typescriptRepr(T) == null;
 }
 
+const AdjacentUnion = struct {
+    /// The discriminator of an adjacently tagged union.
+    /// Only one field in a struct may be this type of union.
+    discriminator: []const u8,
+    /// The full type name of the Union.
+    name: []const u8,
+};
+
 fn hasAdjacentUnionField(comptime s: Type.Struct) bool {
     inline for (s.fields) |field| {
         if (@typeInfo(field.type) != .@"union" or !@hasDecl(field.type, "_repr")) continue;
@@ -1097,6 +1049,10 @@ fn hasAdjacentUnionField(comptime s: Type.Struct) bool {
         if (@TypeOf(repr) == UnionRepr and repr == .adjacently) return true;
     }
     return false;
+}
+
+fn strEqls(s1: []const u8, s2: []const u8) bool {
+    return std.mem.eql(u8, s1, s2);
 }
 
 test "generateTypes: permits an enum used in body and query contexts" {
@@ -1352,7 +1308,7 @@ test "extractIdentifier: a type _repr overrides structural type generation" {
     defer type_generator.deinit();
 
     const result = try type_generator.extractIdentifier(TypeScriptOpaqueId);
-    try expectContent("string", result.parsed);
+    try expectContent("string", result.codegen);
 }
 
 test "generateTypes: _repr types generate their declared TypeScript wire type" {
@@ -1524,7 +1480,7 @@ test "required nullable fields" {
         \\   baz?: number
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1546,7 +1502,7 @@ test "Nested Optionals" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
-    try expectContent(parse_result.parsed,
+    try expectContent(parse_result.codegen,
         \\ {
         \\   enabled?: boolean
         \\   email?: {
@@ -1594,7 +1550,7 @@ test "JsonArray(T)" {
     defer type_generator.deinit();
 
     const parse_result = try type_generator.extractIdentifier(Foo);
-    try expectContent(parse_result.parsed,
+    try expectContent(parse_result.codegen,
         \\ {
         \\   list: {
         \\     abc: number
@@ -1631,7 +1587,7 @@ test "extractQueryParams: union with subset variants" {
         \\   end_date: string
         \\ })>
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1671,7 +1627,7 @@ test "extractQueryParams: LostProductionFilter (scalar + struct variants + share
         \\   shift?: number|null
         \\ })>>>
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1700,7 +1656,7 @@ test "extractQueryParams: base keys + union variant keys" {
         \\  page: number
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1731,7 +1687,7 @@ test "extractQueryParams: Optional union leaf renders as an untagged TS union" {
         \\   worker?: number | "unassigned"
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1759,7 +1715,7 @@ test "extractQueryParams: query param union needs no _repr declaration" {
         \\   worker?: number | "unassigned"
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1782,7 +1738,7 @@ test "extractQueryParams: Optional(?Union) leaf is optional and nullable" {
         \\   worker?: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1805,7 +1761,7 @@ test "extractQueryParams: ?Union leaf is optional and nullable" {
         \\   worker?: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
 }
 
@@ -1828,7 +1784,7 @@ test "extractQueryParams: required native ?Union leaf is required and nullable" 
         \\   worker: number | "unassigned" | null
         \\ }
     ,
-        parse_result.parsed,
+        parse_result.codegen,
     );
     try expectEqual(false, parse_result.optional);
 }
@@ -1862,7 +1818,7 @@ test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
         \\  start_date: string
         \\  line: number
         \\}
-    , parse_result.parsed);
+    , parse_result.codegen);
 }
 
 const AllOptionalQuery = struct {
@@ -1925,7 +1881,7 @@ test "extractQueryParams: optional nested struct with a required key renders as 
         \\  room: number
         \\  limit?: number
         \\}
-    , parse_result.parsed);
+    , parse_result.codegen);
 }
 
 const RangeQuery = struct {
@@ -1955,7 +1911,7 @@ test "extractQueryParams: handles gated group optionality" {
         \\}, {}> & {
         \\  page?: number
         \\}
-    , parse_result.parsed);
+    , parse_result.codegen);
 }
 
 const RangeQueryOneRequired = struct {
@@ -1985,7 +1941,7 @@ test "extractQueryParams: gated group with a single required key" {
         \\}, {}> & {
         \\  page?: number
         \\}
-    , parse_result.parsed);
+    , parse_result.codegen);
 }
 
 const AnyOfQuery = struct {
@@ -2010,7 +1966,7 @@ test "extractQueryParams: any_of constraint wraps the object in AnyOf" {
         \\  a?: number
         \\  b?: string
         \\}>
-    , parse_result.parsed);
+    , parse_result.codegen);
     try expectEqual(false, parse_result.optional);
 }
 
