@@ -47,8 +47,8 @@ const ParseResult = struct {
 const TopLevelType = struct {
     /// Name exported in the generated TypeScript.
     name: []const u8,
-    /// Parsing context chosen on its first use.
-    context: ParseContext,
+    /// Parsing context assigned when it's first referenced by an endpoint.
+    context: ?ParseContext = null,
     /// The result will be null while the parsing is in progress to support recursion.
     parsed: ?ParseResult = null,
 };
@@ -1214,15 +1214,9 @@ test "generateTypes: rejects private recursive response types" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
     try std.testing.expectError(
         error.RecursiveTypeMustBePublic,
-        generator.generateTypes(&.{.{ "/nodes", Endpoint }}),
+        TypeGenerator.run(std.testing.allocator, &.{.{ "/nodes", Endpoint }}),
     );
 }
 
@@ -1356,15 +1350,9 @@ test "generateTypes: rejects non-canonical public type names" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
     try std.testing.expectError(
         error.NonCanonicalTypeName,
-        generator.generateTypes(&.{.{ "/shared", Endpoint }}),
+        TypeGenerator.run(std.testing.allocator, &.{.{ "/shared", Endpoint }}),
     );
 }
 
