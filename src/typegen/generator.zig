@@ -116,34 +116,23 @@ pub const TypeGenerator = struct {
         entry.parsed = result;
     }
 
-    fn setTopLevelTypeContext(self: *Self, comptime T: type, context: ParseContext) !void {
-        const entry = self.top_level_types.getPtr(@typeName(T)) orelse return error.MissingDeclaration;
-        if (entry.context) |previous| {
-            if (@typeInfo(T) != .@"enum" and previous != context) {
-                return error.TopLevelTypeUsedInMultipleContexts;
-            }
-            return;
-        }
-        entry.context = context;
-    }
-
     /// Returns a top-level reference when `T` is registered, rendering it on first use.
     /// An entry with a context but no parse result is currently rendering and breaks recursion.
-    fn resolveTopLevelType(self: *Self, comptime T: type, context: ParseContext) anyerror!?ParseResult {
+    fn resolveTopLevelType(self: *Self, comptime T: type) anyerror!?ParseResult {
         const entry = self.top_level_types.getPtr(@typeName(T)) orelse return null;
         const name = entry.name;
         if (entry.context) |previous| {
-            if (@typeInfo(T) != .@"enum" and previous != context) {
+            if (@typeInfo(T) != .@"enum" and previous != self.parse_context) {
                 return error.TopLevelTypeUsedInMultipleContexts;
             }
             return .{
-                .parsed = entry.name,
+                .parsed = name,
                 .optional = if (entry.parsed) |result| result.optional else false,
             };
         }
-        try self.setTopLevelTypeContext(T, context);
+        entry.context = self.parse_context;
 
-        const result = self.parseTopLevelType(T, context) catch |err| {
+        const result = self.parseTopLevelType(T) catch |err| {
             const failed = self.top_level_types.getPtr(@typeName(T)) orelse
                 return error.MissingDeclaration;
             failed.context = null;
@@ -151,6 +140,12 @@ pub const TypeGenerator = struct {
         };
         try self.setTopLevelTypeParseResult(T, result);
         return .{ .parsed = name, .optional = result.optional };
+    }
+
+    fn ensureTopLevelTypeRegistered(self: *Self, comptime T: type, name: []const u8) !void {
+        if (!self.top_level_types.contains(@typeName(T))) {
+            try self.addTopLevelType(T, name);
+        }
     }
 
     fn shortTypeName(type_name: []const u8) []const u8 {
@@ -292,28 +287,24 @@ pub const TypeGenerator = struct {
             };
             comptime if (!shouldDeclareTopLevel(T)) continue;
 
-            if (!self.top_level_types.contains(@typeName(T))) {
+            if (self.top_level_types.get(@typeName(T))) |registered| {
+                if (!strEqls(registered.name, decl.name)) {
+                    return error.ConflictingTypeAlias;
+                }
+            } else {
                 try self.addTopLevelType(T, decl.name);
             }
         }
     }
 
-    fn parseTopLevelType(
-        self: *Self,
-        comptime T: type,
-        context: ParseContext,
-    ) !ParseResult {
-        const previous_context = self.parse_context;
-        self.parse_context = context;
-        defer self.parse_context = previous_context;
-
+    fn parseTopLevelType(self: *Self, comptime T: type) !ParseResult {
         return switch (@typeInfo(T)) {
-            .@"struct" => |s| if (context == .query_params)
+            .@"struct" => |s| if (self.parse_context == .query_params)
                 try self.parseFlatQueryStruct(T, s)
             else
                 try self.parseStruct(s),
             .@"enum" => .{ .parsed = try self.parseEnum(@typeInfo(T).@"enum") },
-            .@"union" => |u| if (context == .query_params or isLiftableUnion(T))
+            .@"union" => |u| if (self.parse_context == .query_params or isLiftableUnion(T))
                 try self.parseFlatUnion(u)
             else
                 try self.parseUnionObject(u),
@@ -494,14 +485,26 @@ pub const TypeGenerator = struct {
     }
 
     fn parseStructWithAdjacentUnion(self: *Self, S: Type.Struct, adjacent_union: AdjacentUnion) !ParseResult {
-        const union_short_name = shortTypeName(adjacent_union.name);
+        var union_name = shortTypeName(adjacent_union.name);
+        // Resolve the export name before emitting `keyof`; it may differ from the Zig type name.
+        inline for (S.fields) |field| {
+            if (strEqls(@typeName(field.type), adjacent_union.name)) {
+                if (@typeInfo(field.type) != .@"union") {
+                    return error.InvalidAdjacentUnionType;
+                }
+                try self.ensureTopLevelTypeRegistered(field.type, union_name);
+                const resolved = (try self.resolveTopLevelType(field.type)) orelse
+                    return error.MissingDeclaration;
+                union_name = resolved.parsed;
+            }
+        }
 
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
         try res.appendSlice(self.arena_alloc, try allocPrint(
             self.arena_alloc,
             "[K in keyof {s}]: {{\n",
-            .{union_short_name},
+            .{union_name},
         ));
 
         inline for (S.fields) |f| {
@@ -509,23 +512,9 @@ pub const TypeGenerator = struct {
                 try res.appendSlice(self.arena_alloc, f.name);
                 try res.appendSlice(self.arena_alloc, ": K\n");
             } else if (strEqls(@typeName(f.type), adjacent_union.name)) {
-                const field_info = @typeInfo(f.type);
-                if (field_info != .@"union") {
-                    return error.InvalidAdjacentUnionType;
-                }
-
-                if (try self.resolveTopLevelType(f.type, self.parse_context) == null) {
-                    if (self.hasTopLevelTypeName(union_short_name)) return error.DuplicateTypeName;
-                    try self.addTopLevelType(f.type, union_short_name);
-
-                    try self.setTopLevelTypeContext(f.type, self.parse_context);
-
-                    const parsed = try self.parseUnionObject(field_info.@"union");
-                    try self.setTopLevelTypeParseResult(f.type, parsed);
-                }
                 try res.appendSlice(
                     self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_short_name }),
+                    try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_name }),
                 );
             } else {
                 try res.appendSlice(self.arena_alloc, f.name);
@@ -543,7 +532,7 @@ pub const TypeGenerator = struct {
         try res.appendSlice(self.arena_alloc, try allocPrint(
             self.arena_alloc,
             "}};\n}}[keyof {s}];\n",
-            .{union_short_name},
+            .{union_name},
         ));
 
         return .{ .parsed = try res.toOwnedSlice(self.arena_alloc), .optional = false };
@@ -733,7 +722,7 @@ pub const TypeGenerator = struct {
         self.parse_context = .query_params;
         defer self.parse_context = previous_context;
 
-        if (try self.resolveTopLevelType(T, .query_params)) |top_level| {
+        if (try self.resolveTopLevelType(T)) |top_level| {
             var result = top_level;
             result.optional = comptime queryParamsOptional(T);
             return result;
@@ -996,7 +985,7 @@ pub const TypeGenerator = struct {
             return self.extractIdentifier(repr_type);
         }
 
-        if (try self.resolveTopLevelType(T, self.parse_context)) |result| return result;
+        if (try self.resolveTopLevelType(T)) |result| return result;
 
         const type_info = @typeInfo(T);
         switch (type_info) {
@@ -1019,14 +1008,9 @@ pub const TypeGenerator = struct {
                 const type_name = comptime shortTypeName(@typeName(T));
 
                 if (comptime hasAdjacentUnionField(s)) {
-                    const parsed = try self.parseStruct(type_info.@"struct");
-                    if (self.top_level_types.contains(@typeName(T)) or self.hasTopLevelTypeName(type_name)) {
-                        return error.DuplicateTypeName;
-                    }
-                    try self.addTopLevelType(T, type_name);
-                    try self.setTopLevelTypeContext(T, self.parse_context);
-                    try self.setTopLevelTypeParseResult(T, parsed);
-                    return .{ .parsed = type_name, .optional = parsed.optional };
+                    // Register before rendering so recursive fields resolve to this named type.
+                    try self.ensureTopLevelTypeRegistered(T, type_name);
+                    return (try self.resolveTopLevelType(T)) orelse error.MissingDeclaration;
                 }
 
                 const res = try self.parseStruct(type_info.@"struct");
@@ -1215,6 +1199,127 @@ test "generateTypes: supports recursive types" {
     , output);
 }
 
+test "generateTypes: supports recursive implicit adjacent-union types" {
+    const Topic = enum { updated };
+    const Payload = union(Topic) {
+        updated: struct { value: i32 },
+
+        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+    };
+    const Node = struct {
+        pub const Self = @This();
+        next: ?*Self = null,
+        topic: Topic,
+        payload: Payload,
+    };
+    const Endpoint = struct {
+        const Context = struct {};
+        const Response = struct { body: ?Node = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var generator = try TypeGenerator.init(arena.allocator());
+    defer generator.deinit();
+
+    const output = try generator.generateTypes(&.{.{ "/nodes", Endpoint }});
+
+    try expectContent(
+        \\ export type Node =
+        \\   {
+        \\     [K in keyof Payload]: {
+        \\       next: Node|null
+        \\       topic: K
+        \\       payload: Payload[K]
+        \\     };
+        \\   }[keyof Payload];
+        \\
+        \\
+        \\ export type Payload =
+        \\   {
+        \\     updated: {
+        \\       value: number
+        \\     }
+        \\   }
+        \\
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/nodes": {
+        \\       response: Node,
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
+}
+
+test "generateTypes: adjacent unions use their registered export name" {
+    const Topic = enum { created };
+    const Payload = union(Topic) {
+        created: struct { id: u32 },
+
+        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+    };
+    const Event = struct {
+        topic: Topic,
+        payload: Payload,
+    };
+    const Endpoint = struct {
+        pub const ApiPayload = Payload;
+
+        const Context = struct {};
+        const Response = struct { body: ?Event = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var generator = try TypeGenerator.init(arena.allocator());
+    defer generator.deinit();
+
+    const output = try generator.generateTypes(&.{.{ "/events", Endpoint }});
+
+    try expectContent(
+        \\ export type ApiPayload =
+        \\   {
+        \\     created: {
+        \\       id: number
+        \\     }
+        \\   }
+        \\
+        \\ export type Event =
+        \\   {
+        \\     [K in keyof ApiPayload]: {
+        \\       topic: K
+        \\       payload: ApiPayload[K]
+        \\     };
+        \\   }[keyof ApiPayload];
+        \\
+        \\
+        \\ export type Spec = {
+        \\   GET: {
+        \\     "/events": {
+        \\       response: Event,
+        \\     }
+        \\   },
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {},
+        \\ };
+    , output);
+}
+
 test "generateTypes: preserves the optionality of a rendered public body type" {
     const Endpoint = struct {
         pub const Body = struct { filter: ?u32 = null };
@@ -1282,6 +1387,42 @@ test "generateTypes: rejects reachable duplicate exported type names" {
 
     try std.testing.expectError(
         error.DuplicateDeclaration,
+        generator.generateTypes(&.{
+            .{ "/first", FirstEndpoint },
+            .{ "/second", SecondEndpoint },
+        }),
+    );
+}
+
+test "generateTypes: rejects conflicting export aliases for one Zig type" {
+    const Shared = struct { id: u32 };
+    const FirstEndpoint = struct {
+        pub const First = Shared;
+
+        const Context = struct {};
+        const Response = struct { body: ?First = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+    const SecondEndpoint = struct {
+        pub const Second = Shared;
+
+        const Context = struct {};
+        const Response = struct { body: ?Second = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var generator = try TypeGenerator.init(arena.allocator());
+    defer generator.deinit();
+
+    try std.testing.expectError(
+        error.ConflictingTypeAlias,
         generator.generateTypes(&.{
             .{ "/first", FirstEndpoint },
             .{ "/second", SecondEndpoint },
