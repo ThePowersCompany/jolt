@@ -142,12 +142,6 @@ pub const TypeGenerator = struct {
         return .{ .parsed = name, .optional = result.optional };
     }
 
-    fn ensureTopLevelTypeRegistered(self: *Self, comptime T: type, name: []const u8) !void {
-        if (!self.top_level_types.contains(@typeName(T))) {
-            try self.addTopLevelType(T, name);
-        }
-    }
-
     fn shortTypeName(type_name: []const u8) []const u8 {
         var generic_iter = std.mem.splitScalar(u8, type_name, '(');
         const pre_generic = generic_iter.first();
@@ -287,11 +281,16 @@ pub const TypeGenerator = struct {
             };
             comptime if (!shouldDeclareTopLevel(T)) continue;
 
-            if (self.top_level_types.get(@typeName(T))) |registered| {
-                if (!strEqls(registered.name, decl.name)) {
-                    return error.ConflictingTypeAlias;
-                }
-            } else {
+            const canonical_name = comptime shortTypeName(@typeName(T));
+            if (!strEqls(decl.name, canonical_name)) {
+                std.log.info(
+                    "Public type declaration {s} must use its canonical name {s}.",
+                    .{ decl.name, canonical_name },
+                );
+                return error.NonCanonicalTypeName;
+            }
+
+            if (!self.top_level_types.contains(@typeName(T))) {
                 try self.addTopLevelType(T, decl.name);
             }
         }
@@ -302,12 +301,12 @@ pub const TypeGenerator = struct {
             .@"struct" => |s| if (self.parse_context == .query_params)
                 try self.parseFlatQueryStruct(T, s)
             else
-                try self.parseStruct(s),
+                try self.parseStruct(s, .{T}),
             .@"enum" => .{ .parsed = try self.parseEnum(@typeInfo(T).@"enum") },
             .@"union" => |u| if (self.parse_context == .query_params or isLiftableUnion(T))
                 try self.parseFlatUnion(u)
             else
-                try self.parseUnionObject(u),
+                try self.parseUnionObject(u, .{T}),
             else => return error.InvalidTopLevelType,
         };
     }
@@ -361,7 +360,7 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn parseStruct(self: *Self, S: Type.Struct) !ParseResult {
+    fn parseStruct(self: *Self, S: Type.Struct, comptime ancestors: anytype) !ParseResult {
         // Find adjacent union ahead of time
         var adjacent_union: ?AdjacentUnion = null;
         {
@@ -411,14 +410,14 @@ pub const TypeGenerator = struct {
                 return error.MissingRequiredField;
             }
 
-            return self.parseStructWithAdjacentUnion(S, au);
+            return self.parseStructWithAdjacentUnion(S, au, ancestors);
         }
 
         // Default struct parsing if there's no adjacent union present as a field
-        return self.parsePlainStruct(S);
+        return self.parsePlainStruct(S, ancestors);
     }
 
-    fn parsePlainStruct(self: *Self, S: Type.Struct) !ParseResult {
+    fn parsePlainStruct(self: *Self, S: Type.Struct, comptime ancestors: anytype) !ParseResult {
         var all_optional = true;
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
@@ -434,7 +433,7 @@ pub const TypeGenerator = struct {
                 return error.OptionalMissingDefault;
             }
 
-            const parse_result = try self.extractIdentifier(field.type);
+            const parse_result = try self.extractIdentifierInner(field.type, ancestors);
 
             const optional = if (field.defaultValue()) |_| true else parse_result.optional;
 
@@ -457,14 +456,14 @@ pub const TypeGenerator = struct {
         };
     }
 
-    fn parseUnionObject(self: *Self, U: Type.Union) !ParseResult {
+    fn parseUnionObject(self: *Self, U: Type.Union, comptime ancestors: anytype) !ParseResult {
         var all_optional = true;
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
         inline for (U.fields) |field| {
             try res.appendSlice(self.arena_alloc, field.name);
 
-            const parse_result = try self.extractIdentifier(field.type);
+            const parse_result = try self.extractIdentifierInner(field.type, ancestors);
             all_optional = all_optional and parse_result.optional;
             if (parse_result.optional) {
                 try res.appendSlice(self.arena_alloc, "?: ");
@@ -484,20 +483,13 @@ pub const TypeGenerator = struct {
         };
     }
 
-    fn parseStructWithAdjacentUnion(self: *Self, S: Type.Struct, adjacent_union: AdjacentUnion) !ParseResult {
-        var union_name = shortTypeName(adjacent_union.name);
-        // Resolve the export name before emitting `keyof`; it may differ from the Zig type name.
-        inline for (S.fields) |field| {
-            if (strEqls(@typeName(field.type), adjacent_union.name)) {
-                if (@typeInfo(field.type) != .@"union") {
-                    return error.InvalidAdjacentUnionType;
-                }
-                try self.ensureTopLevelTypeRegistered(field.type, union_name);
-                const resolved = (try self.resolveTopLevelType(field.type)) orelse
-                    return error.MissingDeclaration;
-                union_name = resolved.parsed;
-            }
-        }
+    fn parseStructWithAdjacentUnion(
+        self: *Self,
+        S: Type.Struct,
+        adjacent_union: AdjacentUnion,
+        comptime ancestors: anytype,
+    ) !ParseResult {
+        const union_name = shortTypeName(adjacent_union.name);
 
         var res: ArrayList(u8) = .empty;
         try res.appendSlice(self.arena_alloc, "{\n");
@@ -512,13 +504,14 @@ pub const TypeGenerator = struct {
                 try res.appendSlice(self.arena_alloc, f.name);
                 try res.appendSlice(self.arena_alloc, ": K\n");
             } else if (strEqls(@typeName(f.type), adjacent_union.name)) {
+                if (try self.resolveTopLevelType(f.type) == null) return error.MissingDeclaration;
                 try res.appendSlice(
                     self.arena_alloc,
                     try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, union_name }),
                 );
             } else {
                 try res.appendSlice(self.arena_alloc, f.name);
-                const parse_result = try self.extractIdentifier(f.type);
+                const parse_result = try self.extractIdentifierInner(f.type, ancestors);
                 if (parse_result.optional) {
                     try res.appendSlice(self.arena_alloc, "?: ");
                 } else {
@@ -531,7 +524,7 @@ pub const TypeGenerator = struct {
 
         try res.appendSlice(self.arena_alloc, try allocPrint(
             self.arena_alloc,
-            "}};\n}}[keyof {s}];\n",
+            "}};\n}}[keyof {s}]",
             .{union_name},
         ));
 
@@ -557,6 +550,7 @@ pub const TypeGenerator = struct {
         res: *ArrayList(u8),
         U: Type.Union,
         discriminator: []const u8,
+        comptime ancestors: anytype,
     ) !void {
         inline for (U.fields) |field| {
             try res.appendSlice(self.arena_alloc, try allocPrint(
@@ -569,7 +563,7 @@ pub const TypeGenerator = struct {
             if (field_info != .@"struct") return error.InvalidUnionRepr;
 
             inline for (field_info.@"struct".fields) |f| {
-                const parsed_res = try self.extractIdentifier(f.type);
+                const parsed_res = try self.extractIdentifierInner(f.type, ancestors);
                 try res.appendSlice(self.arena_alloc, try allocPrint(
                     self.arena_alloc,
                     "{s}{s}: {s}; ",
@@ -584,12 +578,17 @@ pub const TypeGenerator = struct {
         }
     }
 
-    fn parseUnion(self: *Self, U: Type.Union, T: type) ![]const u8 {
+    fn parseUnion(
+        self: *Self,
+        U: Type.Union,
+        T: type,
+        comptime ancestors: anytype,
+    ) ![]const u8 {
         var res: ArrayList(u8) = .empty;
 
         // Special case for Optional(T)
         if (comptime isOptional(T)) {
-            const parsed_res = try self.extractIdentifier(@FieldType(T, "value"));
+            const parsed_res = try self.extractIdentifierInner(@FieldType(T, "value"), ancestors);
             try res.appendSlice(self.arena_alloc, parsed_res.parsed);
             return res.toOwnedSlice(self.arena_alloc);
         }
@@ -611,7 +610,7 @@ pub const TypeGenerator = struct {
                 },
                 .internal => {
                     const disc: []const u8 = repr.internal.discriminator;
-                    try self.appendTaggedUnionVariants(&res, U, disc);
+                    try self.appendTaggedUnionVariants(&res, U, disc, ancestors);
                 },
                 .adjacently => {
                     try res.appendSlice(self.arena_alloc, try allocPrint(
@@ -620,7 +619,7 @@ pub const TypeGenerator = struct {
                         .{shortTypeName(@typeName(T))},
                     ));
                     const disc: []const u8 = repr.adjacently.discriminator;
-                    try self.appendTaggedUnionVariants(&res, U, disc);
+                    try self.appendTaggedUnionVariants(&res, U, disc, ancestors);
                 },
                 .untagged => {
                     // Get the type of each enum state, join them together
@@ -635,7 +634,7 @@ pub const TypeGenerator = struct {
                         if (@typeInfo(field.type) == .void) {
                             try res.print(self.arena_alloc, "\"{s}\"", .{field.name});
                         } else {
-                            const ident = (try self.extractIdentifier(field.type)).parsed;
+                            const ident = (try self.extractIdentifierInner(field.type, ancestors)).parsed;
                             try res.appendSlice(self.arena_alloc, ident);
                         }
                     }
@@ -981,8 +980,16 @@ pub const TypeGenerator = struct {
     }
 
     fn extractIdentifier(self: *Self, comptime T: type) anyerror!ParseResult {
+        return self.extractIdentifierInner(T, .{});
+    }
+
+    fn extractIdentifierInner(
+        self: *Self,
+        comptime T: type,
+        comptime ancestors: anytype,
+    ) anyerror!ParseResult {
         if (comptime typescriptRepr(T)) |repr_type| {
-            return self.extractIdentifier(repr_type);
+            return self.extractIdentifierInner(repr_type, ancestors);
         }
 
         if (try self.resolveTopLevelType(T)) |result| return result;
@@ -998,23 +1005,22 @@ pub const TypeGenerator = struct {
                 }
 
                 return switch (type_info.pointer.size) {
-                    .one => self.extractIdentifier(type_info.pointer.child),
+                    .one => self.extractIdentifierInner(type_info.pointer.child, ancestors),
                     else => .{ .parsed = try allocPrint(self.arena_alloc, "{s}[]", .{
-                        (try self.extractIdentifier(type_info.pointer.child)).parsed,
+                        (try self.extractIdentifierInner(type_info.pointer.child, ancestors)).parsed,
                     }) },
                 };
             },
             .@"struct" => |s| {
-                const type_name = comptime shortTypeName(@typeName(T));
-
-                // Adjacent-union containers need a named TS type.
-                // Register before rendering so recursive fields can refer back to the container by name.
-                if (comptime hasAdjacentUnionField(s)) {
-                    try self.ensureTopLevelTypeRegistered(T, type_name);
-                    return (try self.resolveTopLevelType(T)) orelse error.MissingDeclaration;
+                if (comptime renderPathContains(ancestors, T)) {
+                    std.log.info(
+                        "Recursive type {s} must be exposed as a public top-level declaration.",
+                        .{@typeName(T)},
+                    );
+                    return error.RecursiveTypeMustBePublic;
                 }
 
-                const res = try self.parseStruct(type_info.@"struct");
+                const res = try self.parseStruct(s, ancestors ++ .{T});
 
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
@@ -1027,7 +1033,17 @@ pub const TypeGenerator = struct {
                 return .{ .parsed = try self.parseEnum(type_info.@"enum") };
             },
             .@"union" => {
-                return .{ .parsed = try self.parseUnion(type_info.@"union", T) };
+                if (comptime renderPathContains(ancestors, T)) {
+                    std.log.info(
+                        "Recursive type {s} must be exposed as a public top-level declaration.",
+                        .{@typeName(T)},
+                    );
+                    return error.RecursiveTypeMustBePublic;
+                }
+
+                return .{
+                    .parsed = try self.parseUnion(type_info.@"union", T, ancestors ++ .{T}),
+                };
             },
             .optional => {
                 return .{
@@ -1035,7 +1051,7 @@ pub const TypeGenerator = struct {
                     // This means the value could still be required, but could be set to null.
                     .optional = false,
                     .parsed = try allocPrint(self.arena_alloc, "{s}|null", .{
-                        (try self.extractIdentifier(type_info.optional.child)).parsed,
+                        (try self.extractIdentifierInner(type_info.optional.child, ancestors)).parsed,
                     }),
                 };
             },
@@ -1075,11 +1091,9 @@ fn shouldDeclareTopLevel(comptime T: type) bool {
     return comptime typescriptRepr(T) == null;
 }
 
-fn hasAdjacentUnionField(comptime s: Type.Struct) bool {
-    inline for (s.fields) |field| {
-        if (@typeInfo(field.type) != .@"union" or !@hasDecl(field.type, "_repr")) continue;
-        const repr = field.type._repr;
-        if (@TypeOf(repr) == UnionRepr and repr == .adjacently) return true;
+fn renderPathContains(comptime ancestors: anytype, comptime T: type) bool {
+    inline for (ancestors) |ancestor| {
+        if (ancestor == T) return true;
     }
     return false;
 }
@@ -1200,20 +1214,45 @@ test "generateTypes: supports recursive types" {
     , output);
 }
 
-test "generateTypes: supports recursive structs containing adjacently tagged unions" {
-    const Topic = enum { updated };
-    const Payload = union(Topic) {
-        updated: struct { value: i32 },
-
-        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
-    };
-    const Node = struct {
-        pub const Self = @This();
-        next: ?*Self = null,
-        topic: Topic,
-        payload: Payload,
-    };
+test "generateTypes: rejects private recursive response types" {
     const Endpoint = struct {
+        const Node = struct {
+            next: ?*Node = null,
+        };
+
+        const Context = struct {};
+        const Response = struct { body: ?Node = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var generator = try TypeGenerator.init(arena.allocator());
+    defer generator.deinit();
+
+    try std.testing.expectError(
+        error.RecursiveTypeMustBePublic,
+        generator.generateTypes(&.{.{ "/nodes", Endpoint }}),
+    );
+}
+
+test "generateTypes: supports public recursive structs containing adjacently tagged unions" {
+    const Endpoint = struct {
+        const Topic = enum { updated };
+        pub const Payload = union(Topic) {
+            updated: struct { value: i32 },
+
+            pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+        };
+        pub const Node = struct {
+            pub const Self = @This();
+            next: ?*Self = null,
+            topic: Topic,
+            payload: Payload,
+        };
         const Context = struct {};
         const Response = struct { body: ?Node = null };
         pub fn get(_: *Context) Response {
@@ -1233,12 +1272,11 @@ test "generateTypes: supports recursive structs containing adjacently tagged uni
         \\ export type Node =
         \\   {
         \\     [K in keyof Payload]: {
-        \\       next: Node|null
+        \\       next: Node | null
         \\       topic: K
         \\       payload: Payload[K]
         \\     };
-        \\   }[keyof Payload];
-        \\
+        \\   }[keyof Payload]
         \\
         \\ export type Payload =
         \\   {
@@ -1251,66 +1289,6 @@ test "generateTypes: supports recursive structs containing adjacently tagged uni
         \\   GET: {
         \\     "/nodes": {
         \\       response: Node,
-        \\     }
-        \\   },
-        \\   POST: {},
-        \\   PUT: {},
-        \\   PATCH: {},
-        \\   DELETE: {},
-        \\ };
-    , output);
-}
-
-test "generateTypes: adjacent unions use their registered export name" {
-    const Topic = enum { created };
-    const Payload = union(Topic) {
-        created: struct { id: u32 },
-
-        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
-    };
-    const Event = struct {
-        topic: Topic,
-        payload: Payload,
-    };
-    const Endpoint = struct {
-        pub const ApiPayload = Payload;
-
-        const Context = struct {};
-        const Response = struct { body: ?Event = null };
-        pub fn get(_: *Context) Response {
-            return .{};
-        }
-    };
-
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    const output = try generator.generateTypes(&.{.{ "/events", Endpoint }});
-
-    try expectContent(
-        \\ export type ApiPayload =
-        \\   {
-        \\     created: {
-        \\       id: number
-        \\     }
-        \\   }
-        \\
-        \\ export type Event =
-        \\   {
-        \\     [K in keyof ApiPayload]: {
-        \\       topic: K
-        \\       payload: ApiPayload[K]
-        \\     };
-        \\   }[keyof ApiPayload];
-        \\
-        \\
-        \\ export type Spec = {
-        \\   GET: {
-        \\     "/events": {
-        \\       response: Event,
         \\     }
         \\   },
         \\   POST: {},
@@ -1395,22 +1373,13 @@ test "generateTypes: rejects reachable duplicate exported type names" {
     );
 }
 
-test "generateTypes: rejects conflicting export aliases for one Zig type" {
-    const Shared = struct { id: u32 };
-    const FirstEndpoint = struct {
-        pub const First = Shared;
+test "generateTypes: rejects non-canonical public type names" {
+    const imported_types = @import("test_types/same_name_a.zig");
+    const Endpoint = struct {
+        pub const ApiShared = imported_types.Shared;
 
         const Context = struct {};
-        const Response = struct { body: ?First = null };
-        pub fn get(_: *Context) Response {
-            return .{};
-        }
-    };
-    const SecondEndpoint = struct {
-        pub const Second = Shared;
-
-        const Context = struct {};
-        const Response = struct { body: ?Second = null };
+        const Response = struct { body: ?ApiShared = null };
         pub fn get(_: *Context) Response {
             return .{};
         }
@@ -1423,25 +1392,30 @@ test "generateTypes: rejects conflicting export aliases for one Zig type" {
     defer generator.deinit();
 
     try std.testing.expectError(
-        error.ConflictingTypeAlias,
-        generator.generateTypes(&.{
-            .{ "/first", FirstEndpoint },
-            .{ "/second", SecondEndpoint },
-        }),
+        error.NonCanonicalTypeName,
+        generator.generateTypes(&.{.{ "/shared", Endpoint }}),
     );
 }
 
-test "generateTypes: distinguishes imported types with the same name" {
+test "generateTypes: rejects imported types with the same canonical name" {
     const types_a = @import("test_types/same_name_a.zig");
     const types_b = @import("test_types/same_name_b.zig");
 
-    const Endpoint = struct {
-        pub const First = types_a.Shared;
-        pub const Second = types_b.Shared;
+    const FirstEndpoint = struct {
+        pub const Shared = types_a.Shared;
 
-        const Context = struct { body: First };
-        const Response = struct { body: ?Second = null };
-        pub fn post(_: *Context) Response {
+        const Context = struct {};
+        const Response = struct { body: ?Shared = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+    const SecondEndpoint = struct {
+        pub const Shared = types_b.Shared;
+
+        const Context = struct {};
+        const Response = struct { body: ?Shared = null };
+        pub fn get(_: *Context) Response {
             return .{};
         }
     };
@@ -1452,30 +1426,13 @@ test "generateTypes: distinguishes imported types with the same name" {
     var generator = try TypeGenerator.init(arena.allocator());
     defer generator.deinit();
 
-    const output = try generator.generateTypes(&.{.{ "/shared", Endpoint }});
-
-    try expectContent(
-        \\ export type First = {
-        \\   id: number
-        \\ }
-        \\
-        \\ export type Second = {
-        \\   label: string
-        \\ }
-        \\
-        \\ export type Spec = {
-        \\   GET: {},
-        \\   POST: {
-        \\     "/shared": {
-        \\       body: First
-        \\       response: Second,
-        \\     }
-        \\   },
-        \\   PUT: {},
-        \\   PATCH: {},
-        \\   DELETE: {},
-        \\ };
-    , output);
+    try std.testing.expectError(
+        error.DuplicateDeclaration,
+        generator.generateTypes(&.{
+            .{ "/first", FirstEndpoint },
+            .{ "/second", SecondEndpoint },
+        }),
+    );
 }
 
 const TypeScriptOpaqueId = struct {
@@ -2316,21 +2273,14 @@ test "generateTypes: public struct query param coerces paramParse leaves into st
 
 const AlertTopic = enum { downtime, lost_production };
 
-// A public adjacently-tagged union used in an endpoint response.
-const AlertPayload = union(AlertTopic) {
-    downtime: struct { line: []const u8, minutes: f32 },
-    lost_production: struct { line: []const u8, units: f64 },
-
-    pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
-};
-
-const Alert = struct {
-    id: i64,
-    topic: AlertTopic,
-    payload: AlertPayload,
-};
-
 const AlertsEndpoint = struct {
+    pub const AlertPayload = union(AlertTopic) {
+        downtime: struct { line: []const u8, minutes: f32 },
+        lost_production: struct { line: []const u8, units: f64 },
+
+        pub const _repr: UnionRepr = .{ .adjacently = .{ .discriminator = "topic" } };
+    };
+
     const Ctx = struct {};
     const Res = struct { body: ?[]Alert = null };
     pub fn get(_: *Ctx) Res {
@@ -2338,7 +2288,13 @@ const AlertsEndpoint = struct {
     }
 };
 
-test "generateTypes: tagged union used in a response is exported by name" {
+const Alert = struct {
+    id: i64,
+    topic: AlertTopic,
+    payload: AlertsEndpoint.AlertPayload,
+};
+
+test "generateTypes: a private adjacent-union container is rendered inline" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -2349,19 +2305,8 @@ test "generateTypes: tagged union used in a response is exported by name" {
 
     const endpoints = [_]EndpointDef{.{ "/alerts", AlertsEndpoint }};
 
-    // The tagged union is exported as a named top-level type
     const output = try type_generator.generateTypes(&endpoints);
     try expectContent(
-        \\ export type Alert =
-        \\   {
-        \\     [K in keyof AlertPayload]: {
-        \\       id: number
-        \\       topic: K
-        \\       payload: AlertPayload[K]
-        \\     };
-        \\   }[keyof AlertPayload];
-        \\
-        \\
         \\ export type AlertPayload =
         \\   {
         \\     downtime: {
@@ -2377,7 +2322,13 @@ test "generateTypes: tagged union used in a response is exported by name" {
         \\ export type Spec = {
         \\   GET: {
         \\     "/alerts": {
-        \\       response: Alert[],
+        \\       response: {
+        \\         [K in keyof AlertPayload]: {
+        \\           id: number
+        \\           topic: K
+        \\           payload: AlertPayload[K]
+        \\         };
+        \\       }[keyof AlertPayload][],
         \\     }
         \\   },
         \\   POST: {},
@@ -2388,8 +2339,9 @@ test "generateTypes: tagged union used in a response is exported by name" {
     , output);
 }
 
-// A second endpoint whose response uses the same `Alert` type.
 const AlertsImportEndpoint = struct {
+    pub const AlertPayload = AlertsEndpoint.AlertPayload;
+
     const Ctx = struct {};
     const Res = struct { body: ?[]Alert = null };
     pub fn get(_: *Ctx) Res {
@@ -2442,7 +2394,7 @@ const NotifEndpoint = struct {
     }
 };
 
-test "generateTypes: a public tagged-union decl exports as object-of-variants, not XOR" {
+test "generateTypes: a public tagged-union payload exports by name while its private container is inline" {
     const alloc = std.testing.allocator;
 
     var arena = ArenaAllocator.init(alloc);
@@ -2454,16 +2406,6 @@ test "generateTypes: a public tagged-union decl exports as object-of-variants, n
     const endpoints = [_]EndpointDef{.{ "/notif", NotifEndpoint }};
     const output = try type_generator.generateTypes(&endpoints);
     try expectContent(
-        \\ export type Notif =
-        \\   {
-        \\     [K in keyof NotifPayload]: {
-        \\       id: number
-        \\       topic: K
-        \\       payload: NotifPayload[K]
-        \\     };
-        \\   }[keyof NotifPayload];
-        \\
-        \\
         \\ export type NotifPayload =
         \\   {
         \\     post_created: {
@@ -2479,7 +2421,13 @@ test "generateTypes: a public tagged-union decl exports as object-of-variants, n
         \\ export type Spec = {
         \\   GET: {
         \\     "/notif": {
-        \\       response: Notif[],
+        \\       response: {
+        \\         [K in keyof NotifPayload]: {
+        \\           id: number
+        \\           topic: K
+        \\           payload: NotifPayload[K]
+        \\         };
+        \\       }[keyof NotifPayload][],
         \\     }
         \\   },
         \\   POST: {},
