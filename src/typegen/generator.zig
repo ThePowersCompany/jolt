@@ -1007,8 +1007,9 @@ pub const TypeGenerator = struct {
             .@"struct" => |s| {
                 const type_name = comptime shortTypeName(@typeName(T));
 
+                // Adjacent-union containers need a named TS type.
+                // Register before rendering so recursive fields can refer back to the container by name.
                 if (comptime hasAdjacentUnionField(s)) {
-                    // Register before rendering so recursive fields resolve to this named type.
                     try self.ensureTopLevelTypeRegistered(T, type_name);
                     return (try self.resolveTopLevelType(T)) orelse error.MissingDeclaration;
                 }
@@ -1199,7 +1200,7 @@ test "generateTypes: supports recursive types" {
     , output);
 }
 
-test "generateTypes: supports recursive implicit adjacent-union types" {
+test "generateTypes: supports recursive structs containing adjacently tagged unions" {
     const Topic = enum { updated };
     const Payload = union(Topic) {
         updated: struct { value: i32 },
