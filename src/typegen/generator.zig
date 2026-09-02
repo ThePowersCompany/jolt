@@ -44,7 +44,7 @@ const ParseResult = struct {
     optional: bool = false,
 };
 
-const NamedType = struct {
+const TopLevelType = struct {
     /// Name exported in the generated TypeScript.
     name: []const u8,
     /// Parsing context chosen on its first use.
@@ -69,8 +69,8 @@ pub const TypeGenerator = struct {
 
     parse_context: ParseContext = .body,
 
-    /// Fully-qualified Zig type name => NamedType
-    named_types: std.StringHashMapUnmanaged(NamedType),
+    /// Fully-qualified Zig type name => TopLevelType
+    top_level_types: std.StringHashMapUnmanaged(TopLevelType),
 
     /// Method => Path => Codegen
     endpoints: std.EnumMap(EndpointMethod, std.StringArrayHashMapUnmanaged(struct {
@@ -93,7 +93,7 @@ pub const TypeGenerator = struct {
         return .{
             .arena_alloc = arena_alloc,
             .parse_context = .body,
-            .named_types = .empty,
+            .top_level_types = .empty,
             .endpoints = .initFull(.empty),
         };
     }
@@ -103,12 +103,12 @@ pub const TypeGenerator = struct {
         const type_name = @typeName(T);
         const name = shortTypeName(type_name);
         // Check if public identifier name has already been added
-        var types_iter = self.named_types.valueIterator();
+        var types_iter = self.top_level_types.valueIterator();
         while (types_iter.next()) |entry| {
             if (strEqls(entry.name, name)) return error.DuplicateDeclaration;
         }
         // Otherwise, continue adding named type
-        const res = try self.named_types.getOrPut(self.arena_alloc, type_name);
+        const res = try self.top_level_types.getOrPut(self.arena_alloc, type_name);
         if (res.found_existing) return error.DuplicateTypeName;
         res.value_ptr.* = .{ .name = name, .context = context };
         return name;
@@ -116,9 +116,9 @@ pub const TypeGenerator = struct {
 
     /// Returns a top-level reference when `T` is registered, rendering it on first use.
     /// An entry with a context but no parse result is currently rendering and breaks recursion.
-    fn resolveNamedType(self: *Self, comptime T: type) !?ParseResult {
+    fn resolveTopLevelType(self: *Self, comptime T: type) !?ParseResult {
         // TODO return null if T isn't a named type
-        const entry = self.named_types.getPtr(@typeName(T)) orelse {
+        const entry = self.top_level_types.getPtr(@typeName(T)) orelse {
             // TODO if not added yet, then start to parse the type
             return null;
         };
@@ -138,29 +138,6 @@ pub const TypeGenerator = struct {
         // return .{ .codegen = entry.name, .optional = result.optional };
     }
 
-    fn parseNamedType(
-        self: *Self,
-        comptime T: type,
-        context: ParseContext,
-    ) !ParseResult {
-        const previous_context = self.parse_context;
-        self.parse_context = context;
-        defer self.parse_context = previous_context;
-
-        return switch (@typeInfo(T)) {
-            .@"struct" => |s| if (context == .query_params)
-                try self.parseFlatQueryStruct(T, s)
-            else
-                try self.parseStruct(s),
-            .@"enum" => .{ .codegen = try self.parseEnum(@typeInfo(T).@"enum") },
-            .@"union" => |u| if (context == .query_params or isLiftableUnion(T))
-                try self.parseFlatUnion(u)
-            else
-                try self.parseUnionObject(u),
-            else => return error.InvalidTopLevelType,
-        };
-    }
-
     /// Gets the canonical shortened name of the full type name.
     /// Canonical meaning it's the name of the type's original declaration name.
     /// The type generator should enforce that all public declarations that re-export a type must use the canonical name.
@@ -175,6 +152,9 @@ pub const TypeGenerator = struct {
     /// The output string should be allocated with `alloc`, not the arena inside `Self`.
     pub fn generateTypes(self: *Self, alloc: Allocator, comptime endpoints: []const EndpointDef) !ArrayList(u8) {
         @setEvalBranchQuota(endpoints.len * 2000);
+
+        // Register every public top-level declaration before resolving endpoint usage.
+        inline for (endpoints) |endpoint| try self.registerEndpointTopLevelTypes(endpoint);
 
         // Populate endpoint metadata, rendering public types on first reference.
         inline for (endpoints) |endpoint| try self.populateEndpointTypescript(endpoint);
@@ -196,7 +176,7 @@ pub const TypeGenerator = struct {
             var entries: ArrayList(Entry) = .empty;
             defer entries.deinit(self.arena_alloc);
 
-            var iter = self.named_types.iterator();
+            var iter = self.top_level_types.iterator();
             while (iter.next()) |top| {
                 const named_type = top.value_ptr;
                 const result = named_type.parsed orelse continue;
@@ -274,6 +254,48 @@ pub const TypeGenerator = struct {
                 else => {},
             }
         }
+    }
+
+    fn registerEndpointTopLevelTypes(self: *Self, endpoint: EndpointDef) !void {
+        _, const Endpoint = endpoint;
+        inline for (@typeInfo(Endpoint).@"struct".decls) |decl| {
+            const Decl = @TypeOf(@field(Endpoint, decl.name));
+            comptime if (@typeInfo(Decl) != .type) continue;
+
+            const T = @field(Endpoint, decl.name);
+            comptime switch (@typeInfo(T)) {
+                .@"struct", .@"enum", .@"union" => {},
+                else => continue,
+            };
+            comptime if (!shouldDeclareTopLevel(T)) continue;
+
+            if (!self.top_level_types.contains(@typeName(T))) {
+                try self.addTopLevelType(T, decl.name);
+            }
+        }
+    }
+
+    fn parseTopLevelType(
+        self: *Self,
+        comptime T: type,
+        context: ParseContext,
+    ) !ParseResult {
+        const previous_context = self.parse_context;
+        self.parse_context = context;
+        defer self.parse_context = previous_context;
+
+        return switch (@typeInfo(T)) {
+            .@"struct" => |s| if (context == .query_params)
+                try self.parseFlatQueryStruct(T, s)
+            else
+                try self.parseStruct(s),
+            .@"enum" => .{ .codegen = try self.parseEnum(@typeInfo(T).@"enum") },
+            .@"union" => |u| if (context == .query_params or isLiftableUnion(T))
+                try self.parseFlatUnion(u)
+            else
+                try self.parseUnionObject(u),
+            else => return error.InvalidTopLevelType,
+        };
     }
 
     fn populateStructTypescript(
@@ -468,7 +490,7 @@ pub const TypeGenerator = struct {
                 if (field_info != .@"union") {
                     return error.InvalidAdjacentUnionType;
                 }
-                const result = try self.resolveNamedType(f.type) orelse return error.Unreachable; // TODO wat
+                const result = try self.resolveTopLevelType(f.type) orelse return error.Unreachable; // TODO wat
                 try res.appendSlice(
                     self.arena_alloc,
                     try allocPrint(self.arena_alloc, "{s}: {s}[K]", .{ f.name, result.codegen }),
@@ -677,7 +699,7 @@ pub const TypeGenerator = struct {
         self.parse_context = .query_params;
         defer self.parse_context = previous_context;
 
-        if (try self.resolveNamedType(T)) |top_level| {
+        if (try self.resolveTopLevelType(T)) |top_level| {
             var result = top_level;
             result.optional = comptime queryParamsOptional(T);
             return result;
@@ -947,7 +969,7 @@ pub const TypeGenerator = struct {
             return self.extractIdentifier(repr_type);
         }
 
-        if (try self.resolveNamedType(T)) |result| return result;
+        if (try self.resolveTopLevelType(T)) |result| return result;
 
         const type_info = @typeInfo(T);
         switch (type_info) {
