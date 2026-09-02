@@ -53,6 +53,15 @@ const NamedType = struct {
     parsed: ?ParseResult = null,
 };
 
+pub const TypeGeneratorResult = struct {
+    alloc: Allocator,
+    codegen: []const u8,
+
+    pub fn deinit(self: @This()) void {
+        self.alloc.free(self.codegen);
+    }
+};
+
 pub const TypeGenerator = struct {
     const Self = @This();
 
@@ -70,20 +79,23 @@ pub const TypeGenerator = struct {
         response: ?[]const u8 = null,
     })),
 
-    pub fn init(arena_alloc: Allocator) !Self {
+    /// Main entry point for the type generator
+    pub fn run(alloc: Allocator, comptime endpoints: []const EndpointDef) !TypeGeneratorResult {
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+
+        var gen: Self = .init(arena.allocator());
+        var res = try gen.generateTypes(alloc, endpoints);
+        return .{ .alloc = alloc, .codegen = try res.toOwnedSlice(alloc) };
+    }
+
+    fn init(arena_alloc: Allocator) Self {
         return .{
             .arena_alloc = arena_alloc,
             .parse_context = .body,
             .named_types = .empty,
             .endpoints = .initFull(.empty),
         };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.named_types.deinit(self.arena_alloc);
-        for (&self.endpoints.values) |*eps| {
-            eps.deinit(self.arena_alloc);
-        }
     }
 
     /// Registers a new top-level type and returns the public identifier name for the type.
@@ -149,6 +161,9 @@ pub const TypeGenerator = struct {
         };
     }
 
+    /// Gets the canonical shortened name of the full type name.
+    /// Canonical meaning it's the name of the type's original declaration name.
+    /// The type generator should enforce that all public declarations that re-export a type must use the canonical name.
     fn shortTypeName(type_name: []const u8) []const u8 {
         var generic_iter = std.mem.splitScalar(u8, type_name, '(');
         const pre_generic = generic_iter.first();
@@ -157,7 +172,8 @@ pub const TypeGenerator = struct {
         return iter.first();
     }
 
-    pub fn generateTypes(self: *Self, comptime endpoints: []const EndpointDef) ![]const u8 {
+    /// The output string should be allocated with `alloc`, not the arena inside `Self`.
+    pub fn generateTypes(self: *Self, alloc: Allocator, comptime endpoints: []const EndpointDef) !ArrayList(u8) {
         @setEvalBranchQuota(endpoints.len * 2000);
 
         // Populate endpoint metadata, rendering public types on first reference.
@@ -197,58 +213,45 @@ pub const TypeGenerator = struct {
             // Sort alphabetically
             std.mem.sort(Entry, entries.items, {}, Entry.sort);
             for (entries.items) |entry| {
-                try res.appendSlice(self.arena_alloc, entry.ts);
+                try res.appendSlice(alloc, entry.ts);
             }
         }
 
         // Print http method endpoint typings
 
-        try res.appendSlice(self.arena_alloc, "export type Spec = {");
+        try res.appendSlice(alloc, "export type Spec = {");
 
         inline for (@typeInfo(EndpointMethod).@"enum".fields) |m| {
             const method: EndpointMethod = @enumFromInt(m.value);
             var endpoints_data = self.endpoints.getPtrAssertContains(method);
 
-            try res.appendSlice(
-                self.arena_alloc,
-                try allocPrint(
-                    self.arena_alloc,
-                    "{s}: {{",
-                    .{try std.ascii.allocUpperString(self.arena_alloc, m.name)},
-                ),
-            );
+            try res.print(alloc, "{s}: {{", .{try std.ascii.allocUpperString(self.arena_alloc, m.name)});
 
             var iter = endpoints_data.iterator();
             while (iter.next()) |endpoint| {
-                try res.appendSlice(
-                    self.arena_alloc,
-                    try allocPrint(self.arena_alloc, "\"{s}\": {{\n", .{endpoint.key_ptr.*}),
-                );
+                try res.print(alloc, "\"{s}\": {{\n", .{endpoint.key_ptr.*});
 
                 if (endpoint.value_ptr.query_params) |query_params| {
-                    try res.appendSlice(self.arena_alloc, query_params);
+                    try res.appendSlice(alloc, query_params);
                 }
 
                 if (endpoint.value_ptr.body) |body| {
-                    try res.appendSlice(self.arena_alloc, body);
+                    try res.appendSlice(alloc, body);
                 } else if (method != .get) {
-                    try res.appendSlice(self.arena_alloc, "  body?: never,\n");
+                    try res.appendSlice(alloc, "  body?: never,\n");
                 }
 
                 if (endpoint.value_ptr.response) |response| {
-                    try res.appendSlice(
-                        self.arena_alloc,
-                        try allocPrint(self.arena_alloc, "response: {s},\n", .{response}),
-                    );
+                    try res.print(alloc, "response: {s},\n", .{response});
                 }
-                try res.appendSlice(self.arena_alloc, "}\n");
+                try res.appendSlice(alloc, "}\n");
             }
-            try res.appendSlice(self.arena_alloc, "},\n");
+            try res.appendSlice(alloc, "},\n");
         }
 
-        try res.appendSlice(self.arena_alloc, "};");
+        try res.appendSlice(alloc, "};");
 
-        return res.toOwnedSlice(self.arena_alloc);
+        return res;
     }
 
     /// Populates the endpoint request and response type metadata from its HTTP method declarations.
@@ -1068,13 +1071,8 @@ test "generateTypes: permits an enum used in body and query contexts" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    const output = try generator.generateTypes(&.{.{ "/status", Endpoint }});
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/status", Endpoint }});
+    defer output.deinit();
 
     try expectContent(
         \\ export type Item = {
@@ -1102,7 +1100,7 @@ test "generateTypes: permits an enum used in body and query contexts" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 test "generateTypes: rejects a public type used in body and query contexts" {
@@ -1116,16 +1114,8 @@ test "generateTypes: rejects a public type used in body and query contexts" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    try std.testing.expectError(
-        error.TopLevelTypeUsedInMultipleContexts,
-        generator.generateTypes(&.{.{ "/shared", Endpoint }}),
-    );
+    const output = TypeGenerator.run(std.testing.allocator, &.{.{ "/shared", Endpoint }});
+    try std.testing.expectError(error.TopLevelTypeUsedInMultipleContexts, output);
 }
 
 test "generateTypes: supports recursive types" {
@@ -1142,13 +1132,8 @@ test "generateTypes: supports recursive types" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    const output = try generator.generateTypes(&.{.{ "/nodes", Endpoint }});
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/nodes", Endpoint }});
+    defer output.deinit();
 
     try expectContent(
         \\ export type Node = {
@@ -1167,7 +1152,7 @@ test "generateTypes: supports recursive types" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 test "generateTypes: preserves the optionality of a rendered public body type" {
@@ -1181,13 +1166,8 @@ test "generateTypes: preserves the optionality of a rendered public body type" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    const output = try generator.generateTypes(&.{.{ "/filter", Endpoint }});
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/filter", Endpoint }});
+    defer output.deinit();
 
     try expectContent(
         \\ export type Body = {
@@ -1206,7 +1186,7 @@ test "generateTypes: preserves the optionality of a rendered public body type" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 test "generateTypes: rejects reachable duplicate exported type names" {
@@ -1229,15 +1209,9 @@ test "generateTypes: rejects reachable duplicate exported type names" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
     try std.testing.expectError(
         error.DuplicateDeclaration,
-        generator.generateTypes(&.{
+        TypeGenerator.run(std.testing.allocator, &.{
             .{ "/first", FirstEndpoint },
             .{ "/second", SecondEndpoint },
         }),
@@ -1259,13 +1233,8 @@ test "generateTypes: distinguishes imported types with the same name" {
         }
     };
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var generator = try TypeGenerator.init(arena.allocator());
-    defer generator.deinit();
-
-    const output = try generator.generateTypes(&.{.{ "/shared", Endpoint }});
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/shared", Endpoint }});
+    defer output.deinit();
 
     try expectContent(
         \\ export type First = {
@@ -1288,7 +1257,7 @@ test "generateTypes: distinguishes imported types with the same name" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 const TypeScriptOpaqueId = struct {
@@ -1298,13 +1267,10 @@ const TypeScriptOpaqueId = struct {
 };
 
 test "extractIdentifier: a type _repr overrides structural type generation" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
+    var type_generator = TypeGenerator.init(arena.allocator());
 
     const result = try type_generator.extractIdentifier(TypeScriptOpaqueId);
     try expectContent("string", result.codegen);
@@ -1324,15 +1290,9 @@ test "generateTypes: _repr types generate their declared TypeScript wire type" {
         }
     };
 
-    const alloc = std.testing.allocator;
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/opaque-id", TypeScriptOpaqueIdEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try expectContent(
         \\export type Spec = {
@@ -1349,7 +1309,7 @@ test "generateTypes: _repr types generate their declared TypeScript wire type" {
         \\  PATCH: {},
         \\  DELETE: {},
         \\};
-    , output);
+    , output.codegen);
 }
 
 const DateStrBodyEndpoint = struct {
@@ -1396,15 +1356,8 @@ const ReprEpochMillisEndpoint = struct {
 };
 
 test "custom _repr structs generate their numeric wire type" {
-    const alloc = std.testing.allocator;
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/custom-json-type", ReprEpochMillisEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
 
     try expectContent(
         \\export type Body = {
@@ -1422,19 +1375,13 @@ test "custom _repr structs generate their numeric wire type" {
         \\  PATCH: {},
         \\  DELETE: {},
         \\};
-    , output);
+    , output.codegen);
 }
 
 test "Str types generate as strings in request bodies" {
-    const alloc = std.testing.allocator;
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/date", DateStrBodyEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try expectContent(
         \\export type Spec = {
@@ -1451,13 +1398,11 @@ test "Str types generate as strings in request bodies" {
         \\  PATCH: {},
         \\  DELETE: {},
         \\};
-    , output);
+    , output.codegen);
 }
 
 test "required nullable fields" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     const Foo = struct {
@@ -1468,9 +1413,7 @@ test "required nullable fields" {
         baz: i32 = 0,
     };
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractIdentifier(Foo);
     try expectContent(
         \\ {
@@ -1484,9 +1427,7 @@ test "required nullable fields" {
 }
 
 test "Nested Optionals" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     const Foo = struct {
@@ -1497,9 +1438,7 @@ test "Nested Optionals" {
         }) = .not_provided,
     };
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractIdentifier(Foo);
     try expectContent(parse_result.codegen,
         \\ {
@@ -1513,17 +1452,14 @@ test "Nested Optionals" {
 }
 
 test "Optionals require default values" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     const Foo = struct {
         opt: Optional(bool),
     };
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
+    var type_generator = TypeGenerator.init(arena.allocator());
 
     // This should throw an error
     _ = type_generator.extractIdentifier(Foo) catch |err| {
@@ -1536,18 +1472,14 @@ test "Optionals require default values" {
 }
 
 test "JsonArray(T)" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     const Foo = struct {
         list: JsonArray(struct { abc: i32 }),
     };
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractIdentifier(Foo);
     try expectContent(parse_result.codegen,
         \\ {
@@ -1569,14 +1501,10 @@ const Filter = union(enum) {
 };
 
 test "extractQueryParams: union with subset variants" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(Filter);
     try expectContent(
         \\ XOR<({
@@ -1606,14 +1534,10 @@ const LostProductionFilter = union(enum) {
 };
 
 test "extractQueryParams: LostProductionFilter (scalar + struct variants + shared optionals)" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(LostProductionFilter);
     try expectContent(
         \\ XOR<({ id: number }), XOR<({ dsc_row: number }), XOR<({
@@ -1639,14 +1563,10 @@ const Query = struct {
 };
 
 test "extractQueryParams: base keys + union variant keys" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(Query);
     try expectContent(
         \\ (XOR<({ by_id: number }), ({
@@ -1672,14 +1592,10 @@ const WorkerQuery = struct {
 };
 
 test "extractQueryParams: Optional union leaf renders as an untagged TS union" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(WorkerQuery);
     try expectContent(
         \\ {
@@ -1700,14 +1616,10 @@ test "extractQueryParams: query param union needs no _repr declaration" {
         worker: Optional(WorkerFilterNoRepr) = .not_provided,
     };
 
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(WorkerQueryNoRepr);
     try expectContent(
         \\ {
@@ -1723,14 +1635,10 @@ test "extractQueryParams: Optional(?Union) leaf is optional and nullable" {
         worker: Optional(?WorkerFilterNoRepr) = .not_provided,
     };
 
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(WorkerQueryNestedOptional);
     try expectContent(
         \\ {
@@ -1746,14 +1654,10 @@ test "extractQueryParams: ?Union leaf is optional and nullable" {
         worker: ?WorkerFilterNoRepr = null,
     };
 
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(WorkerQueryNativeOptional);
     try expectContent(
         \\ {
@@ -1769,14 +1673,10 @@ const WorkerQueryRequiredNative = struct {
 };
 
 test "extractQueryParams: required native ?Union leaf is required and nullable" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(WorkerQueryRequiredNative);
     try expectContent(
         \\ {
@@ -1803,14 +1703,10 @@ const PlainDateQuery = struct {
 };
 
 test "extractQueryParams: plain struct coerces a paramParse leaf to string" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(PlainDateQuery);
     try expectContent(
         \\{
@@ -1826,13 +1722,10 @@ const AllOptionalQuery = struct {
 };
 
 test "extractQueryParams: optionality follows the minimum required key count" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
+    var type_generator = TypeGenerator.init(arena.allocator());
 
     // A struct with a required field is required
     try expectEqual(false, (try type_generator.extractQueryParams(PlainDateQuery)).optional);
@@ -1863,14 +1756,10 @@ const CursorQuery = struct {
 };
 
 test "extractQueryParams: optional nested struct with a required key renders as a gated XOR group" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(CursorQuery);
     try expectContent(
         \\XOR<{
@@ -1893,14 +1782,10 @@ const RangeQuery = struct {
 };
 
 test "extractQueryParams: handles gated group optionality" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(RangeQuery);
     try expectContent(
         \\XOR<{
@@ -1923,14 +1808,10 @@ const RangeQueryOneRequired = struct {
 };
 
 test "extractQueryParams: gated group with a single required key" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(RangeQueryOneRequired);
     try expectContent(
         \\XOR<{
@@ -1951,14 +1832,10 @@ const AnyOfQuery = struct {
 };
 
 test "extractQueryParams: any_of constraint wraps the object in AnyOf" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
+    var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
+    var type_generator = TypeGenerator.init(arena.allocator());
     const parse_result = try type_generator.extractQueryParams(AnyOfQuery);
     try expectContent(
         \\AnyOf<{
@@ -1989,24 +1866,17 @@ const LostProdEndpoint = struct {
 };
 
 test "generateTypes: public union query params are exported and referenced by name" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/company/lost-production", LostProdEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try std.testing.expect(
-        std.mem.indexOf(u8, output, "export type LostProductionQueryParams =") != null,
+        std.mem.indexOf(u8, output.codegen, "export type LostProductionQueryParams =") != null,
     );
 
     // Referenced by name at the endpoint rather than inlined as the raw type
     try std.testing.expect(
-        std.mem.indexOf(u8, output, "queryParams: LostProductionQueryParams") != null,
+        std.mem.indexOf(u8, output.codegen, "queryParams: LostProductionQueryParams") != null,
     );
 }
 
@@ -2036,19 +1906,12 @@ const DscQueryReportEndpoint = struct {
 };
 
 test "generateTypes: union query param with a paramParse leaf, shared by two endpoints" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{
         .{ "/company/dsc", DscQueryEndpoint },
         .{ "/company/dsc/report", DscQueryReportEndpoint },
     };
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try expectContent(
         \\ export type DscQuery =
@@ -2074,7 +1937,7 @@ test "generateTypes: union query param with a paramParse leaf, shared by two end
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 test "generateTypes: public struct query param coerces paramParse leaves into string" {
@@ -2092,16 +1955,9 @@ test "generateTypes: public struct query param coerces paramParse leaves into st
         }
     };
 
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/date-filter", DateFilterEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try expectContent(
         \\ export type DateFilter =
@@ -2124,7 +1980,7 @@ test "generateTypes: public struct query param coerces paramParse leaves into st
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 const AlertTopic = enum { downtime, lost_production };
@@ -2152,18 +2008,12 @@ const AlertsEndpoint = struct {
 };
 
 test "generateTypes: tagged union used in a response is exported by name" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/alerts", AlertsEndpoint }};
 
     // The tagged union is exported as a named top-level type
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
+
     try expectContent(
         \\ export type Alert =
         \\   {
@@ -2198,7 +2048,7 @@ test "generateTypes: tagged union used in a response is exported by name" {
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 // A second endpoint whose response uses the same `Alert` type.
@@ -2211,24 +2061,17 @@ const AlertsImportEndpoint = struct {
 };
 
 test "generateTypes: same tagged union reached from two endpoints is exported once" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{
         .{ "/alerts", AlertsEndpoint },
         .{ "/company/alerts", AlertsImportEndpoint },
     };
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     // Exported exactly once despite being referenced from both endpoints
     try std.testing.expectEqual(
         1,
-        std.mem.count(u8, output, "export type AlertPayload ="),
+        std.mem.count(u8, output.codegen, "export type AlertPayload ="),
     );
 }
 
@@ -2256,16 +2099,8 @@ const NotifEndpoint = struct {
 };
 
 test "generateTypes: a public tagged-union decl exports as object-of-variants, not XOR" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     const endpoints = [_]EndpointDef{.{ "/notif", NotifEndpoint }};
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
     try expectContent(
         \\ export type Notif =
         \\   {
@@ -2300,7 +2135,7 @@ test "generateTypes: a public tagged-union decl exports as object-of-variants, n
         \\   PATCH: {},
         \\   DELETE: {},
         \\ };
-    , output);
+    , output.codegen);
 }
 
 // A child struct declared as a top-level type in its own endpoint file
@@ -2330,14 +2165,6 @@ const ReportEndpoint = struct {
 };
 
 test "generateTypes: a type declared in another endpoint is referenced by name, not inlined" {
-    const alloc = std.testing.allocator;
-
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-
-    var type_generator = try TypeGenerator.init(arena.allocator());
-    defer type_generator.deinit();
-
     // Order matters: the referencing endpoint (/report) comes first, so `ReportRow` is still an
     // unrendered pass-1 placeholder when `Report`'s `rows` field is generated in pass 2. This is
     // the exact condition that previously caused the child to be inlined instead of referenced.
@@ -2345,15 +2172,16 @@ test "generateTypes: a type declared in another endpoint is referenced by name, 
         .{ "/report", ReportEndpoint },
         .{ "/report/row", ReportRowEndpoint },
     };
-    const output = try type_generator.generateTypes(&endpoints);
+    const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     // The parent references the child by name...
     try std.testing.expect(
-        std.mem.indexOf(u8, output, "rows: ReportRow[]") != null,
+        std.mem.indexOf(u8, output.codegen, "rows: ReportRow[]") != null,
     );
     // ...and the child is still exported as its own top-level type.
     try std.testing.expect(
-        std.mem.indexOf(u8, output, "export type ReportRow =") != null,
+        std.mem.indexOf(u8, output.codegen, "export type ReportRow =") != null,
     );
 }
 

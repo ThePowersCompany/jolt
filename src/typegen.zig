@@ -23,10 +23,6 @@ pub fn generateTypesFile(
     ts_file_name: []const u8,
     endpoints: []const EndpointDef,
 ) !void {
-    var arena = ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const arena_alloc = arena.allocator();
-
     var ts: ArrayList(u8) = .empty;
     defer ts.deinit(alloc);
 
@@ -44,16 +40,16 @@ pub fn generateTypesFile(
     try ts.appendSlice(alloc, PrivateUtilityTypes);
     try ts.appendSlice(alloc, "\n\n");
 
-    var type_generator = try TypeGenerator.init(arena_alloc);
-    defer type_generator.deinit();
+    var gen_result = try TypeGenerator.run(alloc, endpoints);
+    defer gen_result.deinit();
 
-    try ts.appendSlice(alloc, try type_generator.generateTypes(endpoints));
+    try ts.appendSlice(alloc, gen_result.codegen);
 
     const file = try std.fs.cwd().createFile(ts_file_name, .{ .read = true });
     defer file.close();
     try file.writeAll(ts.items);
 
-    try formatWithPrettier(arena_alloc, ts_file_name);
+    try formatWithPrettier(alloc, ts_file_name);
 }
 
 /// Uses prettier to format the given TS file.
