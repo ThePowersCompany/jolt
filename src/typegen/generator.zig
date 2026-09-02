@@ -99,27 +99,33 @@ pub const TypeGenerator = struct {
     }
 
     /// Returns a top-level reference when `T` is registered, rendering it on first use.
-    /// An entry with a context but no parse result is currently rendering and breaks recursion.
     fn resolveTopLevelType(self: *Self, comptime T: type) !?ParseResult {
-        // TODO return null if T isn't a named type
-        const entry = self.top_level_types.getPtr(@typeName(T)) orelse {
-            // TODO if not added yet, then start to parse the type
-            return null;
-        };
-        if (@typeInfo(T) != .@"enum" and entry.context != self.parse_context) {
-            return error.TopLevelTypeUsedInMultipleContexts;
-        }
-        return entry.parsed orelse {
-            // Parsing in-progress, handle recursion by returning public identifier name
-            return .{ .codegen = entry.name };
-        };
+        // This `entry` pointer should remain valid during parsing
+        // since the top level types shouldn't be modified after the initial scan.
+        const entry = self.top_level_types.getPtr(@typeName(T)) orelse return null;
+        const name = entry.name;
 
-        // const result = self.parseNamedType(T, context) catch |err| {
-        //     entry.context = null;
-        //     return err;
-        // };
-        // try self.setTopLevelTypeParseResult(T, result);
-        // return .{ .codegen = entry.name, .optional = result.optional };
+        // An entry with a context but no parse result is currently rendering.
+        if (entry.context) |previous| {
+            // Different parsing contexts may produce different codegen
+            if (@typeInfo(T) != .@"enum" and previous != self.parse_context) {
+                return error.TopLevelTypeUsedInMultipleContexts;
+            }
+            return .{
+                .codegen = name,
+                .optional = if (entry.parsed) |result| result.optional else false,
+            };
+        }
+        entry.context = self.parse_context;
+
+        // Parse and store the result in the top level type map so it can be emitted later
+        const result = self.parseTopLevelType(T) catch |err| {
+            entry.context = null;
+            return err;
+        };
+        entry.parsed = result;
+
+        return .{ .codegen = name, .optional = result.optional };
     }
 
     /// Gets the canonical shortened name of the full type name.
