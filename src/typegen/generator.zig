@@ -1369,31 +1369,13 @@ test "generateTypes: rejects imported types with the same canonical name" {
         }
     };
 
-    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/shared", Endpoint }});
-    defer output.deinit();
-
-    try expectContent(
-        \\ export type First = {
-        \\   id: number
-        \\ }
-        \\
-        \\ export type Second = {
-        \\   label: string
-        \\ }
-        \\
-        \\ export type Spec = {
-        \\   GET: {},
-        \\   POST: {
-        \\     "/shared": {
-        \\       body: First
-        \\       response: Second,
-        \\     }
-        \\   },
-        \\   PUT: {},
-        \\   PATCH: {},
-        \\   DELETE: {},
-        \\ };
-    , output.codegen);
+    try std.testing.expectError(
+        error.DuplicateDeclaration,
+        TypeGenerator.run(std.testing.allocator, &.{
+            .{ "/first", FirstEndpoint },
+            .{ "/second", SecondEndpoint },
+        }),
+    );
 }
 
 const TypeScriptOpaqueId = struct {
