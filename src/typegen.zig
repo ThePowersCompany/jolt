@@ -54,8 +54,11 @@ pub fn generateTypesFile(
 
 /// Uses prettier to format the given TS file.
 fn formatWithPrettier(alloc: Allocator, file_name: []const u8) !void {
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
     const result = try std.process.Child.run(.{
-        .allocator = alloc,
+        .allocator = arena.allocator(),
         .argv = &[_][]const u8{
             "npx",
             "prettier",
