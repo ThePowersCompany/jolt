@@ -98,22 +98,6 @@ pub const TypeGenerator = struct {
         };
     }
 
-    /// Registers a new top-level type and returns the public identifier name for the type.
-    fn addTopLevelType(self: *Self, comptime T: type, context: ParseContext) ![]const u8 {
-        const type_name = @typeName(T);
-        const name = shortTypeName(type_name);
-        // Check if public identifier name has already been added
-        var types_iter = self.top_level_types.valueIterator();
-        while (types_iter.next()) |entry| {
-            if (strEqls(entry.name, name)) return error.DuplicateDeclaration;
-        }
-        // Otherwise, continue adding named type
-        const res = try self.top_level_types.getOrPut(self.arena_alloc, type_name);
-        if (res.found_existing) return error.DuplicateTypeName;
-        res.value_ptr.* = .{ .name = name, .context = context };
-        return name;
-    }
-
     /// Returns a top-level reference when `T` is registered, rendering it on first use.
     /// An entry with a context but no parse result is currently rendering and breaks recursion.
     fn resolveTopLevelType(self: *Self, comptime T: type) !?ParseResult {
@@ -269,7 +253,8 @@ pub const TypeGenerator = struct {
             };
             comptime if (!shouldDeclareTopLevel(T)) continue;
 
-            const canonical_name = comptime shortTypeName(@typeName(T));
+            const type_name = @typeName(T);
+            const canonical_name = comptime shortTypeName(type_name);
             if (!strEqls(decl.name, canonical_name)) {
                 std.log.info(
                     "Public type declaration {s} must use its canonical name {s}.",
@@ -278,8 +263,11 @@ pub const TypeGenerator = struct {
                 return error.NonCanonicalTypeName;
             }
 
-            if (!self.top_level_types.contains(@typeName(T))) {
-                try self.addTopLevelType(T, decl.name);
+            // Register top level type
+            const result = try self.top_level_types.getOrPut(self.arena_alloc, type_name);
+            if (!result.found_existing) {
+                // No need to check for differing decl names because it's guaranteed to be canonical
+                result.value_ptr.* = .{ .name = canonical_name };
             }
         }
     }
