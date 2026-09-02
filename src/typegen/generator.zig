@@ -1482,6 +1482,7 @@ const ReprEpochMillisEndpoint = struct {
 test "custom _repr structs generate their numeric wire type" {
     const endpoints = [_]EndpointDef{.{ "/custom-json-type", ReprEpochMillisEndpoint }};
     const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
 
     try expectContent(
         \\export type Body = {
@@ -2220,6 +2221,7 @@ const NotifEndpoint = struct {
 test "generateTypes: a public tagged-union payload exports by name while its private container is inline" {
     const endpoints = [_]EndpointDef{.{ "/notif", NotifEndpoint }};
     const output = try TypeGenerator.run(std.testing.allocator, &endpoints);
+    defer output.deinit();
     try expectContent(
         \\ export type NotifPayload =
         \\   {
