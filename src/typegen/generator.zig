@@ -246,6 +246,35 @@ pub const TypeGenerator = struct {
         }
     }
 
+    /// Register an individual top level type:
+    /// `type_name`: The internal name of the Zig type.
+    /// `canonical_name`: The public declaration name within the endpoint file.
+    fn registerTopLevelType(
+        self: *Self,
+        type_name: []const u8,
+        canonical_name: []const u8,
+    ) !void {
+        // Same type can be imported and then exported as `pub` from multiple endpoint files.
+        if (self.top_level_types.contains(type_name)) return;
+
+        // Verify that there isn't another top level type occupying this canonical name.
+        // Otherwise, this would result in one exported alias pointing to two different codegen types
+        var types_iter = self.top_level_types.valueIterator();
+        while (types_iter.next()) |entry| {
+            if (strEqls(entry.name, canonical_name)) return error.DuplicateDeclaration;
+        }
+
+        // Register top level type
+        try self.top_level_types.putNoClobber(
+            self.arena_alloc,
+            type_name,
+            .{ .name = canonical_name },
+        );
+    }
+
+    /// Scan an endpoint file for all top-level defined types.
+    /// These top level types must be named according to their canonical type name,
+    /// which will be used for their exported type aliases in the codegen.
     fn registerEndpointTopLevelTypes(self: *Self, endpoint: EndpointDef) !void {
         _, const Endpoint = endpoint;
         inline for (@typeInfo(Endpoint).@"struct".decls) |decl| {
@@ -257,11 +286,11 @@ pub const TypeGenerator = struct {
                 .@"struct", .@"enum", .@"union" => {},
                 else => continue,
             };
-            comptime if (!shouldDeclareTopLevel(T)) continue;
+            comptime if (typescriptRepr(T) != null) continue;
 
-            const type_name = @typeName(T);
+            const type_name = comptime @typeName(T);
             const canonical_name = comptime shortTypeName(type_name);
-            if (!strEqls(decl.name, canonical_name)) {
+            if (comptime !strEqls(decl.name, canonical_name)) {
                 std.log.info(
                     "Public type declaration {s} must use its canonical name {s}.",
                     .{ decl.name, canonical_name },
@@ -269,12 +298,7 @@ pub const TypeGenerator = struct {
                 return error.NonCanonicalTypeName;
             }
 
-            // Register top level type
-            const result = try self.top_level_types.getOrPut(self.arena_alloc, type_name);
-            if (!result.found_existing) {
-                // No need to check for differing decl names because it's guaranteed to be canonical
-                result.value_ptr.* = .{ .name = canonical_name };
-            }
+            try self.registerTopLevelType(type_name, decl.name);
         }
     }
 
@@ -1074,10 +1098,6 @@ fn typescriptRepr(comptime T: type) ?type {
         @compileError("_repr on " ++ @typeName(T) ++ " must be a type or UnionRepr");
 
     return T._repr;
-}
-
-fn shouldDeclareTopLevel(comptime T: type) bool {
-    return comptime typescriptRepr(T) == null;
 }
 
 const AdjacentUnion = struct {
