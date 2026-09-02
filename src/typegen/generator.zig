@@ -178,14 +178,14 @@ pub const TypeGenerator = struct {
 
             var iter = self.top_level_types.iterator();
             while (iter.next()) |top| {
-                const named_type = top.value_ptr;
-                const result = named_type.parsed orelse continue;
+                const top_level_type = top.value_ptr;
+                const result = top_level_type.parsed orelse continue;
                 try entries.append(self.arena_alloc, .{
                     .type_name = top.value_ptr.name,
                     .ts = try allocPrint(
                         self.arena_alloc,
                         "export type {s} =\n{s}\n\n",
-                        .{ named_type.name, result.codegen },
+                        .{ top_level_type.name, result.codegen },
                     ),
                 });
             }
