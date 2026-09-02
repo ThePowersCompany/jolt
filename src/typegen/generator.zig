@@ -987,9 +987,11 @@ pub const TypeGenerator = struct {
 
                 return switch (type_info.pointer.size) {
                     .one => self.extractIdentifierInner(type_info.pointer.child, ancestors),
-                    else => .{ .parsed = try allocPrint(self.arena_alloc, "{s}[]", .{
-                        (try self.extractIdentifierInner(type_info.pointer.child, ancestors)).parsed,
-                    }) },
+                    else => .{
+                        .codegen = try allocPrint(self.arena_alloc, "{s}[]", .{
+                            (try self.extractIdentifierInner(type_info.pointer.child, ancestors)).codegen,
+                        }),
+                    },
                 };
             },
             .@"struct" => |s| {
@@ -1006,9 +1008,9 @@ pub const TypeGenerator = struct {
                 // Wrap the emitted object in the matching TS utility type(s)
                 // if any constraints should be applied.
                 if (@hasDecl(T, "constraints")) {
-                    return try self.applyConstraints(T.constraints, parsed);
+                    return try self.applyConstraints(T.constraints, res);
                 }
-                return parsed;
+                return res;
             },
             .@"enum" => {
                 return .{ .codegen = try self.parseEnum(type_info.@"enum") };
