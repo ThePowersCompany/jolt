@@ -140,7 +140,7 @@ pub const TypeGenerator = struct {
     }
 
     /// The output string should be allocated with `alloc`, not the arena inside `Self`.
-    pub fn generateTypes(self: *Self, alloc: Allocator, comptime endpoints: []const EndpointDef) !ArrayList(u8) {
+    fn generateTypes(self: *Self, alloc: Allocator, comptime endpoints: []const EndpointDef) !ArrayList(u8) {
         @setEvalBranchQuota(endpoints.len * 2000);
 
         // Register every public top-level declaration before resolving endpoint usage.
