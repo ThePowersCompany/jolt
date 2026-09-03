@@ -335,19 +335,11 @@ pub const TypeGenerator = struct {
                 res.value_ptr.body = "body: BodyInit\n";
             } else {
                 const body_res = try self.extractIdentifier(body_type);
-                if (body_res.optional) {
-                    res.value_ptr.body = try allocPrint(
-                        self.arena_alloc,
-                        "body?: {s}\n",
-                        .{body_res.codegen},
-                    );
-                } else {
-                    res.value_ptr.body = try allocPrint(
-                        self.arena_alloc,
-                        "body: {s}\n",
-                        .{body_res.codegen},
-                    );
-                }
+                res.value_ptr.body = try allocPrint(
+                    self.arena_alloc,
+                    "body: {s}\n",
+                    .{body_res.codegen},
+                );
             }
         }
         if (@hasField(S, "query_params")) {
@@ -1363,9 +1355,8 @@ test "generateTypes: an all-optional object still requires the body" {
     const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/filter", Endpoint }});
     defer output.deinit();
 
-    // TODO: parseBody middleware still rejects a request with no body.
-    // Propagating Body's `all_optional` result to the endpoint currently emits `body?: Body`,
-    // allowing clients to construct a request that the server will reject.
+    // parseBody rejects a request with no body, even when every field has a default.
+    // The generated endpoint must therefore require the body itself.
     try expectContent(
         \\ export type Body = {
         \\   filter?: number | null
