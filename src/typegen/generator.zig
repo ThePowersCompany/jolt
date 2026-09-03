@@ -444,7 +444,7 @@ pub const TypeGenerator = struct {
 
             const parse_result = try self.extractIdentifierInner(field.type, ancestors);
 
-            const optional = if (field.defaultValue()) |_| true else parse_result.optional;
+            const optional = field.defaultValue() != null;
 
             all_optional = all_optional and optional;
             if (optional) {
