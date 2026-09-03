@@ -1377,6 +1377,34 @@ test "generateTypes: an all-optional object still requires the body" {
     , output.codegen);
 }
 
+test "generateTypes: a DELETE endpoint without a body forbids one" {
+    const Endpoint = struct {
+        const Context = struct {};
+        const Response = struct { body: ?bool = null };
+        pub fn delete(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/items", Endpoint }});
+    defer output.deinit();
+
+    try expectContent(
+        \\ export type Spec = {
+        \\   GET: {},
+        \\   POST: {},
+        \\   PUT: {},
+        \\   PATCH: {},
+        \\   DELETE: {
+        \\     "/items": {
+        \\       body?: never,
+        \\       response: boolean,
+        \\     }
+        \\   },
+        \\ };
+    , output.codegen);
+}
+
 test "generateTypes: rejects reachable duplicate exported type names" {
     const FirstEndpoint = struct {
         pub const Shared = struct { first: u32 };
