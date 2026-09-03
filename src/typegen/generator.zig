@@ -484,6 +484,14 @@ pub const TypeGenerator = struct {
         };
     }
 
+    const AdjacentUnion = struct {
+        /// The discriminator of an adjacently tagged union.
+        /// Only one field in a struct may be this type of union.
+        discriminator: []const u8,
+        /// The full type name of the Union.
+        name: []const u8,
+    };
+
     fn parseStructWithAdjacentUnion(
         self: *Self,
         S: Type.Struct,
@@ -1094,14 +1102,6 @@ fn typescriptRepr(comptime T: type) ?type {
 
     return T._repr;
 }
-
-const AdjacentUnion = struct {
-    /// The discriminator of an adjacently tagged union.
-    /// Only one field in a struct may be this type of union.
-    discriminator: []const u8,
-    /// The full type name of the Union.
-    name: []const u8,
-};
 
 fn renderPathContains(comptime ancestors: anytype, comptime T: type) bool {
     inline for (ancestors) |ancestor| {
