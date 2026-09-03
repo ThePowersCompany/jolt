@@ -26,6 +26,7 @@ const isLiftableUnion = unions_mod.isLiftableUnion;
 
 const expectEqual = std.testing.expectEqual;
 const expectContent = @import("../utils/testing.zig").expectContent;
+const expectContentContains = @import("../utils/testing.zig").expectContentContains;
 
 const EndpointMethod = enum {
     get,
@@ -1219,6 +1220,61 @@ test "generateTypes: supports recursive types" {
     , output.codegen);
 }
 
+test "generateTypes: mutually recursive type optionality is independent of endpoint order" {
+    const RecursiveTypes = struct {
+        pub const A = struct { b: *B };
+        pub const B = struct { a: ?*A = null };
+    };
+    const EndpointA = struct {
+        pub const A = RecursiveTypes.A;
+        pub const B = RecursiveTypes.B;
+
+        const Context = struct {};
+        const Response = struct { body: ?A = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+    const EndpointB = struct {
+        pub const A = RecursiveTypes.A;
+        pub const B = RecursiveTypes.B;
+
+        const Context = struct {};
+        const Response = struct { body: ?B = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    const a_first = try TypeGenerator.run(std.testing.allocator, &.{
+        .{ "/a", EndpointA },
+        .{ "/b", EndpointB },
+    });
+    defer a_first.deinit();
+
+    const b_first = try TypeGenerator.run(std.testing.allocator, &.{
+        .{ "/b", EndpointB },
+        .{ "/a", EndpointA },
+    });
+    defer b_first.deinit();
+
+    // A recursive reference currently receives `optional = false`
+    // while its target is being rendered.
+    // That provisional value leaks into the completed type,
+    // so reversing the endpoints changes `A.b` from required to optional.
+    // The same types must have the same shape regardless of which endpoint first makes them reachable.
+    try expectContentContains(
+        \\ export type A = {
+        \\   b: B
+        \\ }
+    , a_first.codegen);
+    try expectContentContains(
+        \\ export type A = {
+        \\   b: B
+        \\ }
+    , b_first.codegen);
+}
+
 test "generateTypes: rejects private recursive response types" {
     const Endpoint = struct {
         const Node = struct {
@@ -1293,7 +1349,7 @@ test "generateTypes: supports public recursive structs containing adjacently tag
     , output.codegen);
 }
 
-test "generateTypes: preserves the optionality of a rendered public body type" {
+test "generateTypes: an all-optional object still requires the body" {
     const Endpoint = struct {
         pub const Body = struct { filter: ?u32 = null };
 
@@ -1307,6 +1363,9 @@ test "generateTypes: preserves the optionality of a rendered public body type" {
     const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/filter", Endpoint }});
     defer output.deinit();
 
+    // TODO: parseBody middleware still rejects a request with no body.
+    // Propagating Body's `all_optional` result to the endpoint currently emits `body?: Body`,
+    // allowing clients to construct a request that the server will reject.
     try expectContent(
         \\ export type Body = {
         \\   filter?: number | null
@@ -1316,7 +1375,7 @@ test "generateTypes: preserves the optionality of a rendered public body type" {
         \\   GET: {},
         \\   POST: {
         \\     "/filter": {
-        \\       body?: Body
+        \\       body: Body
         \\       response: boolean,
         \\     }
         \\   },
@@ -1356,22 +1415,71 @@ test "generateTypes: rejects reachable duplicate exported type names" {
     );
 }
 
-test "generateTypes: rejects non-canonical public type names" {
-    const imported_types = @import("test_types/same_name_a.zig");
-    const Endpoint = struct {
-        pub const ApiShared = imported_types.Shared;
+test "generateTypes: ignores duplicate exported names when neither type is reachable" {
+    const FirstEndpoint = struct {
+        pub const Metadata = struct { first: u32 };
 
         const Context = struct {};
-        const Response = struct { body: ?ApiShared = null };
+        const Response = struct { body: ?bool = null };
+        pub fn get(_: *Context) Response {
+            return .{};
+        }
+    };
+    const SecondEndpoint = struct {
+        pub const Metadata = struct { second: []const u8 };
+
+        const Context = struct {};
+        const Response = struct { body: ?bool = null };
         pub fn get(_: *Context) Response {
             return .{};
         }
     };
 
-    try std.testing.expectError(
-        error.NonCanonicalTypeName,
-        TypeGenerator.run(std.testing.allocator, &.{.{ "/shared", Endpoint }}),
-    );
+    // Lazy rendering omits unreachable declarations,
+    // so these two Metadata types cannot collide in the generated TypeScript.
+    // Registration currently rejects them before reachability is known,
+    // causing unrelated pub types to break typegen.
+    const output = try TypeGenerator.run(std.testing.allocator, &.{
+        .{ "/first", FirstEndpoint },
+        .{ "/second", SecondEndpoint },
+    });
+    defer output.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.codegen, "export type Metadata") == null);
+}
+
+fn Box(comptime T: type) type {
+    return struct { value: T };
+}
+
+test "generateTypes: permits aliased generic types" {
+    const Foo = struct { foo: u32 };
+    const Bar = struct { bar: []const u8 };
+
+    const Endpoint = struct {
+        pub const FooBox = Box(Foo);
+        pub const BarBox = Box(Bar);
+
+        const Context = struct { body: FooBox };
+        const Response = struct { body: ?BarBox = null };
+        pub fn post(_: *Context) Response {
+            return .{};
+        }
+    };
+
+    // TODO: Type aliases need deterministic conflict handling:
+    // - Different Zig types + different export names: allow
+    //   (FooBox and BarBox both have a canonical name "Box")
+    // - Same Zig type + same export name: deduplicate
+    // - Same Zig type + different export names: error as ambiguous
+    // - Different Zig types + same export name: return DuplicateDeclaration
+    const output = try TypeGenerator.run(std.testing.allocator, &.{.{ "/boxes", Endpoint }});
+    defer output.deinit();
+
+    try expectContentContains("export type FooBox =", output.codegen);
+    try expectContentContains("export type BarBox =", output.codegen);
+    try expectContentContains("body: FooBox", output.codegen);
+    try expectContentContains("response: BarBox", output.codegen);
 }
 
 test "generateTypes: rejects imported types with the same canonical name" {

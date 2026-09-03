@@ -13,6 +13,40 @@ pub fn expectContent(expected: []const u8, actual: []const u8) !void {
     try std.testing.expectEqualStrings(s1, s2);
 }
 
+/// Checks that `actual` contains `expected`, ignoring whitespace in both strings.
+pub fn expectContentContains(expected: []const u8, actual: []const u8) !void {
+    const alloc = std.testing.allocator;
+    const stripped_expected = try stripWhitespace(alloc, expected);
+    defer alloc.free(stripped_expected);
+
+    const stripped_actual = try stripWhitespace(alloc, actual);
+    defer alloc.free(stripped_actual);
+
+    if (std.mem.indexOf(u8, stripped_actual, stripped_expected) != null) return;
+
+    std.debug.print(
+        \\====== expected output to contain: ======
+        \\{s}
+        \\============ full output: ===============
+        \\{s}
+        \\==========================================
+        \\
+    , .{ expected, actual });
+    return error.TestExpectedEqual;
+}
+
+test "expectContentContains ignores whitespace outside and within the match" {
+    try expectContentContains(
+        \\type Item = {
+        \\  value: string
+        \\}
+    ,
+        \\foo
+        \\type Item={value:string}
+        \\bar
+    );
+}
+
 fn stripWhitespace(alloc: Allocator, str: []const u8) ![]const u8 {
     var chars: std.ArrayList(u8) = .empty;
     for (str) |c| if (!std.ascii.isWhitespace(c)) {
