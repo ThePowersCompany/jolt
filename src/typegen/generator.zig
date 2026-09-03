@@ -86,6 +86,7 @@ pub const TypeGenerator = struct {
 
         var gen: Self = .init(arena.allocator());
         var res = try gen.generateTypes(alloc, endpoints);
+        defer res.deinit(alloc);
         return .{ .alloc = alloc, .codegen = try res.toOwnedSlice(alloc) };
     }
 
@@ -150,6 +151,7 @@ pub const TypeGenerator = struct {
         inline for (endpoints) |endpoint| try self.populateEndpointTypescript(endpoint);
 
         var res: ArrayList(u8) = .empty;
+        errdefer res.deinit(alloc);
 
         {
             // Print top-level types
