@@ -1250,11 +1250,6 @@ test "generateTypes: mutually recursive type optionality is independent of endpo
     });
     defer b_first.deinit();
 
-    // A recursive reference currently receives `optional = false`
-    // while its target is being rendered.
-    // That provisional value leaks into the completed type,
-    // so reversing the endpoints changes `A.b` from required to optional.
-    // The same types must have the same shape regardless of which endpoint first makes them reachable.
     try expectContentContains(
         \\ export type A = {
         \\   b: B
