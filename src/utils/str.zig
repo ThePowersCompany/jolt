@@ -34,8 +34,8 @@ pub fn Str(comptime T: type) type {
             }
         }
 
-        pub fn bind(self: *const Self, stmt: *pg.Stmt) !void {
-            try stmt.bind(self.str);
+        pub fn toPgzParam(self: *const Self) []const u8 {
+            return self.str;
         }
     };
 }
