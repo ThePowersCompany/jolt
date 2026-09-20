@@ -65,7 +65,10 @@ pub const Date = struct {
 
     /// Query parameter parsing support in strict YYYY-MM-DD format
     pub fn paramParse(_: Allocator, input: []const u8) !Date {
-        return try parse(input, .rfc3339);
+        const date = try parse(input, .rfc3339);
+        // API date inputs must be representable as postgres dates, which start at year 1
+        if (date.year == 0) return error.InvalidDate;
+        return date;
     }
 
     pub fn isValidDate(input: []const u8, fmt: Format) bool {
@@ -121,7 +124,7 @@ pub const Date = struct {
         _ = options;
 
         switch (try source.nextAlloc(allocator, .alloc_if_needed)) {
-            inline .string, .allocated_string => |str| return Date.parse(str, .rfc3339) catch return error.InvalidCharacter,
+            inline .string, .allocated_string => |str| return Date.paramParse(allocator, str) catch return error.InvalidCharacter,
             else => return error.UnexpectedToken,
         }
     }
