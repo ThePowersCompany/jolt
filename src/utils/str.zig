@@ -34,27 +34,23 @@ pub fn Str(comptime T: type) type {
             }
         }
 
-        pub fn toPgzParam(self: *const Self) []const u8 {
-            return self.str;
-        }
-
         pub fn jsonStringify(self: Self, out: anytype) !void {
             try out.write(self.str);
+        }
+
+        pub fn toPgzParam(self: *const Self) []const u8 {
+            return self.str;
         }
 
         pub fn fromPgzRow(value: pg.Result.State.Value, _: i32) !Self {
             if (value.is_null) return error.UnexpectedNull;
             // Row decoding cannot allocate, the string is borrowed
-            var buffer = std.heap.FixedBufferAllocator.init(&.{});
+            var buffer = std.heap.FixedBufferAllocator.init("");
             return paramParse(buffer.allocator(), value.data) catch return error.InvalidType;
         }
 
         pub fn pgzMoveOwner(self: Self, alloc: Allocator) !Self {
             return .{ .str = try alloc.dupe(u8, self.str), .data = self.data };
-        }
-
-        pub fn bind(self: *const Self, stmt: *pg.Stmt) !void {
-            try stmt.bind(self.str);
         }
     };
 }
