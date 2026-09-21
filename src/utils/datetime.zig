@@ -65,7 +65,10 @@ pub const Date = struct {
 
     /// Query parameter parsing support in strict YYYY-MM-DD format
     pub fn paramParse(_: Allocator, input: []const u8) !Date {
-        return try parse(input, .rfc3339);
+        const date = try parse(input, .rfc3339);
+        // API date inputs must be representable as postgres dates, which start at year 1
+        if (date.year == 0) return error.InvalidDate;
+        return date;
     }
 
     pub fn isValidDate(input: []const u8, fmt: Format) bool {
@@ -121,7 +124,7 @@ pub const Date = struct {
         _ = options;
 
         switch (try source.nextAlloc(allocator, .alloc_if_needed)) {
-            inline .string, .allocated_string => |str| return Date.parse(str, .rfc3339) catch return error.InvalidCharacter,
+            inline .string, .allocated_string => |str| return Date.paramParse(allocator, str) catch return error.InvalidCharacter,
             else => return error.UnexpectedToken,
         }
     }
@@ -312,7 +315,7 @@ pub const DateTime = struct {
         }
     }
 
-    /// Query parameter parsing support in strict YYYY-MM-DDTHH:MM:SSZ format
+    /// Parse RFC 3339 with Z or a numeric UTC offset
     pub fn paramParse(_: Allocator, input: []const u8) !DateTime {
         return try parse(input, .rfc3339);
     }
@@ -335,24 +338,30 @@ pub const DateTime = struct {
 
         const tm = try parser.time();
 
+        var offset_minutes: i64 = 0;
         switch (parser.unconsumed()) {
             0 => return error.InvalidDateTime,
             1 => if (parser.consumeIf('Z') == false) {
                 return error.InvalidDateTime;
             },
             6 => {
-                const suffix = parser.rest();
-                if (suffix[0] != '+' and suffix[0] != '-') {
-                    return error.InvalidDateTime;
-                }
-                if (std.mem.eql(u8, suffix[1..], "00:00") == false) {
-                    return error.NonUTCNotSupported;
-                }
+                const negative_offset = parser.consumeIf('-');
+                if (!negative_offset and !parser.consumeIf('+')) return error.InvalidDateTime;
+
+                const hours = parser.paddedInt(u8, 2) orelse return error.InvalidDateTime;
+                if (!parser.consumeIf(':')) return error.InvalidDateTime;
+
+                const minutes = parser.paddedInt(u8, 2) orelse return error.InvalidDateTime;
+                if (hours > 23 or minutes > 59) return error.InvalidDateTime;
+
+                offset_minutes = @as(i64, hours) * 60 + minutes;
+                if (negative_offset) offset_minutes = -offset_minutes;
             },
             else => return error.InvalidDateTime,
         }
 
-        return initUTC(dt.year, dt.month, dt.day, tm.hour, tm.min, tm.sec, tm.nanos);
+        const local = try initUTC(dt.year, dt.month, dt.day, tm.hour, tm.min, tm.sec, tm.nanos);
+        return local.add(-offset_minutes, .minutes);
     }
 
     pub fn add(dt: DateTime, value: i64, unit: TimeUnit) DateTime {
@@ -820,4 +829,31 @@ pub fn diffInDays(start_date: []const u8, end_date: []const u8) !i32 {
 test {
     const days: i32 = try diffInDays("2025-03-01", "2025-03-04");
     try std.testing.expect(days == 3);
+}
+
+test "RFC3339 offsets normalize to the same UTC instant" {
+    const expected = try DateTime.parseRFC3339("2026-01-01T00:15:30.123456Z");
+    for ([_][]const u8{
+        "2026-01-01T00:15:30.123456+00:00",
+        "2026-01-01T00:15:30.123456-00:00",
+        "2025-12-31T15:15:30.123456-09:00",
+        "2026-01-01T05:45:30.123456+05:30",
+        "2026-01-01T06:00:30.123456+05:45",
+    }) |input| {
+        const actual = try DateTime.parseRFC3339(input);
+        try std.testing.expectEqual(expected.unix(.microseconds), actual.unix(.microseconds));
+    }
+}
+
+test "RFC3339 rejects malformed or out of range offsets" {
+    for ([_][]const u8{
+        "2026-01-01T00:00:00+24:00",
+        "2026-01-01T00:00:00-09:60",
+        "2026-01-01T00:00:00+05x30",
+        "2026-01-01T00:00:00+ab:cd",
+        "2026-01-01T00:00:00+0530",
+        "2026-01-01T00:00:00",
+    }) |input| {
+        try std.testing.expectError(error.InvalidDateTime, DateTime.parseRFC3339(input));
+    }
 }
