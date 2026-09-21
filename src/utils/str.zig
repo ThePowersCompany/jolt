@@ -56,6 +56,7 @@ pub fn Str(comptime T: type) type {
 }
 
 const DateStr = Str(@import("datetime.zig").Date);
+const DateTimeStr = Str(@import("datetime.zig").DateTime);
 
 test "paramParse date string" {
     const parsed = try DateStr.paramParse(std.testing.allocator, "1970-01-01");
@@ -94,9 +95,10 @@ test "pgzMoveOwner copies the string and preserves the parsed date" {
 }
 
 test "fromPgzRow accepts date text regardless of the column OID" {
-    const value = pg.Result.State.Value{ .is_null = false, .data = "2026-09-19" };
-    const date = try DateStr.fromPgzRow(value, pg.types.Int32.oid.decimal);
-
+    const date = try DateStr.fromPgzRow(
+        .{ .is_null = false, .data = "2026-09-19" },
+        pg.types.Int32.oid.decimal,
+    );
     try std.testing.expectEqualStrings("2026-09-19", date.str);
 }
 
@@ -129,4 +131,27 @@ test "date string input rejects year zero" {
         error.InvalidCharacter,
         std.json.parseFromSlice(DateStr, std.testing.allocator, "\"0000-01-01\"", .{}),
     );
+}
+
+test "fromPgzRow preserves a datetime offset" {
+    const timestamp = "2026-01-01T12:00:00-09:00";
+    const parsed = try DateTimeStr.fromPgzRow(
+        .{ .is_null = false, .data = timestamp },
+        pg.types.String.oid.decimal,
+    );
+
+    try std.testing.expectEqualStrings(timestamp, parsed.str);
+}
+
+test "JSON round trip preserves a datetime offset" {
+    const alloc = std.testing.allocator;
+    const json = "\"2026-01-01T12:00:00-09:00\"";
+
+    const parsed = try std.json.parseFromSlice(DateTimeStr, alloc, json, .{});
+    defer parsed.deinit();
+
+    const output = try std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
+    defer alloc.free(output);
+
+    try std.testing.expectEqualStrings(json, output);
 }
