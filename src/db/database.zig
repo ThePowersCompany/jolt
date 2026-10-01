@@ -60,6 +60,7 @@ var err_map = std.StaticStringMap(PGError).initComptime(.{
     .{ "23503", PGError.ForeignKey },
     .{ "23505", PGError.Unique },
     .{ "23514", PGError.Check },
+    .{ "23P01", PGError.Exclusion },
     .{ "42000", PGError.Syntax },
     .{ "42601", PGError.Syntax },
     // E.g. text input does not match any enum states
@@ -71,6 +72,7 @@ pub const PGError = error{
     ForeignKey,
     Unique,
     Check,
+    Exclusion,
     Syntax,
     InvalidTextRepresentation,
     // anyerror, i.e. not a PGError.
@@ -90,6 +92,14 @@ pub fn constraintViolation(err: anyerror, conn: *Conn) ?[]const u8 {
     const pge = conn.err orelse return null;
     if (!std.mem.startsWith(u8, pge.code, "23")) return null;
     return pge.constraint;
+}
+
+/// Returns whether a database error names the given constraint.
+pub fn isConstraintViolation(err: anyerror, conn: *Conn, name: []const u8) bool {
+    if (constraintViolation(err, conn)) |constraint| {
+        return eql(u8, constraint, name);
+    }
+    return false;
 }
 
 pub fn refineError(err: anyerror, conn: *Conn) PGError {
