@@ -57,24 +57,37 @@ pub fn newListener() !Listener {
 
 var err_map = std.StaticStringMap(PGError).initComptime(.{
     .{ "23001", PGError.Restrict },
+    .{ "23502", PGError.NotNull },
     .{ "23503", PGError.ForeignKey },
     .{ "23505", PGError.Unique },
     .{ "23514", PGError.Check },
     .{ "23P01", PGError.Exclusion },
-    .{ "42000", PGError.Syntax },
     .{ "42601", PGError.Syntax },
     // E.g. text input does not match any enum states
     .{ "22P02", PGError.InvalidTextRepresentation },
 });
 
+const err_class_map = std.StaticStringMap(PGError).initComptime(.{
+    .{ "22", PGError.DataException },
+    .{ "23", PGError.IntegrityConstraintViolation },
+    .{ "42", PGError.SyntaxOrAccessRuleViolation },
+});
+
 pub const PGError = error{
     Restrict,
+    NotNull,
     ForeignKey,
     Unique,
     Check,
     Exclusion,
     Syntax,
     InvalidTextRepresentation,
+    /// Class 22 errors
+    DataException,
+    /// Class 23 errors
+    IntegrityConstraintViolation,
+    /// Class 42 errors
+    SyntaxOrAccessRuleViolation,
     // anyerror, i.e. not a PGError.
     Any,
 };
@@ -84,13 +97,14 @@ fn strEquals(s1: []const u8, s2: []const u8) bool {
 }
 
 pub fn isIntegrityConstraintViolation(err: anyerror, conn: *Conn) bool {
-    return constraintViolation(err, conn) != null;
+    if (err != error.PG) return false;
+    const pge = conn.err orelse return false;
+    return errorClass(pge.code) == PGError.IntegrityConstraintViolation;
 }
 
 pub fn constraintViolation(err: anyerror, conn: *Conn) ?[]const u8 {
-    if (err != error.PG) return null;
+    if (!isIntegrityConstraintViolation(err, conn)) return null;
     const pge = conn.err orelse return null;
-    if (!std.mem.startsWith(u8, pge.code, "23")) return null;
     return pge.constraint;
 }
 
@@ -105,7 +119,13 @@ pub fn isConstraintViolation(err: anyerror, conn: *Conn, name: []const u8) bool 
 pub fn refineError(err: anyerror, conn: *Conn) PGError {
     if (err != error.PG) return PGError.Any;
     const pge = conn.err orelse return PGError.Any;
-    return err_map.get(pge.code) orelse PGError.Any;
+    if (err_map.get(pge.code)) |refined| return refined;
+    return errorClass(pge.code);
+}
+
+fn errorClass(code: []const u8) PGError {
+    if (code.len != 5) return PGError.Any;
+    return err_class_map.get(code[0..2]) orelse PGError.Any;
 }
 
 pub fn logError(err: anyerror, conn: *Conn) PGError {
