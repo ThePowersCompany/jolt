@@ -117,18 +117,15 @@ pub fn Optional(comptime T: type) type {
             }
         }
 
-        pub fn fromPgzRow(
-            value: pg.Result.State.Value,
-            oid: i32,
-        ) !Self {
-            if (value.is_null) {
+        pub fn fromPgzCell(cell: pg.PgzCell) !Self {
+            if (cell.value.is_null) {
                 const info = @typeInfo(T);
                 if (info == .optional) {
                     return .{ .value = null };
                 }
                 return .not_provided;
             }
-            return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), value.data, oid) };
+            return .{ .value = try pg.types.decodeScalar(.safe, Unwrap(T), cell.value.data, cell.oid) };
         }
 
         pub fn pgzMoveOwner(self: Self, alloc: std.mem.Allocator) !Self {
@@ -231,9 +228,9 @@ test "Optional.to" {
     }
 }
 
-test "Optional.fromPgzRow" {
-    _ = Optional(i32).fromPgzRow(.{ .is_null = false, .data = "123" }, 0) catch {};
-    const o = try Optional(?i32).fromPgzRow(.{ .is_null = true, .data = "" }, 0);
+test "Optional.fromPgzCell" {
+    _ = Optional(i32).fromPgzCell(.{ .value = .{ .is_null = false, .data = "123" }, .oid = 0 }) catch {};
+    const o = try Optional(?i32).fromPgzCell(.{ .value = .{ .is_null = true, .data = "" }, .oid = 0 });
     try expect(o.value == null);
 }
 

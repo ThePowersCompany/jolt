@@ -42,11 +42,11 @@ pub fn Str(comptime T: type) type {
             return self.str;
         }
 
-        pub fn fromPgzRow(value: pg.Result.State.Value, _: i32) !Self {
-            if (value.is_null) return error.UnexpectedNull;
+        pub fn fromPgzCell(cell: pg.PgzCell) !Self {
+            if (cell.value.is_null) return error.UnexpectedNull;
             // Row decoding cannot allocate, the string is borrowed
             var buffer = std.heap.FixedBufferAllocator.init("");
-            return paramParse(buffer.allocator(), value.data) catch return error.InvalidType;
+            return paramParse(buffer.allocator(), cell.value.data) catch return error.InvalidType;
         }
 
         pub fn pgzMoveOwner(self: Self, alloc: Allocator) !Self {
@@ -94,30 +94,39 @@ test "pgzMoveOwner copies the string and preserves the parsed date" {
     try std.testing.expectEqualDeep(original.data, copy.data);
 }
 
-test "fromPgzRow accepts date text regardless of the column OID" {
-    const date = try DateStr.fromPgzRow(
-        .{ .is_null = false, .data = "2026-09-19" },
-        pg.types.Int32.oid.decimal,
-    );
+test "fromPgzCell accepts date text regardless of the column OID" {
+    const date = try DateStr.fromPgzCell(.{
+        .value = .{ .is_null = false, .data = "2026-09-19" },
+        .oid = pg.types.Int32.oid.decimal,
+    });
     try std.testing.expectEqualStrings("2026-09-19", date.str);
 }
 
-test "fromPgzRow rejects null and invalid date values" {
+test "fromPgzCell rejects null and invalid date values" {
     const oid = pg.types.String.oid.decimal;
 
     try std.testing.expectError(
         error.UnexpectedNull,
-        DateStr.fromPgzRow(.{ .is_null = true, .data = "" }, oid),
+        DateStr.fromPgzCell(.{
+            .value = .{ .is_null = true, .data = "" },
+            .oid = oid,
+        }),
     );
 
     try std.testing.expectError(
         error.InvalidType,
-        DateStr.fromPgzRow(.{ .is_null = false, .data = "invalid" }, oid),
+        DateStr.fromPgzCell(.{
+            .value = .{ .is_null = false, .data = "invalid" },
+            .oid = oid,
+        }),
     );
 
     try std.testing.expectError(
         error.InvalidType,
-        DateStr.fromPgzRow(.{ .is_null = false, .data = &.{ 0, 0, 0, 1 } }, oid),
+        DateStr.fromPgzCell(.{
+            .value = .{ .is_null = false, .data = &.{ 0, 0, 0, 1 } },
+            .oid = oid,
+        }),
     );
 }
 
@@ -133,12 +142,12 @@ test "date string input rejects year zero" {
     );
 }
 
-test "fromPgzRow preserves a datetime offset" {
+test "fromPgzCell preserves a datetime offset" {
     const timestamp = "2026-01-01T12:00:00-09:00";
-    const parsed = try DateTimeStr.fromPgzRow(
-        .{ .is_null = false, .data = timestamp },
-        pg.types.String.oid.decimal,
-    );
+    const parsed = try DateTimeStr.fromPgzCell(.{
+        .value = .{ .is_null = false, .data = timestamp },
+        .oid = pg.types.String.oid.decimal,
+    });
 
     try std.testing.expectEqualStrings(timestamp, parsed.str);
 }
